@@ -1,0 +1,17 @@
+// Mantel's build identity when nothing else is set: a placeholder bundle identifier, signed to run locally (an ad hoc
+// signature, no team). The hardened runtime comes from project.yml either way.
+//
+// To build under your own identity, copy Local.example.xcconfig to Local.xcconfig in this folder and fill it in.
+// Local.xcconfig is git-ignored, and what it sets overrides the values below.
+
+PRODUCT_BUNDLE_IDENTIFIER = com.example.mantel
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+// Under the hardened runtime, library validation refuses a library signed without a team, so a Debug build signed ad
+// hoc couldn't load Xcode's debug dylib (Mantel.debug.dylib) and would crash at launch: the code goes into the
+// executable instead. Signed with a certificate, Local.xcconfig can turn it back on (Xcode Previews use it).
+ENABLE_DEBUG_DYLIB = NO
+
+#include? "Local.xcconfig"

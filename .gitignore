@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Build output
+build/
+DerivedData/
+.build/
+.swiftpm/
+
+# The Xcode project is generated from project.yml by XcodeGen (`make generate`)
+*.xcodeproj/
+xcuserdata/
+
+# Your own build identity (see Config/Local.example.xcconfig)
+Config/Local.xcconfig

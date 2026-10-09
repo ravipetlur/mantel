@@ -1,0 +1,16 @@
+// Your own build identity. Copy this file to Local.xcconfig in this folder (it's git-ignored), uncomment the lines you
+// need and fill them in. Defaults.xcconfig includes it, so its values override the defaults.
+
+// A bundle identifier of your own, in reverse-DNS form. macOS keys Mantel's permissions and its preferences to it, so
+// keep it once you've chosen one.
+// PRODUCT_BUNDLE_IDENTIFIER = com.yourname.mantel
+
+// Sign with your Apple Development certificate. An ad hoc signature changes with every build, so macOS asks for
+// Accessibility and the other permissions again after each rebuild; a certificate keeps them. The team ID is the
+// certificate's Organizational Unit in Keychain Access, or Membership details at developer.apple.com.
+// CODE_SIGN_IDENTITY = Apple Development
+// DEVELOPMENT_TEAM = ABCDE12345
+
+// Signed with a certificate, Debug builds can use Xcode's debug dylib again (Xcode Previews use it). Leave it off for
+// an ad hoc signature: the hardened runtime refuses to load the dylib, and the app crashes at launch.
+// ENABLE_DEBUG_DYLIB = YES

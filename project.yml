@@ -1,0 +1,169 @@
+name: Mantel
+options:
+  deploymentTarget:
+    macOS: "27.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+# The bundle identifier and the signing identity come from Config/Defaults.xcconfig (com.example.mantel, signed to run
+# locally), overridden by Config/Local.xcconfig when it exists (git-ignored; see Config/Local.example.xcconfig).
+# They're left out of the settings below, which would override the files.
+configFiles:
+  Debug: Config/Defaults.xcconfig
+  Release: Config/Defaults.xcconfig
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "27.0"
+    ARCHS: arm64
+    # Another process running as the user can't inject code into Mantel and borrow its Accessibility and Screen
+    # Recording grants. Later versions add the entitlements a feature needs; none is needed yet.
+    ENABLE_HARDENED_RUNTIME: YES
+    # Xcode adds the runtime option only when it signs with a certificate, so an ad hoc signature (the defaults in
+    # Config/Defaults.xcconfig) asks for it here. With a certificate the option is given twice, which codesign accepts.
+    OTHER_CODE_SIGN_FLAGS: $(inherited) --options=runtime
+    # No get-task-allow, which Xcode otherwise adds to every build signed for development, Release included: it would
+    # let a debugger running as the user attach and inject all the same. Every build holds the same grants, so none has
+    # it. Set YES locally to debug from Xcode.
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    DEAD_CODE_STRIPPING: YES
+packages:
+  MantelKit:
+    path: MantelKit
+targets:
+  Mantel:
+    type: application
+    platform: macOS
+    sources:
+      - path: Mantel
+    info:
+      path: Mantel/Info.plist
+      properties:
+        CFBundleDisplayName: Mantel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: Copyright © The Mantel Authors. Apache License 2.0.
+    # None yet: the file is empty but still signed into the app, and each later version adds here the entitlement its
+    # feature needs.
+    entitlements:
+      path: Mantel/Mantel.entitlements
+      properties: {}
+    settings:
+      base:
+        PRODUCT_NAME: Mantel
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - package: MantelKit
+        product: MKCore
+      - package: MantelKit
+        product: MKCommands
+      - package: MantelKit
+        product: MKMenuBar
+      # The command-line tool goes into the app at Contents/Helpers/mantel, signed again as it is copied (keeping the
+      # identifier it was built with), and the app only lets a program in over the control socket that is signed as this
+      # tool is (see `PeerPolicy`). Not in Contents/MacOS: the volume is not case-sensitive, so `mantel` there would
+      # replace the app's own executable, `Mantel`.
+      - target: MantelCLI
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
+      # The permission checker reads the state of Calendars, Location, Bluetooth and Microphone, which needs their
+      # frameworks. Only the app links them: the package reads no system state.
+      - sdk: AVFoundation.framework
+      # Global hotkeys (`RegisterEventHotKey`) and the names of keys (`UCKeyTranslate`) are Carbon's.
+      - sdk: Carbon.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: CoreLocation.framework
+      - sdk: EventKit.framework
+  # The `mantel` command-line tool. It sends a command to the running app and prints the answer.
+  #
+  # The target isn't called `mantel`: the volume is not case-sensitive, so Xcode would give it the same build folders
+  # and module file as the app's `Mantel` target, and the two would overwrite each other's intermediate files. The
+  # program is still called `mantel` (PRODUCT_NAME).
+  MantelCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Tools/mantel
+    # A tool has no bundle, so the identifier it is signed with has to come from an Info.plist section linked into the
+    # program itself (CREATE_INFOPLIST_SECTION_IN_BINARY). It is the app's identifier with `.cli` after it, which is the
+    # identifier the app accepts.
+    info:
+      path: Tools/mantel/Info.plist
+      properties:
+        CFBundleName: mantel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+    settings:
+      base:
+        PRODUCT_NAME: mantel
+        PRODUCT_MODULE_NAME: MantelCLI
+        PRODUCT_BUNDLE_IDENTIFIER: $(PRODUCT_BUNDLE_IDENTIFIER).cli
+        GENERATE_INFOPLIST_FILE: NO
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: MantelKit
+        product: MKCommands
+      - package: MantelKit
+        product: MKCore
+  # A tiny menu-bar-only app with two status items, for the probes to hide, show and move instead of the person's own apps (`make
+  # install-fixtures` puts it in /Applications, which is where the system honours an allowlist). Debug only: it is not in the
+  # Mantel scheme, nothing embeds it, and its own scheme is Debug for every action, so no Release build makes one.
+  #
+  # Its name differs from Mantel's by more than case, and so do its product and build folders.
+  MantelTestItem:
+    type: application
+    platform: macOS
+    sources:
+      - path: TestFixtures/MantelTestItem
+    info:
+      path: TestFixtures/MantelTestItem/Info.plist
+      properties:
+        CFBundleDisplayName: MantelTestItem
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSHumanReadableCopyright: Copyright © The Mantel Authors. Apache License 2.0.
+    settings:
+      base:
+        PRODUCT_NAME: MantelTestItem
+        # Mantel's identifier with `.testitem` after it: the suffix is how a probe knows it may touch the app.
+        PRODUCT_BUNDLE_IDENTIFIER: $(PRODUCT_BUNDLE_IDENTIFIER).testitem
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+schemes:
+  Mantel:
+    build:
+      targets:
+        Mantel: all
+    run:
+      config: Debug
+  MantelTestItem:
+    build:
+      targets:
+        MantelTestItem: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Debug
+    analyze:
+      config: Debug
+    archive:
+      config: Debug
