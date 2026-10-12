@@ -3,13 +3,22 @@ import Testing
 
 @testable import MKCore
 
-/// What the keyboard layout would say for a few keys.
-private struct FakeTranslator: KeyTranslating {
-    var characters: [UInt16: String] = [KeyCode.k: "k", KeyCode.a: "a", 18: "1"]
+/// What the keyboard layout would say for a few keys. It notes the options it was asked with.
+private final class FakeTranslator: KeyTranslating {
+    var characters: [UInt16: String]
+    private(set) var optionsAsked: [KeyTranslationOptions] = []
 
-    func character(for keyCode: UInt16) -> String? { characters[keyCode] }
+    init(characters: [UInt16: String] = [KeyCode.k: "k", KeyCode.a: "a", 18: "1"]) {
+        self.characters = characters
+    }
+
+    func character(for keyCode: UInt16, options: KeyTranslationOptions) -> String? {
+        optionsAsked.append(options)
+        return characters[keyCode]
+    }
 }
 
+@MainActor
 @Suite("KeyNames")
 struct KeyNamesTests {
     private func display(_ keyCode: UInt16, _ modifiers: ModifierSet, translator: some KeyTranslating = FakeTranslator()) -> String {
@@ -93,6 +102,25 @@ struct KeyNamesTests {
         let nothing = FakeTranslator(characters: [200: "", 201: "\u{7}"])
         #expect(display(200, .command, translator: nothing) == "⌘Key 200")
         #expect(display(201, .command, translator: nothing) == "⌘Key 201")
+    }
+
+    @Test func theLayoutIsAskedWithTheDeadKeyMaskNotTheBitsNumber() {
+        // `UCKeyTranslate`'s options are a mask. The bit that means "no dead keys" is bit 0, so the mask is 1, and passing the
+        // bit's number (0) asks for nothing: a dead key would then print nothing, or wait for a second key.
+        let translator = FakeTranslator()
+        #expect(display(KeyCode.k, .command, translator: translator) == "⌘K")
+        #expect(display(KeyCode.a, .command, translator: translator) == "⌘A")
+        #expect(translator.optionsAsked.count == 2)
+        for options in translator.optionsAsked {
+            #expect(options == .noDeadKeys)
+            #expect(options.rawValue == 1, "the mask 1 << 0")
+            #expect(options.rawValue != 0, "not the number of the bit")
+        }
+        // The keys that are named from a table never ask the layout.
+        let asked = translator.optionsAsked.count
+        _ = display(KeyCode.space, .command, translator: translator)
+        _ = display(KeyCode.f5, [], translator: translator)
+        #expect(translator.optionsAsked.count == asked)
     }
 
     @Test func glyphsAloneAreOrderedAndLeaveOutFn() {

@@ -11,6 +11,8 @@ import Synchronization
 ///   display (`AXWindows`), and the children of a window are the slots.
 /// - **Each app with a bundle ID** has its items listed under `AXExtrasMenuBar`. An app that doesn't answer in time is
 ///   reported as `timedOut` with no items, and isn't asked again for 30 seconds, so that one hung app doesn't slow every read.
+///   A read of one item's own attributes that times out is not hidden: it is counted in `AppExtras.itemTimeouts`, and three
+///   of them in one read count as a timeout of the app, where the reading of its items stops (`AppExtrasReader`).
 /// - **Who a slot belongs to** is told from its identifier (it holds the app's bundle ID) or, failing that, from an item
 ///   of an app that has the same frame.
 /// - **The « chevron** is told structurally: a slot whose subrole is a menu extra's, with no identifier and no owner, that
@@ -18,8 +20,6 @@ import Synchronization
 ///
 /// The read is blocking Accessibility calls, so it runs off the main actor, with at most eight apps asked at once.
 public struct MenuBarReader: Sendable {
-    public typealias RunningApp = (pid: pid_t, bundleID: String?, name: String?)
-
     public static let menuBarAgentBundleID = "com.apple.MenuBarAgent"
     /// How long an app that timed out is left alone.
     static let skipDuration: TimeInterval = 30
@@ -34,11 +34,17 @@ public struct MenuBarReader: Sendable {
     private let clock: any Clock
     private let skipped = SkippedApps()
 
-    public init(ax: any AXReading, runningApps: @escaping @Sendable () -> [(pid: pid_t, bundleID: String?, name: String?)],
-                clock: any Clock = SystemClock()) {
+    /// - Parameter runningApps: the apps to ask: `RunningAppsSource.regular`, which leaves out the background-only ones.
+    public init(ax: any AXReading, runningApps: @escaping @Sendable () -> [RunningApp], clock: any Clock = SystemClock()) {
         self.ax = ax
         self.runningApps = runningApps
         self.clock = clock
+    }
+
+    /// The frames of the menus of the app with this process ID (its `AXMenuBar`'s children), in CoreGraphics global points: empty when it has
+    /// none or doesn't answer in time.
+    public func menuFrames(ofPID pid: pid_t) async -> [CGRect] {
+        await AgentWindowReader(ax: ax).menuFrames(pid: pid)
     }
 
     // MARK: Snapshot
@@ -71,6 +77,39 @@ public struct MenuBarReader: Sendable {
                              agentResult: agentResult, apps: [], notTrusted: false)
     }
 
+    /// The frames of the status items one app lists in its own extras menu bar, in its order (nil for an item with no frame); nil
+    /// when the app has no extras menu bar, or doesn't answer. It asks that app and nobody else, and not MenuBarAgent, whose
+    /// windows take about half a second to read: it is what a poll that times a change in one app's items reads.
+    public func extrasFrames(ofPID pid: pid_t) -> [CGRect?]? {
+        let root = ax.application(pid: pid)
+        guard case .elements(let bars)? = try? ax.attribute(AXName.extrasMenuBar, of: root), let bar = bars.first,
+              let children = try? ax.children(of: bar), !children.isEmpty else { return nil }
+        return children.map { frame(of: $0) }
+    }
+
+    /// What each of MenuBarAgent's windows says of itself: its frame, its window-level attributes and how many slots it has. Nothing
+    /// is read of the slots but how many there are.
+    @concurrent
+    public func agentWindowDetails() async -> [AgentWindowDetail] {
+        guard let agent = runningApps().first(where: { $0.bundleID == Self.menuBarAgentBundleID }) else { return [] }
+        let root = ax.application(pid: agent.pid)
+        guard case .elements(let windows)? = try? ax.attribute(AXName.windows, of: root) else { return [] }
+        let named = [AXName.role, AXName.subrole, AXName.main, AXName.focused, AXName.identifier]
+        return windows.map { window in
+            var attributes: [String: JSONValue] = [:]
+            for name in Set(named).union((try? ax.attributeNames(of: window)) ?? []).sorted() {
+                switch try? ax.attribute(name, of: window) {
+                case .bool(let flag)?: attributes[name] = .bool(flag)
+                case .string(let text)? where named.contains(name): attributes[name] = .string(text)
+                case .number(let number)? where named.contains(name): attributes[name] = .number(number)
+                default: break
+                }
+            }
+            return AgentWindowDetail(frame: frame(of: window) ?? .zero, attributes: attributes,
+                                     slotCount: ((try? ax.children(of: window)) ?? []).count)
+        }
+    }
+
     private static func assemble(capturedAt: Date, layout: DisplayLayout, running: [RunningApp], agentIsRunning: Bool,
                                  agentResult: AgentRead, apps: [AppExtras], notTrusted: Bool) -> MenuBarSnapshot {
         var problems: [String] = []
@@ -89,12 +128,12 @@ public struct MenuBarReader: Sendable {
 
     /// The apps that have status items (or timed out), in the order they came, and whether Accessibility was refused.
     private func readExtras(of apps: [RunningApp], now: Date) async -> (apps: [AppExtras], notTrusted: Bool) {
-        let results = await Self.mapConcurrently(apps, limit: Self.concurrency) { app -> ExtrasResult in
+        let results = await ConcurrentMap.map(apps, limit: Self.concurrency) { app -> ExtrasResult in
             if skipped.isSkipped(app.pid, at: now) {
                 return .timedOut(app)
             }
             let result = readExtras(of: app)
-            if case .timedOut = result {
+            if result.hasTimedOut {
                 skipped.skip(app.pid, until: now.addingTimeInterval(Self.skipDuration))
             }
             return result
@@ -118,27 +157,23 @@ public struct MenuBarReader: Sendable {
         case timedOut(RunningApp)
         case notTrusted
         case none
+
+        /// The app didn't answer in time: its list didn't come, or too many of its items' reads timed out.
+        var hasTimedOut: Bool {
+            switch self {
+            case .timedOut: true
+            case .items(let extras): extras.timedOut
+            case .notTrusted, .none: false
+            }
+        }
     }
 
     private func readExtras(of app: RunningApp) -> ExtrasResult {
-        let root = ax.application(pid: app.pid)
-        do {
-            guard case .elements(let bars) = try ax.attribute(AXName.extrasMenuBar, of: root), let bar = bars.first else {
-                return .none
-            }
-            let children = try ax.children(of: bar)
-            guard !children.isEmpty else { return .none }
-            let items = children.enumerated().map { index, child in
-                ExtraItem(index: index, frame: frame(of: child), identifier: string(AXName.identifier, of: child),
-                          title: string(AXName.title, of: child), description: string(AXName.description, of: child))
-            }
-            return .items(AppExtras(pid: app.pid, bundleID: app.bundleID, name: app.name, items: items, timedOut: false))
-        } catch {
-            switch error {
-            case .timeout: return .timedOut(app)
-            case .notTrusted: return .notTrusted
-            case .noValue, .failure: return .none
-            }
+        switch AppExtrasReader(ax: ax).read(app) {
+        case .items(let extras): .items(extras)
+        case .timedOut: .timedOut(app)
+        case .notTrusted: .notTrusted
+        case .noExtras: .none
         }
     }
 
@@ -279,32 +314,6 @@ public struct MenuBarReader: Sendable {
         guard case .point(let origin)? = try? ax.attribute(AXName.position, of: element),
               case .size(let size)? = try? ax.attribute(AXName.size, of: element) else { return nil }
         return CGRect(origin: origin, size: size)
-    }
-
-    // MARK: Running things at once
-
-    /// `transform` for each item, at most `limit` at a time, results in the order of the items. The work blocks (it is
-    /// Accessibility calls), so the limit keeps it from taking every thread the system has.
-    private static func mapConcurrently<Item: Sendable, Result: Sendable>(
-        _ items: [Item], limit: Int, _ transform: @escaping @Sendable (Item) -> Result
-    ) async -> [Result] {
-        await withTaskGroup(of: (Int, Result).self) { group in
-            var results: [Result?] = Array(repeating: nil, count: items.count)
-            var next = 0
-            func addNext() {
-                guard next < items.count else { return }
-                let index = next
-                let item = items[index]
-                next += 1
-                group.addTask { (index, transform(item)) }
-            }
-            for _ in 0..<min(limit, items.count) { addNext() }
-            while let (index, result) = await group.next() {
-                results[index] = result
-                addNext()
-            }
-            return results.compactMap { $0 }
-        }
     }
 }
 

@@ -1,4 +1,5 @@
 import AppKit
+import MKCommands
 import MKCore
 import SwiftUI
 
@@ -19,8 +20,8 @@ final class HotkeysModel {
     private(set) var bindings: [HotkeyID: KeyCombo]
     private(set) var failures: [HotkeyID: HotkeyRegistrationError]
     private(set) var systemShortcuts: [SymbolicHotkey] = []
-    /// The actions whose last recorded shortcut was refused for want of a modifier, so that the reason stays under the field.
-    private var refused: Set<HotkeyID> = []
+    /// The actions whose last recorded shortcut wasn't kept, with why, so that the reason stays under the field.
+    private var refused: [HotkeyID: String] = [:]
     private let translator = LiveKeyTranslator()
 
     init(coordinator: AppCoordinator) {
@@ -36,6 +37,9 @@ final class HotkeysModel {
         systemShortcuts = SystemShortcuts.read()
     }
 
+    /// The Settings window, which the recorder's field is in.
+    var settingsWindow: NSWindow? { coordinator.settingsNSWindow }
+
     func display(_ combo: KeyCombo) -> String {
         KeyNames.display(combo, translator: translator)
     }
@@ -46,22 +50,39 @@ final class HotkeysModel {
     func record(_ combo: KeyCombo?, for id: HotkeyID) {
         defer { refresh() }
         guard let combo = combo?.withoutFunction else {
-            refused.remove(id)
-            coordinator.setHotkey(nil, for: id)
+            note(coordinator.setHotkey(nil, for: id), for: id)
             return
         }
         let clashes = ClashDetector.clashes(for: combo, assigning: id, mantel: bindings, system: systemShortcuts)
         if clashes.contains(where: \.preventsSaving) {
-            refused.insert(id)
+            refused[id] = HotkeyClash.noModifier.message(actionTitle: HotkeyAction.title(for:))
             return
         }
-        refused.remove(id)
-        coordinator.setHotkey(combo, for: id)
+        note(coordinator.setHotkey(combo, for: id), for: id)
     }
 
-    /// Whether a shortcut is being recorded, which puts every hotkey aside until it is done.
-    func setListening(_ listening: Bool) {
-        coordinator.setHotkeysSuspended(listening)
+    /// Keeps the reason a shortcut wasn't saved; one that was saved clears it. (A shortcut macOS won't register is saved, and
+    /// its reason is `failures`'s.)
+    private func note(_ outcome: HotkeySetOutcome, for id: HotkeyID) {
+        switch outcome {
+        case .saved, .savedButNotRegistered: refused[id] = nil
+        case .notSaved(let reason): refused[id] = reason
+        }
+    }
+
+    /// Starting a recording brings Mantel to the front with Settings the key window, so that the keys that follow are heard (a recorder
+    /// only hears the active app's), also when it was started while another app was in front. That is the whole sequence of opening
+    /// Settings again (`WindowShowing`), not a check that does nothing when Mantel is active: on the next turn of the main queue Mantel is
+    /// asked to become active and the window is made key and ordered front, all of which is harmless when they already are, and during a
+    /// takeover it counts as the person using the window.
+    func bringForwardForRecording() {
+        coordinator.openSettings(.hotkeys)
+    }
+
+    /// Whether the hotkeys are put aside, which they are while a recording listens, so that a key that is already a hotkey is heard and
+    /// doesn't act. (The recorder says so only once Mantel is the active app: `RecordingStart`.)
+    func setHotkeysAside(_ aside: Bool) {
+        coordinator.setHotkeysSuspended(aside)
     }
 
     /// What is under `id`'s field: the reason a recorded shortcut was refused, then each clash of the one it has, then
@@ -74,8 +95,8 @@ final class HotkeysModel {
             if seen.insert(line).inserted { list.append(line) }
         }
 
-        if refused.contains(id) {
-            add(HotkeyClash.noModifier.message(actionTitle: HotkeyAction.title(for:)), to: &lines)
+        if let reason = refused[id] {
+            add(reason, to: &lines)
         }
         let clashes = bindings[id].map {
             ClashDetector.clashes(for: $0, assigning: id, mantel: bindings, system: systemShortcuts)
@@ -110,11 +131,18 @@ struct HotkeysPane: View {
         Form {
             Section {
                 ForEach(HotkeyAction.all) { action in
-                    LabeledContent(action.title) {
+                    // Not a `LabeledContent`: it links the title to the content, and SwiftUI's accessibility then never finishes resolving
+                    // a field that is recording (a stack overflow when an assistive tool reads the window). A title and what it names, side
+                    // by side, look the same.
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(action.title)
+                        Spacer(minLength: 12)
                         VStack(alignment: .trailing, spacing: 4) {
                             HotkeyRecorder(title: action.title, combo: model.bindings[action.id], display: model.display,
                                            onRecord: { model.record($0, for: action.id) },
-                                           onListeningChange: model.setListening)
+                                           bringForward: model.bringForwardForRecording,
+                                           onHotkeysAside: model.setHotkeysAside,
+                                           window: { model.settingsWindow })
                             ForEach(model.warnings(for: action.id)) { warning in
                                 Text(warning.text)
                                     .font(.caption)

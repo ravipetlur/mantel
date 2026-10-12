@@ -36,6 +36,78 @@ private final class ClosureRestorer: JournalRestoring {
     }
 }
 
+/// A restorer whose first restore cancels the replay (as the cap does), and that notes what it was asked and what it restored.
+private final class CancellingRestorer: JournalRestoring {
+    private let log = Mutex<(restored: [String], asked: [String])>(([], []))
+
+    var restored: [String] { log.withLock { $0.restored } }
+    var asked: [String] { log.withLock { $0.asked } }
+
+    func restore(_ entry: JournalEntry) async throws {
+        log.withLock { $0.restored.append(Journal.key(for: entry)) }
+        withUnsafeCurrentTask { $0?.cancel() }
+    }
+
+    func stillHolds(_ written: WrittenValue, for entry: JournalEntry) async -> Bool? {
+        log.withLock { $0.asked.append(Journal.key(for: entry)) }
+        return true
+    }
+}
+
+/// What the system holds, in memory: a restorer that puts a place back the way the real one does, by an inverse edit on the
+/// value as it is when the replay gets there, and that can say whether the system still holds what Mantel wrote.
+private final class InMemoryPlist: JournalRestoring {
+    private let top: Mutex<PlistValue>
+
+    init(_ top: PlistValue) {
+        self.top = Mutex(top)
+    }
+
+    var value: PlistValue { top.withLock { $0 } }
+
+    /// What the person, or macOS, does to the setting meanwhile.
+    func change(_ value: PlistValue?, at path: PlistKeyPath) throws {
+        try top.withLock { $0 = try $0.setting(value, at: path) }
+    }
+
+    func restore(_ entry: JournalEntry) async throws {
+        guard case .plistPath(_, _, let path, let original, _, _) = entry else { throw RestoreError() }
+        try change(original, at: path)
+    }
+
+    func stillHolds(_ written: WrittenValue, for entry: JournalEntry) async -> Bool? {
+        guard case .plistPath(_, _, let path, _, _, _) = entry else { return nil }
+        let now = value.value(at: path)
+        switch written {
+        case .value(let value): return now == value
+        case .removed: return now == nil
+        }
+    }
+}
+
+/// A restorer with a fixed answer to "does the system still hold what Mantel wrote?", that notes what it was asked and what it
+/// restored.
+private final class AnsweringRestorer: JournalRestoring {
+    private let answer: Bool?
+    private let log = Mutex<(restored: [String], asked: [String])>(([], []))
+
+    init(stillHolds answer: Bool?) {
+        self.answer = answer
+    }
+
+    var restored: [String] { log.withLock { $0.restored } }
+    var asked: [String] { log.withLock { $0.asked } }
+
+    func restore(_ entry: JournalEntry) async throws {
+        log.withLock { $0.restored.append(Journal.key(for: entry)) }
+    }
+
+    func stillHolds(_ written: WrittenValue, for entry: JournalEntry) async -> Bool? {
+        log.withLock { $0.asked.append(Journal.key(for: entry)) }
+        return answer
+    }
+}
+
 private struct RestoreError: LocalizedError {
     var errorDescription: String? { "the file is locked" }
 }
@@ -368,6 +440,348 @@ struct JournalTests {
         #expect(try readFile().records.map(\.entry) == [failing, later])
     }
 
+    // MARK: Places inside a key
+
+    private let table = "/Users/example/Library/Group Containers/com.apple.MenuBar/Library/Preferences/com.apple.MenuBar.plist"
+
+    private func place(_ name: String, original: PlistValue?, in key: String = "Positions") -> JournalEntry {
+        .plistPath(filePath: table, key: key, path: [.key("table"), .key(name)], original: original, strategy: .cfPreferences, codec: .none)
+    }
+
+    @Test func pathEntryReplaysAsInverseEditOnFreshRead() async throws {
+        // Mantel changes one place of a table and records its original. Meanwhile the person (or macOS) changes another place.
+        let system = InMemoryPlist(.dictionary(["table": .dictionary(["a": .integer(1), "b": .integer(2)])]))
+        let journal = makeJournal()
+        try await journal.record(place("a", original: .integer(1)))
+        try system.change(.integer(9), at: [.key("table"), .key("a")])
+        try system.change(.integer(5), at: [.key("table"), .key("b")])
+        try system.change(.integer(7), at: [.key("table"), .key("c")])
+
+        let failures = await journal.replay(using: system)
+
+        #expect(failures.isEmpty)
+        #expect(system.value == .dictionary(["table": .dictionary(["a": .integer(1), "b": .integer(5), "c": .integer(7)])]),
+                "a is put back; b and c, which Mantel never changed, are as they are now")
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func pathEntryWithNoOriginalRemovesThePlace() async throws {
+        let system = InMemoryPlist(.dictionary(["table": .dictionary(["b": .integer(2)])]))
+        let journal = makeJournal()
+        try await journal.record(place("a", original: nil))
+        try system.change(.integer(9), at: [.key("table"), .key("a")])
+
+        #expect(await journal.replay(using: system).isEmpty)
+        #expect(system.value == .dictionary(["table": .dictionary(["b": .integer(2)])]))
+    }
+
+    @Test func firstOriginalWinsPerPath() async throws {
+        let journal = makeJournal()
+        try await journal.record(place("a", original: .integer(1)))
+        clock.advance(by: .seconds(30))
+        try await journal.record(place("a", original: .integer(9)))
+        // Another path of the same key is a record of its own.
+        try await journal.record(place("b", original: .integer(2)))
+        // The same name under another key, or in another file, is not the same place.
+        try await journal.record(place("a", original: .integer(3), in: "Other"))
+
+        let records = await journal.records()
+        #expect(records.map(\.entry) == [place("a", original: .integer(1)), place("b", original: .integer(2)),
+                                         place("a", original: .integer(3), in: "Other")])
+        #expect(records.first?.recordedAt == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(try readFile().records == records)
+    }
+
+    @Test func pathEntryUnderWholeKeyEntryIsNotRecorded() async throws {
+        let journal = makeJournal()
+        let whole = JournalEntry.plistKey(filePath: table, key: "Positions", original: .dictionary(["table": .dictionary([:])]),
+                                          strategy: .cfPreferences)
+        try await journal.record(whole)
+        try await journal.record(place("a", original: .integer(1)))
+        #expect(await journal.records().map(\.entry) == [whole], "the whole original covers it")
+        #expect(try readFile().records.map(\.entry) == [whole])
+
+        // Another key of the file is not covered.
+        try await journal.record(place("a", original: .integer(1), in: "Other"))
+        #expect(await journal.records().count == 2)
+    }
+
+    @Test func pathKeysAreOneSegmentPerStepWithNamesEscaped() {
+        func key(_ path: PlistKeyPath) -> String {
+            Journal.key(for: .plistPath(filePath: "/p.plist", key: "K", path: path, original: nil, strategy: .cfPreferences, codec: .none))
+        }
+        #expect(key([.key("a"), .index(3), .matching(key: "bundle", value: "com.example.app")])
+            == "plist:/p.plist#K/k:a/i:3/m:bundle=com.example.app")
+        #expect(key([.key("a/b"), .key("c=d"), .key("50%")]) == "plist:/p.plist#K/k:a%2Fb/k:c%3Dd/k:50%25")
+        #expect(key([.matching(key: "a=b", value: "c/d")]) == "plist:/p.plist#K/m:a%3Db=c%2Fd")
+        // "%2F" typed by hand is not "/": the escape is reversible.
+        #expect(key([.key("%2F")]) != key([.key("/")]))
+        // The original, the strategy and the codec are not part of what is changed.
+        let other = JournalEntry.plistPath(filePath: "/p.plist", key: "K", path: [.key("a")], original: .bool(true), strategy: .atomicFile,
+                                           codec: PlistBlobCodecID(rawValue: "other"))
+        #expect(Journal.key(for: other) == key([.key("a")]))
+    }
+
+    // MARK: What Mantel last wrote
+
+    @Test func whatWasWrittenIsKeptWithTheRecord() async throws {
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        #expect(await journal.records().first?.lastWritten == nil)
+
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        #expect(await journal.records().first?.lastWritten == .value(.integer(9)))
+        #expect(try readFile().records.first?.lastWritten == .value(.integer(9)), "on disk, not just in memory")
+        #expect(await Journal(file: file, clock: clock).records().first?.lastWritten == .value(.integer(9)))
+
+        try await journal.noteWritten(.removed, forKey: Journal.key(for: entry))
+        #expect(await journal.records().first?.lastWritten == .removed)
+        #expect(await journal.records().first?.recordedAt == Date(timeIntervalSince1970: 1_700_000_000), "when it was recorded doesn't change")
+
+        // A key that isn't recorded is nothing to note.
+        try await journal.noteWritten(.value(.bool(true)), forKey: "plist:/nowhere#nothing")
+        #expect(await journal.records().count == 1)
+    }
+
+    // MARK: What the change made
+
+    @Test func whatTheChangeCreatedIsKeptWithTheRecord() async throws {
+        let journal = makeJournal()
+        let entry = place("a", original: nil)
+        try await journal.record(entry, createdContainers: 2)
+        #expect(await journal.records().first?.createdContainers == 2)
+        #expect(try readFile().records.first?.createdContainers == 2, "on disk, not just in memory")
+        #expect(await Journal(file: file, clock: clock).records().first?.createdContainers == 2, "and after a restart")
+
+        // First wins here too: the second change found the container its first one made, and made none.
+        try await journal.record(entry, createdContainers: 0)
+        #expect(await journal.records().first?.createdContainers == 2)
+    }
+
+    @Test func aRecordThatCreatedNothingHasNoFieldForIt() async throws {
+        let journal = makeJournal()
+        try await journal.record(place("a", original: .integer(1)))
+        let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let record = try #require((object["records"] as? [[String: Any]])?.first)
+        #expect(record["createdContainers"] == nil, "a journal an earlier build wrote reads the same as one without any")
+        #expect(try readFile().records.first?.createdContainers == nil)
+    }
+
+    // MARK: Old records
+
+    private let eightDays = Duration.seconds(8 * 24 * 60 * 60)
+
+    @Test func staleEntryChangedSinceIsDropped() async throws {
+        // Mantel changed a place a week ago and was never quit properly. Since then someone else changed it again.
+        let system = InMemoryPlist(.dictionary(["table": .dictionary(["a": .integer(1)])]))
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        try system.change(.integer(9), at: [.key("table"), .key("a")])
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        try system.change(.integer(42), at: [.key("table"), .key("a")])
+        clock.advance(by: eightDays)
+
+        let failures = await journal.replay(using: system)
+
+        #expect(failures.isEmpty, "dropping it is not a failure")
+        #expect(system.value == .dictionary(["table": .dictionary(["a": .integer(42)])]), "their change is not undone")
+        #expect(await journal.records().isEmpty, "and the record is gone, not kept for the next launch")
+        #expect(try readFile().records.isEmpty)
+    }
+
+    @Test func staleEntryStillHoldingIsRestored() async throws {
+        let system = InMemoryPlist(.dictionary(["table": .dictionary(["a": .integer(1)])]))
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        try system.change(.integer(9), at: [.key("table"), .key("a")])
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        clock.advance(by: eightDays)
+
+        #expect(await journal.replay(using: system).isEmpty)
+        #expect(system.value == .dictionary(["table": .dictionary(["a": .integer(1)])]), "it still holds what Mantel wrote, so it is put back")
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test(arguments: [true, nil] as [Bool?])
+    func staleEntryThatStillHoldsOrCantBeToldIsRestored(answer: Bool?) async throws {
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        clock.advance(by: eightDays)
+
+        let restorer = AnsweringRestorer(stillHolds: answer)
+        #expect(await journal.replay(using: restorer).isEmpty)
+        #expect(restorer.asked == [Journal.key(for: entry)])
+        #expect(restorer.restored == [Journal.key(for: entry)])
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test(arguments: [Duration.seconds(60), .seconds(6 * 24 * 60 * 60), Journal.staleAge])
+    func freshEntryIsRestoredWhateverItHolds(age: Duration) async throws {
+        // Up to the seventh day, and on it, nothing is doubted: the system is not even asked.
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        clock.advance(by: age)
+
+        let restorer = AnsweringRestorer(stillHolds: false)
+        #expect(await journal.replay(using: restorer).isEmpty)
+        #expect(restorer.restored == [Journal.key(for: entry)])
+        #expect(restorer.asked.isEmpty)
+    }
+
+    @Test func staleEntryThatNeverKnewWhatWasWrittenIsRestored() async throws {
+        // A record an earlier version made, or one whose write didn't get as far as being noted.
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        clock.advance(by: eightDays)
+
+        let restorer = AnsweringRestorer(stillHolds: false)
+        #expect(await journal.replay(using: restorer).isEmpty)
+        #expect(restorer.restored == [Journal.key(for: entry)])
+        #expect(restorer.asked.isEmpty)
+    }
+
+    @Test func cancelledReplayStopsBeforeTheNextRecord() async throws {
+        // Two old records that know what Mantel wrote: each is checked against the system before it is put back. The cap cancels the
+        // replay while the first is being restored; the second is not even looked at, and the journal is not written again.
+        let journal = makeJournal()
+        let older = place("a", original: .integer(1))
+        let newer = place("b", original: .integer(2))
+        for entry in [older, newer] {
+            try await journal.record(entry)
+            try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        }
+        clock.advance(by: eightDays)
+
+        let restorer = CancellingRestorer()
+        let task = Task { await journal.replay(using: restorer) }
+        let failures = await task.value
+
+        #expect(restorer.asked == [Journal.key(for: newer)], "the system was read for the first record and not for the second")
+        #expect(restorer.restored == [Journal.key(for: newer)])
+        #expect(await journal.records().map(\.key) == [Journal.key(for: older)], "the second is still there for the next launch")
+        #expect(try readFile().records.map(\.key) == [Journal.key(for: older)])
+        #expect(failures.map(\.key) == [Journal.key(for: older)], "and the replay says it left it")
+    }
+
+    @Test func aReplayCancelledBeforeItStartsDropsAndRestoresNothing() async throws {
+        let journal = makeJournal()
+        let entry = place("a", original: .integer(1))
+        try await journal.record(entry)
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: entry))
+        clock.advance(by: eightDays)
+
+        let restorer = AnsweringRestorer(stillHolds: false)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await journal.replay(using: restorer)
+        }
+        let failures = await task.value
+
+        #expect(restorer.asked.isEmpty && restorer.restored.isEmpty)
+        #expect(failures.map(\.key) == [Journal.key(for: entry)])
+        #expect(await journal.records().count == 1, "an old record that would have been dropped is kept for a replay that can finish")
+    }
+
+    @Test func theStaleAgeIsSevenDays() {
+        #expect(Journal.staleAge == .seconds(604_800))
+    }
+
+    // MARK: What an earlier or a later build wrote
+
+    @Test func unknownCodecDecodesAndStays() async throws {
+        // A newer build recorded a place inside a value it keeps in a form this build doesn't know.
+        let future = PlistBlobCodecID(rawValue: "future-codec")
+        let entry = JournalEntry.plistPath(filePath: table, key: "Positions", path: [.matching(key: "bundle", value: "com.example.app"), .key("allowed")],
+                                           original: .bool(true), strategy: .cfPreferences, codec: future)
+        try await makeJournal().record(entry)
+
+        let reopened = Journal(file: file, clock: clock)
+        #expect(await reopened.records().map(\.entry) == [entry])
+        #expect(try readFile().records.map(\.entry) == [entry])
+        guard case .plistPath(_, _, _, _, _, let codec)? = await reopened.records().first?.entry else {
+            Issue.record("the entry is a place inside a key")
+            return
+        }
+        #expect(codec.rawValue == "future-codec")
+
+        // Its restorer has no such codec, so it can't put it back: it stays for a build that has.
+        let restorer = RecordingRestorer(failing: [Journal.key(for: entry)])
+        #expect(await reopened.replay(using: restorer).count == 1)
+        #expect(await reopened.records().map(\.entry) == [entry])
+    }
+
+    @Test func theCodecIsWrittenAsAPlainString() throws {
+        let data = try JSONCoding.encoder().encode([PlistBlobCodecID.none, PlistBlobCodecID(rawValue: "approvals")])
+        #expect(String(decoding: data, as: UTF8.self).contains("\"none\""))
+        #expect(try JSONCoding.decoder().decode([PlistBlobCodecID].self, from: data) == [.none, PlistBlobCodecID(rawValue: "approvals")])
+        #expect(PlistBlobCodecID.none.rawValue == "none")
+    }
+
+    @Test func m1JournalFileStillReads() async throws {
+        // A journal as the first version wrote it: whole-key and `defaults` records, and no `lastWritten` anywhere.
+        let json = """
+        {
+          "records" : [
+            {
+              "entry" : {
+                "plistKey" : {
+                  "filePath" : "/Users/example/Library/Group Containers/group.com.apple.controlcenter/approvals.plist",
+                  "key" : "trackedApplications",
+                  "original" : { "dictionary" : { "com.example.app" : { "bool" : true } } },
+                  "strategy" : "atomicFile"
+                }
+              },
+              "key" : "plist:/Users/example/Library/Group Containers/group.com.apple.controlcenter/approvals.plist#trackedApplications",
+              "recordedAt" : "2023-11-14T22:13:20.000Z"
+            },
+            {
+              "entry" : {
+                "defaultsKey" : {
+                  "currentHost" : true,
+                  "domain" : "NSGlobalDomain",
+                  "key" : "NSStatusItemSpacing"
+                }
+              },
+              "key" : "defaults:NSGlobalDomain#NSStatusItemSpacing#true",
+              "recordedAt" : "2023-11-14T22:14:00.000Z"
+            }
+          ]
+        }
+        """
+        try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: file)
+
+        let journal = makeJournal()
+        #expect(await journal.isUsable)
+        let records = await journal.records()
+        #expect(records.map(\.key) == [
+            "plist:\(approvals)#trackedApplications",
+            "defaults:NSGlobalDomain#NSStatusItemSpacing#true",
+        ])
+        #expect(records.map(\.entry) == [
+            .plistKey(filePath: approvals, key: "trackedApplications", original: .dictionary(["com.example.app": .bool(true)]), strategy: .atomicFile),
+            .defaultsKey(domain: "NSGlobalDomain", key: "NSStatusItemSpacing", currentHost: true, original: nil),
+        ])
+        #expect(records.allSatisfy { $0.lastWritten == nil })
+        #expect(records.first?.recordedAt == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(names(in: file.deletingLastPathComponent()) == ["journal.json"], "it wasn't set aside")
+
+        // And it goes on from there: a record added is written next to the old ones, which are as they were.
+        try await journal.record(place("a", original: nil))
+        let written = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any]
+        let objects = try #require(written?["records"] as? [[String: Any]])
+        #expect(objects.count == 3)
+        #expect(Set(objects[0].keys) == ["entry", "key", "recordedAt"], "no lastWritten where none is known")
+    }
+
     // MARK: Keys
 
     @Test func keysAreStable() {
@@ -416,6 +830,60 @@ struct JournalTests {
         // The journal works from there.
         try await journal.record(approval("a", original: nil))
         #expect(try readFile().records.count == 1)
+    }
+
+    @Test func unreadableJournalIsNeverOverwritten() async throws {
+        // A file that isn't a journal, in a folder that can't be written to: it can't be moved aside either.
+        let state = file.deletingLastPathComponent()
+        try fileManager.createDirectory(at: state, withIntermediateDirectories: true)
+        let bytes = Data("{ not a journal".utf8)
+        try bytes.write(to: file)
+        try fileManager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: state.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path) }
+        let journal = makeJournal()
+        // The folder can be written to again by the time something records: the file is still not to be replaced.
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path)
+
+        #expect(await journal.isUsable == false)
+        let expected = JournalError.unreadable(path: file.path(percentEncoded: false))
+        await #expect(throws: expected) { try await journal.record(approval("a", original: .integer(1))) }
+        await #expect(throws: expected) { try await journal.noteWritten(.removed, forKey: "plist:x#a") }
+        #expect(try Data(contentsOf: file) == bytes, "the bytes are as they were")
+        #expect(names(in: state) == ["journal.json"], "nothing was set aside, and nothing else was written")
+
+        // A replay restores nothing, and says why as its one failure.
+        let restorer = RecordingRestorer()
+        let failures = await journal.replay(using: restorer)
+        #expect(failures.count == 1)
+        #expect(failures.first?.message == "Mantel's journal at \(file.path(percentEncoded: false)) couldn't be read, so Mantel won't change system files. Move the file away and open Mantel again.")
+        #expect(restorer.restored.isEmpty)
+        #expect(try Data(contentsOf: file) == bytes)
+    }
+
+    @Test func aReplayWithACapOfAnUnreadableJournalReportsTheSameFailure() async throws {
+        let state = file.deletingLastPathComponent()
+        try fileManager.createDirectory(at: state, withIntermediateDirectories: true)
+        try Data("{ not a journal".utf8).write(to: file)
+        try fileManager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: state.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path) }
+        let journal = makeJournal()
+
+        let outcome = await journal.replay(using: RecordingRestorer(), cap: .seconds(2), clock: clock)
+
+        guard case .completed(let failures) = outcome else {
+            Issue.record("the replay should have ended at once, not at its cap: \(outcome)")
+            return
+        }
+        #expect(failures.count == 1)
+        #expect(failures.first?.message.hasPrefix("Mantel's journal at ") == true)
+    }
+
+    @Test func aJournalThatCouldBeSetAsideIsUsable() async throws {
+        try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{ nope".utf8).write(to: file)
+        let journal = makeJournal()
+        #expect(await journal.isUsable)
+        #expect(await makeJournal().isUsable, "and so is one that was never there")
     }
 
     @Test func aMissingJournalIsEmptyAndMakesNoFile() async {

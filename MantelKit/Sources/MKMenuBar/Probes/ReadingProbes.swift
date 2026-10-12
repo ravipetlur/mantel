@@ -5,15 +5,47 @@ import MKCommands
 import MKCore
 import UniformTypeIdentifiers
 
-/// `inventory`: everything the reader can see, with the raw tree under MenuBarAgent, saved whole beside the report.
+/// `inventory`: everything the reader can see, with the raw tree under MenuBarAgent, saved whole beside the report. It also says:
+/// - `spaceWindows`: for each of MenuBarAgent's windows, its frame, the names and values of its window-level attributes
+///   (`AXRole`, `AXSubrole`, `AXMain`, `AXFocused`, `AXIdentifier` and every attribute that holds a true or false) and how many slots
+///   it has, so that the window of the active Space can be told from the others;
+/// - `agentOnScreen`: the windows of MenuBarAgent's process that are on screen, by number, level, bounds and opacity;
+/// - `menuBarWindows`: every window on screen at the main menu's level or the status items' (24 and 25), with its owner's bundle ID
+///   and its bounds;
+/// - `systemModules`: every `com.apple.menuextra.*` identifier in the menu bar;
+/// - `frontMenuFrames`: how many menus the front app has, whose frames are in the snapshot file (`MenuBarSnapshot.frontMenuFrames`).
+///
+/// It only reads, and reads the window list for owners and levels, never for titles.
 enum InventoryProbe {
     static func run(_ context: ProbeContext, _ recorder: inout ProbeRecorder) async {
-        let snapshot = await context.snapshot(includeRawTree: true)
+        var snapshot = await context.snapshot(includeRawTree: true)
+        // Where the front app's menus are (frames only), so that a read can be replayed with the menus rule.
+        if let pid = context.platform.frontAppPID() {
+            snapshot = snapshot.withFrontMenuFrames(await context.reader.menuFrames(ofPID: pid))
+        }
+        recorder.measure("frontMenuFrames", snapshot.frontMenuFrames.count)
         recorder.measure("agentWindowCount", snapshot.agentWindows.count)
         recorder.measure("slotsPerWindow", .array(snapshot.agentWindows.map { .number(Double($0.slots.count)) }))
         recorder.measure("appsWithExtras", snapshot.apps.filter { !$0.items.isEmpty }.count)
         recorder.measure("timedOutApps", strings: snapshot.apps.filter(\.timedOut).map { $0.bundleID ?? "pid \($0.pid)" })
         for problem in snapshot.problems { recorder.note(problem) }
+
+        let details = await context.reader.agentWindowDetails()
+        recorder.measure("spaceWindows", .array(details.map { detail in
+            .object(["frame": NotchCoordinatesProbe.rect(detail.frame), "attributes": .object(detail.attributes),
+                     "slotCount": .number(Double(detail.slotCount))])
+        }))
+        let windows = context.platform.windowList.onScreenWindows()
+        recorder.measure("agentOnScreen", .array(windows.filter { $0.ownerBundleID == MenuBarReader.menuBarAgentBundleID }.map { window in
+            .object(["number": .number(Double(window.number)), "layer": .number(Double(window.layer)),
+                     "bounds": NotchCoordinatesProbe.rect(window.bounds), "alpha": .number(window.alpha)])
+        }))
+        recorder.measure("menuBarWindows", .array(windows.filter { $0.layer == WindowLevels.mainMenu || $0.layer == WindowLevels.statusBar }.map { window in
+            .object(["owner": window.ownerBundleID.map(JSONValue.string) ?? .null, "layer": .number(Double(window.layer)),
+                     "bounds": NotchCoordinatesProbe.rect(window.bounds)])
+        }))
+        let prefix = "com.apple.menuextra."
+        recorder.measure("systemModules", strings: Set(snapshot.allSlots.compactMap(\.identifier).filter { $0.hasPrefix(prefix) }).sorted())
 
         let name = "inventory-\(ProbeReport.timestamp(startedAt: context.startedAt))-snapshot"
         do {
@@ -117,22 +149,21 @@ enum CaptureProbe {
         let stamp = ProbeReport.timestamp(startedAt: context.startedAt)
         var captured = 0
         var cropCount = 0
+        let bars = snapshot.bars()
         for display in layout.displays {
-            let geometry: StripGeometry
-            do {
-                geometry = try StripGeometry.of(display, in: layout)
-            } catch {
-                recorder.note("\(display.name) reports no menu bar, so it was skipped.")
+            guard let bar = bars.first(where: { $0.displayUUID == display.uuid }),
+                  let geometry = try? StripGeometry.of(bar, display: display, layout: layout) else {
+                recorder.note("\(display.name) has no menu bar, so it was skipped.")
                 continue
             }
             do {
-                let image = try await context.platform.capture.capture(display: display, layout: layout)
+                let image = try await context.platform.capture.capture(bar: bar, display: display, layout: layout)
                 try save(image, as: "capture-\(stamp)-\(display.uuid)", in: context)
                 captured += 1
                 for slot in snapshot.allSlots {
                     guard let frame = slot.frame, !frame.isEmpty,
                           geometry.strip.contains(CGPoint(x: frame.midX, y: frame.midY)),
-                          let crop = StripCapture.crop(image, strip: geometry.strip, item: frame, scale: display.scale) else { continue }
+                          let crop = StripCapture.crop(image, bar: bar, item: frame, scale: display.scale) else { continue }
                     try save(crop, as: "crop-\(stamp)-\(cropCount)", in: context)
                     cropCount += 1
                 }

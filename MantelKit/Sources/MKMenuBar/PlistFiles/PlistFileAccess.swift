@@ -24,18 +24,31 @@ public enum PlistAccessError: Error, Equatable, LocalizedError {
     case backupFailed(file: String, reason: String)
     /// A journal entry this restorer doesn't restore (a `defaults` key, which a later version adds).
     case unsupportedEntry
+    /// The file is one of the two that macOS keeps for the menu bar, and macOS doesn't let apps replace those: they are only
+    /// changed through the preferences service. `file` is the file's name.
+    case atomicFileRefused(file: String)
+    /// The value is kept in a form (named by the text) that this Mantel has no codec for, so a place inside it can't be read or
+    /// put back.
+    case codecMissing(String)
+    /// A step of the path couldn't be taken.
+    case path(KeyPathError)
 
     public var errorDescription: String? {
         switch self {
         case .notADictionary: "The file isn't a property list with a dictionary in it."
         case .unreadable(let reason): "The file couldn't be read: \(reason)"
-        case .notRepresentable(let key): "The value of \"\(key)\" can't be saved and put back, so Mantel left it alone."
-        case .notPersisted(let key): "macOS didn't keep the change to \"\(key)\"."
-        case .disagree(let key): "macOS's preferences service and the file disagree about \(key), so nothing was changed."
-        case .serviceSeesNothing(let key):
-            "macOS's preferences service reports no value for \(key), but the file has one, so nothing was changed."
+        // These say "this setting", never the key's name: the sentence reaches Diagnostics, and a key is for the log (which has it).
+        case .notRepresentable: "A value in this setting can't be saved and put back, so Mantel left it alone."
+        case .notPersisted: "macOS didn't keep the change to this setting."
+        case .disagree: "macOS's preferences service and the file disagree about this setting, so nothing was changed."
+        case .serviceSeesNothing:
+            "macOS's preferences service reports no value for this setting, but the file has one, so nothing was changed."
         case .backupFailed(let file, let reason): "Mantel couldn't make a backup copy of \(file) first, so nothing was changed: \(reason)"
         case .unsupportedEntry: "Mantel can't put this kind of change back yet."
+        case .atomicFileRefused(let file):
+            "macOS doesn't let apps replace \(file), so Mantel only changes it through macOS's preferences service."
+        case .codecMissing(let codec): "This setting is kept in a form Mantel doesn't know (\(codec)), so Mantel left it alone."
+        case .path(let error): error.errorDescription
         }
     }
 }
@@ -65,14 +78,30 @@ struct PlistIO: Sendable {
     // MARK: The file itself
 
     /// The whole file as a dictionary of what a property list holds, so that writing one key back leaves every other key as it
-    /// was, whatever its type.
+    /// was, whatever its type. A file that can't be read, for whatever reason, throws `.unreadable`.
     static func readDictionary(_ url: URL) throws -> [String: Any] {
-        let data: Data
+        guard let data = try readBytes(url) else { throw PlistAccessError.unreadable("The file isn't there.") }
+        return try dictionary(from: data)
+    }
+
+    /// The file's bytes, or nil when the file isn't there: the read failing with `ENOENT`, and nothing else. A file that is
+    /// there and can't be read (no permission to it, or to the folder it is in) is `.unreadable`: taken for a file with no keys,
+    /// it would be written over, or put back as if it had never held anything.
+    static func readBytes(_ url: URL) throws -> Data? {
+        let descriptor = open(url.path(percentEncoded: false), O_RDONLY)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return nil }
+            throw PlistAccessError.unreadable(String(cString: strerror(errno)))
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         do {
-            data = try Data(contentsOf: url)
+            return try handle.readToEnd() ?? Data()
         } catch {
             throw PlistAccessError.unreadable(error.localizedDescription)
         }
+    }
+
+    private static func dictionary(from data: Data) throws -> [String: Any] {
         let object: Any
         do {
             object = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
@@ -85,8 +114,8 @@ struct PlistIO: Sendable {
 
     static func readFile(_ url: URL, key: String) throws -> PlistValue? {
         // A file that isn't there has no keys.
-        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return nil }
-        guard let raw = try readDictionary(url)[key] else { return nil }
+        guard let data = try readBytes(url) else { return nil }
+        guard let raw = try dictionary(from: data)[key] else { return nil }
         guard let value = PlistValue(propertyList: raw) else { throw PlistAccessError.notRepresentable(key: key) }
         return value
     }
@@ -94,8 +123,7 @@ struct PlistIO: Sendable {
     /// Reads the file, sets the key, and writes the whole dictionary as a binary plist, atomically. The file is macOS's, not
     /// Mantel's: it keeps the mode, owner, extended attributes and ACL it had, which Mantel's own private files don't need to.
     static func writeFile(_ value: PlistValue?, key: String, to url: URL) throws {
-        let exists = FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
-        var dictionary = exists ? try readDictionary(url) : [:]
+        var dictionary = try readBytes(url).map(dictionary(from:)) ?? [:]
         if let value {
             dictionary[key] = value.propertyList
         } else {
@@ -133,7 +161,8 @@ struct PlistIO: Sendable {
     }
 }
 
-/// Copies a file whole into the Backups folder, once per file for as long as the process lives.
+/// Copies a file whole into the Backups folder, once per file for as long as the process lives. After a copy, the folder keeps
+/// of the copies of that file the first one ever made, which is the person's original, and the four newest.
 ///
 /// Copies of `PlistFileAccess` share one ledger, and the app makes one `PlistFileAccess`, so "once" is once per run. A copy that
 /// couldn't be made isn't counted, so the next write tries again.
@@ -153,6 +182,7 @@ final class BackupLedger: Sendable {
                     let destination = AtomicFile.unusedURL(in: folder, base: "\(name)-\(AtomicFile.timestamp(for: date))",
                                                            pathExtension: "plist")
                     try AtomicFile.write(bytes, to: destination, synchronize: true)
+                    prune(copiesOf: name, in: folder)
                 } catch {
                     throw PlistAccessError.backupFailed(file: file.lastPathComponent, reason: error.localizedDescription)
                 }
@@ -162,16 +192,53 @@ final class BackupLedger: Sendable {
     }
 }
 
-/// Reads and changes top-level keys of plist files (the approvals file, the layout file), with the journal behind every
-/// change, so that a crash in the middle of one never leaves the person's menu bar altered.
+/// What Mantel last wrote at each place inside a key (by `Journal.key(for:)`), for as long as the process lives.
 ///
-/// - **`write`** first checks that the value it would keep as the original is the true one, then copies the file whole to the
+/// The preferences service takes a while to give a write to the file, and an undo takes the place's journal record away, with its note
+/// of what was written there. The next write to the place finds the service and the file in disagreement all the same, and this is
+/// what tells that the service's value is Mantel's own (the undo's), which the file hasn't caught up with, and not someone else's.
+/// Copies of `PlistFileAccess` share one ledger, as they share the backup ledger.
+final class WrittenLedger: Sendable {
+    private let written = Mutex<[String: WrittenValue]>([:])
+
+    func note(_ value: WrittenValue, forKey key: String) {
+        written.withLock { $0[key] = value }
+    }
+
+    func last(forKey key: String) -> WrittenValue? {
+        written.withLock { $0[key] }
+    }
+}
+
+extension BackupLedger {
+    /// Clears out the old copies. The copy just made is in place, so a failure here is only logged: it must not refuse the write
+    /// the copy was made for.
+    fileprivate func prune(copiesOf name: String, in folder: URL) {
+        do {
+            try BackupPruner.prune(in: folder, stem: name, pathExtension: "plist", keepOldest: 1, keepNewest: 4)
+        } catch {
+            Log.warning("plist", "old backup copies of \(name) couldn't be cleared out: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// Reads and changes top-level keys of plist files (the approvals file, the layout file), and places inside them, with the
+/// journal behind every change, so that a crash in the middle of one never leaves the person's menu bar altered.
+///
+/// - **`write(_ value:…)`** first checks that the value it would keep as the original is the true one, then copies the file whole to the
 ///   Backups folder (the first write to it in this run), then records the original in the journal (first original wins),
 ///   writes, reads the value afresh and compares. The journal comes before the change: if the journal can't record, because
 ///   it can't be written or because a replay is running (`JournalError.replayInProgress`), nothing is written. Anything that
 ///   makes the original doubtful, or the backup impossible, refuses the write before the journal is touched.
+/// - **`write(_ edits:…)`** changes places inside one top-level key, in the same order of steps, and puts back only those places
+///   (`undo(path:…)`, or the replay): what the person or macOS changed elsewhere in the key meanwhile is left alone. Before
+///   anything else it checks, for each place, that `cfprefsd` (the source of truth) and the file say the same; if they don't, it
+///   waits for them to (up to two seconds), and goes on only if what `cfprefsd` holds is what Mantel itself wrote last, which
+///   the file hasn't caught up with yet.
 /// - **Symlinks are resolved** before anything is written. An atomic replace onto a link would replace the link with a
 ///   regular file.
+/// - **`.atomicFile` is refused for the two files macOS keeps for the menu bar**: macOS doesn't let apps replace them. It stays
+///   for any other file, and for putting back what an earlier version recorded.
 /// - **A file that has a grant** (see `FileGrantStore`) is opened through it, for exactly as long as the reading or the
 ///   writing takes.
 public struct PlistFileAccess: Sendable {
@@ -180,21 +247,31 @@ public struct PlistFileAccess: Sendable {
     private let backups: URL
     private let clock: any Clock
     private let io: PlistIO
+    private let codecs: [PlistBlobCodecID: any PlistBlobCodec]
     private let backedUp = BackupLedger()
+    private let lastWritten = WrittenLedger()
+
+    /// How often, and how many times, `cfprefsd` and the file are looked at again while they disagree: 100 ms, for 2 s.
+    static let agreementInterval: Duration = .milliseconds(100)
+    static let agreementPolls = 20
 
     /// - Parameters:
     ///   - paths: where Mantel keeps its files; the copies made before a file's first change go to `paths.backups`.
     ///   - grants: a file one of them is for is opened through it.
-    public init(journal: Journal, paths: MantelPaths, grants: FileGrantStore? = nil) {
-        self.init(journal: journal, paths: paths, grants: grants, io: .system)
+    ///   - codecs: how to follow a path into a value kept as a blob, by the ID an entry names.
+    public init(journal: Journal, paths: MantelPaths, grants: FileGrantStore? = nil,
+                codecs: [PlistBlobCodecID: any PlistBlobCodec] = [:]) {
+        self.init(journal: journal, paths: paths, grants: grants, codecs: codecs, io: .system)
     }
 
-    init(journal: Journal, paths: MantelPaths, grants: FileGrantStore? = nil, io: PlistIO, clock: any Clock = SystemClock()) {
+    init(journal: Journal, paths: MantelPaths, grants: FileGrantStore? = nil, codecs: [PlistBlobCodecID: any PlistBlobCodec] = [:],
+         io: PlistIO, clock: any Clock = SystemClock()) {
         self.journal = journal
         self.grants = grants
         backups = paths.backups
         self.clock = clock
         self.io = io
+        self.codecs = codecs
     }
 
     /// The top-level keys of the file, with their values. A key whose value isn't a property list type of Mantel's is left
@@ -207,6 +284,17 @@ public struct PlistFileAccess: Sendable {
         return top
     }
 
+    /// The value at `path` inside the top-level `key`, as the preferences service (`cfprefsd`, the source of truth) holds it
+    /// now; nil when it isn't there. A `codec` other than `.none` is how the value of `key` is read for the path to be followed.
+    public func value(at path: PlistKeyPath, key: String, in url: URL, codec: PlistBlobCodecID = .none) async throws -> PlistValue? {
+        let target = url.resolvingSymlinksInPath()
+        let blobCodec = try blobCodec(for: codec)
+        let top = try await withFile(target) { [io] file in try io.read(file, key, .cfPreferences) }
+        return try Self.value(at: path, in: top, codec: blobCodec, key: key)
+    }
+
+    // MARK: Writing a whole key
+
     /// Journals the key's current value (first original wins), writes, re-reads, and checks the value on disk.
     ///
     /// Before anything is journaled or changed, inside the same grant: the original is checked (`originalValue`), and the file
@@ -214,12 +302,14 @@ public struct PlistFileAccess: Sendable {
     ///
     /// - Throws: `PlistAccessError.disagree`, `.serviceSeesNothing` or `.notRepresentable` when the original is doubtful, and
     ///   `.backupFailed` when the copy can't be made: nothing is journaled, written or backed up in the first case, and
-    ///   nothing is journaled or written in the second. `JournalError.replayInProgress` while a replay runs, and nothing is
-    ///   written. `PlistAccessError.notPersisted` when the value that was read back isn't the one written (the journal keeps
-    ///   the original, for the restore).
+    ///   nothing is journaled or written in the second. `PlistAccessError.atomicFileRefused` for `.atomicFile` on one of
+    ///   macOS's two files. `JournalError.replayInProgress` while a replay runs, and nothing is written.
+    ///   `PlistAccessError.notPersisted` when the value that was read back isn't the one written (the journal keeps the
+    ///   original, for the restore).
     public func write(_ value: PlistValue?, key: String, in url: URL, strategy: PlistWriteStrategy) async throws {
         let target = url.resolvingSymlinksInPath()
         let identity = target.path(percentEncoded: false)
+        try await refuseAtomicReplacement(of: target, strategy: strategy)
         let original = try await withFile(target) { [io, backups, ledger = backedUp, now = clock.now()] file in
             let original = try Self.originalValue(of: key, in: file, strategy: strategy, io: io)
             try ledger.backUpOnce(file, identity: identity, into: backups, at: now)
@@ -245,6 +335,151 @@ public struct PlistFileAccess: Sendable {
         return seen
     }
 
+    // MARK: Writing places inside a key
+
+    /// Changes places inside the top-level `key`, journaling the original of each (first original wins per place), writing the
+    /// key once, and reading it back through the strategy to check that every place holds what it was given.
+    ///
+    /// In this order, and the first step that fails stops the rest:
+    /// 1. `.atomicFile` on one of macOS's two files is refused (`atomicFileRefused`).
+    /// 2. The key is read through the strategy (for `cfPreferences`, `cfprefsd`, the source of truth), and decoded through the
+    ///    codec when there is one.
+    /// 3. For each place, `cfprefsd` and the file must say the same. If they don't, they are looked at again every 100 ms, up
+    ///    to 2 s (reading through `cfprefsd` synchronizes it with the file), and if they still don't, the write goes on only when
+    ///    what `cfprefsd` holds is what Mantel last wrote there (a write or an undo of this run, or what an earlier run noted in the
+    ///    record), which the file hasn't caught up with; otherwise `disagree`, with nothing backed up or journaled.
+    /// 4. The file is copied into Backups, once per run (and old copies cleared out).
+    /// 5. The original of each place is journaled.
+    /// 6. The edits are applied to the key as it is now, and it is written once.
+    /// 7. It is read back, and each place must hold its new value (`notPersisted`).
+    /// 8. What was written is noted in the journal, for each place.
+    ///
+    /// An edit that can't be applied (`PlistAccessError.path`, `.codecMissing`) is found before step 4; a path that has a `matchingPath`
+    /// inside the way of another is refused before step 1 (`KeyPathError.nestedMatchingPath`).
+    public func write(_ edits: [PathEdit], key: String, in url: URL, strategy: PlistWriteStrategy = .cfPreferences,
+                      codec codecID: PlistBlobCodecID = .none) async throws {
+        guard !edits.isEmpty else { return }
+        guard edits.allSatisfy({ !$0.path.isEmpty }) else { throw PlistAccessError.path(.noMatch(step: 0)) }
+        // A step that finds an entry inside the way another one reads has no text for the journal to be keyed by: refused here, before
+        // the first record of the call is made.
+        for edit in edits {
+            if let step = edit.path.nestedMatchingPathStep { throw PlistAccessError.path(.nestedMatchingPath(step: step)) }
+        }
+        let target = url.resolvingSymlinksInPath()
+        let identity = target.path(percentEncoded: false)
+        try await refuseAtomicReplacement(of: target, strategy: strategy)
+        let blobCodec = try blobCodec(for: codecID)
+
+        let seen = try await agreedTopLevel(key: key, edits: edits, in: target, strategy: strategy, identity: identity,
+                                            codecID: codecID, blobCodec: blobCodec)
+        // Whether the edits can be applied at all, before anything is backed up or journaled: a record for a change that can't be
+        // made would only ever fail to be put back.
+        _ = try Self.applying(edits, to: seen, codec: blobCodec, key: key)
+
+        try await withFile(target) { [backups, ledger = backedUp, now = clock.now()] file in
+            try ledger.backUpOnce(file, identity: identity, into: backups, at: now)
+        }
+
+        let planned = try edits.map { edit -> (entry: JournalEntry, created: Int) in
+            let original = try Self.value(at: edit.path, in: seen, codec: blobCodec, key: key)
+            let entry = JournalEntry.plistPath(filePath: identity, key: key, path: edit.path, original: original, strategy: strategy,
+                                               codec: codecID)
+            return (entry, try Self.createdContainers(by: edit, original: original, in: seen, codec: blobCodec, key: key))
+        }
+        let entries = planned.map(\.entry)
+        try await record(planned)
+        try await apply(edits, key: key, to: target, strategy: strategy, codec: blobCodec, grants: grants)
+
+        for (edit, entry) in zip(edits, entries) {
+            let written = edit.value.map(WrittenValue.value) ?? .removed
+            lastWritten.note(written, forKey: Journal.key(for: entry))
+            do {
+                try await journal.noteWritten(written, forKey: Journal.key(for: entry))
+            } catch {
+                // The change is made and journaled; only the note that lets an old record be told from a changed one is missing.
+                Log.warning("plist", "what was written for \(Journal.key(for: entry)) couldn't be noted: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The top-level value as the strategy holds it, once `cfprefsd` and the file agree about every place in `edits` (see
+    /// `write(_ edits:…)`, step 3).
+    private func agreedTopLevel(key: String, edits: [PathEdit], in target: URL, strategy: PlistWriteStrategy, identity: String,
+                                codecID: PlistBlobCodecID, blobCodec: (any PlistBlobCodec)?) async throws -> PlistValue? {
+        var views = try await topLevel(of: key, in: target, strategy: strategy)
+        // The file's own bytes can't disagree with the strategy that reads them.
+        guard strategy == .cfPreferences else { return views.seen }
+
+        var disagreeing = try Self.disagreements(among: edits, views: views, codec: blobCodec, key: key)
+        var polls = 0
+        while !disagreeing.isEmpty, polls < Self.agreementPolls {
+            try await clock.sleep(for: Self.agreementInterval)
+            polls += 1
+            views = try await topLevel(of: key, in: target, strategy: strategy)
+            disagreeing = try Self.disagreements(among: edits, views: views, codec: blobCodec, key: key)
+        }
+
+        // Still different. That is no disagreement if `cfprefsd` holds what Mantel wrote there last: its own write, not yet
+        // written to the file. Anything else makes the original doubtful.
+        let records = await journal.records()
+        for edit in disagreeing {
+            let entry = JournalEntry.plistPath(filePath: identity, key: key, path: edit.path, original: nil, strategy: strategy,
+                                               codec: codecID)
+            let journalKey = Journal.key(for: entry)
+            // This process's own last write at the place first (an undo has taken its record away), then what an earlier run noted.
+            guard let written = lastWritten.last(forKey: journalKey) ?? records.first(where: { $0.key == journalKey })?.lastWritten,
+                  Self.matches(written, try Self.value(at: edit.path, in: views.seen, codec: blobCodec, key: key))
+            else {
+                throw PlistAccessError.disagree(key: key)
+            }
+        }
+        return views.seen
+    }
+
+    /// The key's value as the strategy sees it, and as the file's bytes say it (the same thing for `atomicFile`).
+    private func topLevel(of key: String, in target: URL, strategy: PlistWriteStrategy) async throws -> (seen: PlistValue?, disk: PlistValue?) {
+        try await withFile(target) { [io] file in
+            let seen = try io.read(file, key, strategy)
+            let disk = strategy == .cfPreferences ? try PlistIO.readFile(file, key: key) : seen
+            return (seen, disk)
+        }
+    }
+
+    /// The edits whose place holds something else in the file than `cfprefsd` says.
+    private static func disagreements(among edits: [PathEdit], views: (seen: PlistValue?, disk: PlistValue?),
+                                      codec: (any PlistBlobCodec)?, key: String) throws -> [PathEdit] {
+        try edits.filter { edit in
+            try value(at: edit.path, in: views.seen, codec: codec, key: key) != value(at: edit.path, in: views.disk, codec: codec, key: key)
+        }
+    }
+
+    /// Whether what a place holds now is what was written there (`nil` is what a removal leaves).
+    private static func matches(_ written: WrittenValue, _ current: PlistValue?) -> Bool {
+        switch written {
+        case .value(let value): current == value
+        case .removed: current == nil
+        }
+    }
+
+    /// Records each entry, with the containers its change will make. If one can't be recorded, the entries this call recorded are
+    /// taken out again: a change that is not going to be made has nothing to put back.
+    private func record(_ planned: [(entry: JournalEntry, created: Int)]) async throws {
+        let existing = Set(await journal.records().map(\.key))
+        var recorded: [String] = []
+        do {
+            for (entry, created) in planned {
+                try await journal.record(entry, createdContainers: created)
+                let key = Journal.key(for: entry)
+                if !existing.contains(key) { recorded.append(key) }
+            }
+        } catch {
+            for key in recorded { try? await journal.remove(key: key) }
+            throw error
+        }
+    }
+
+    // MARK: Putting back
+
     /// Puts the key back as the journal says it was, with the strategy it was changed with, and takes its record out of the
     /// journal. A key that isn't recorded is left alone.
     public func undo(key: String, in url: URL) async throws {
@@ -256,13 +491,94 @@ public struct PlistFileAccess: Sendable {
         try await journal.remove(key: journalKey)
     }
 
-    /// Restores one journal entry: writes its original (or removes the key) with the entry's own strategy, through the grant
-    /// that is for its file, if there is one. The entry stays in the journal; the caller removes it.
+    /// Puts one place inside a key back as the journal says it was (an inverse edit on the key as it is now: nothing else in the
+    /// key is touched), and takes its record out of the journal. A place that isn't recorded is left alone.
+    public func undo(path: PlistKeyPath, key: String, in url: URL) async throws {
+        let file = url.resolvingSymlinksInPath().path(percentEncoded: false)
+        let probe = JournalEntry.plistPath(filePath: file, key: key, path: path, original: nil, strategy: .cfPreferences, codec: .none)
+        let journalKey = Journal.key(for: probe)
+        guard let record = await journal.records().first(where: { $0.key == journalKey }) else { return }
+        try await restore(record.entry, grants: grants)
+        try await journal.remove(key: journalKey)
+    }
+
+    /// Restores one journal entry, through the grant that is for its file, if there is one. The entry stays in the journal; the
+    /// caller removes it.
+    ///
+    /// - `.plistKey` writes its original (or removes the key) with the entry's own strategy, except that `.atomicFile` on one of
+    ///   macOS's two files is done through the preferences service: an earlier version's atomic writes to those were refused by
+    ///   macOS, so the preferences service is the only way to put them back.
+    /// - `.plistPath` is an inverse edit: the key is read as it is now, the place is set to its original (or removed), and the key
+    ///   is written and checked. A place that is gone because the entry of a list it was in is gone (a `matching` or `matchingPath`
+    ///   step that matches nothing now: the entry, or the list, or the value the list was in) counts as restored. A list that has
+    ///   two entries for the app now (`ambiguousMatch`) is not: which one was Mantel's is not known, so nothing is changed and the
+    ///   entry stays in the journal. When the place held nothing
+    ///   before and the change made containers around it, the ones that are empty now are taken out too (see
+    ///   `JournalRecord.createdContainers`): someone else's entry in one keeps it.
     func restore(_ entry: JournalEntry, grants: FileGrantStore?) async throws {
-        guard case .plistKey(let filePath, let key, let original, let strategy) = entry else {
+        let grants = grants ?? self.grants
+        switch entry {
+        case .plistKey(let filePath, let key, let original, let strategy):
+            let file = URL(filePath: filePath)
+            let effective = await restoringStrategy(strategy, for: file, grants: grants)
+            try await apply(original, key: key, to: file, strategy: effective, grants: grants)
+        case .plistPath(let filePath, let key, let path, let original, let strategy, let codecID):
+            let file = URL(filePath: filePath)
+            let blobCodec = try blobCodec(for: codecID)
+            let effective = await restoringStrategy(strategy, for: file, grants: grants)
+            // Whatever the change made around the place, so that putting back "nothing there" doesn't leave an empty table behind.
+            let created = await journal.records().first { $0.key == Journal.key(for: entry) }?.createdContainers ?? 0
+            do {
+                try await apply([PathEdit(path: path, value: original)], key: key, to: file, strategy: effective, codec: blobCodec,
+                                grants: grants, removingEmptyCreated: created)
+                // What the place holds now is Mantel's, until the file has caught up with it (see `WrittenLedger`).
+                lastWritten.note(original.map(WrittenValue.value) ?? .removed, forKey: Journal.key(for: entry))
+            } catch PlistAccessError.path(.noMatch(let step)) where Self.isMatching(path, at: step) {
+                Log.info("plist", "nothing to put back for \(Journal.key(for: entry)): its entry is gone")
+            }
+        case .defaultsKey:
             throw PlistAccessError.unsupportedEntry
         }
-        try await apply(original, key: key, to: URL(filePath: filePath), strategy: strategy, grants: grants ?? self.grants)
+    }
+
+    /// Whether the system still holds what Mantel last wrote for `entry`: nil when that can't be told (the value couldn't be
+    /// read, or it is an entry this doesn't read).
+    func stillHolds(_ written: WrittenValue, for entry: JournalEntry, grants: FileGrantStore?) async -> Bool? {
+        let grants = grants ?? self.grants
+        do {
+            let current: PlistValue?
+            switch entry {
+            case .plistKey(let filePath, let key, _, let strategy):
+                let file = URL(filePath: filePath)
+                let effective = await restoringStrategy(strategy, for: file, grants: grants)
+                current = try await withFile(file, grants: grants) { [io] url in try io.read(url, key, effective) }
+            case .plistPath(let filePath, let key, let path, _, let strategy, let codecID):
+                let file = URL(filePath: filePath)
+                let blobCodec = try blobCodec(for: codecID)
+                let effective = await restoringStrategy(strategy, for: file, grants: grants)
+                let top = try await withFile(file, grants: grants) { [io] url in try io.read(url, key, effective) }
+                current = try Self.value(at: path, in: top, codec: blobCodec, key: key)
+                // Nothing is read from a list that has the entry twice: that is no change of what Mantel wrote, but not knowing which
+                // of the two is Mantel's.
+                if current == nil, try Self.hasAmbiguousMatch(at: path, in: top, codec: blobCodec, key: key) { return nil }
+            case .defaultsKey:
+                return nil
+            }
+            return Self.matches(written, current)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func isMatching(_ path: PlistKeyPath, at step: Int) -> Bool {
+        path.indices.contains(step) && path[step].findsAnEntry
+    }
+
+    /// `.atomicFile` on one of macOS's two files is put back through the preferences service; any other strategy is kept.
+    private func restoringStrategy(_ strategy: PlistWriteStrategy, for file: URL, grants: FileGrantStore?) async -> PlistWriteStrategy {
+        guard strategy == .atomicFile, await isMacOSMenuBarFile(file, grants: grants) else { return strategy }
+        Log.info("plist", "\(file.lastPathComponent) is put back through macOS's preferences service")
+        return .cfPreferences
     }
 
     // MARK: Doing it
@@ -276,6 +592,127 @@ public struct PlistFileAccess: Sendable {
         }
     }
 
+    /// Applies `edits` to the key as it is now, writes it once (when they changed it), and checks that every place holds what it
+    /// was given.
+    ///
+    /// With `removingEmptyCreated` (the restore of one place that held nothing before, and the containers the change made around
+    /// it), the containers that are empty once the place is gone are taken out, deepest first, up to the top-level key.
+    private func apply(_ edits: [PathEdit], key: String, to file: URL, strategy: PlistWriteStrategy, codec: (any PlistBlobCodec)?,
+                       grants: FileGrantStore?, removingEmptyCreated created: Int = 0) async throws {
+        try await withFile(file, grants: grants) { [io] url in
+            let fresh = try io.read(url, key, strategy)
+            var updated = try Self.applying(edits, to: fresh, codec: codec, key: key)
+            if created > 0, let edit = edits.first, edits.count == 1, edit.value == nil {
+                updated = try Self.removingEmptyContainers(created: created, along: edit.path, in: updated, codec: codec, key: key)
+            }
+            if updated != fresh { try io.write(updated, key, url, strategy) }
+            let after = try io.read(url, key, strategy)
+            for edit in edits {
+                guard try Self.value(at: edit.path, in: after, codec: codec, key: key) == edit.value else {
+                    throw PlistAccessError.notPersisted(key: key)
+                }
+            }
+        }
+    }
+
+    // MARK: Values at paths
+
+    /// The value at `path` in a top-level value, read through the codec when there is one: the top-level value is then the blob.
+    private static func value(at path: PlistKeyPath, in top: PlistValue?, codec: (any PlistBlobCodec)?, key: String) throws -> PlistValue? {
+        guard let top else { return nil }
+        guard let codec else { return top.value(at: path) }
+        guard case .data(let blob) = top else { throw PlistAccessError.notRepresentable(key: key) }
+        do {
+            return try codec.value(at: path, in: blob)
+        } catch let error as KeyPathError {
+            throw PlistAccessError.path(error)
+        }
+    }
+
+    /// Whether the path meets an entry that more than one element of a list satisfies (see `PlistValue.hasAmbiguousMatch(at:)`), in a
+    /// top-level value that is read through the codec when there is one.
+    private static func hasAmbiguousMatch(at path: PlistKeyPath, in top: PlistValue?, codec: (any PlistBlobCodec)?, key: String) throws -> Bool {
+        guard let top else { return false }
+        guard let codec else { return top.hasAmbiguousMatch(at: path) }
+        guard case .data(let blob) = top else { throw PlistAccessError.notRepresentable(key: key) }
+        do {
+            return try codec.value(at: [], in: blob)?.hasAmbiguousMatch(at: path) ?? false
+        } catch let error as KeyPathError {
+            throw PlistAccessError.path(error)
+        }
+    }
+
+    private static func applying(_ edits: [PathEdit], to top: PlistValue?, codec: (any PlistBlobCodec)?, key: String) throws -> PlistValue? {
+        var current = top
+        for edit in edits { current = try applying(edit, to: current, codec: codec, key: key) }
+        return current
+    }
+
+    /// The top-level value with one edit made. A key that isn't there is made as a dictionary for a value to be put in; there is
+    /// nothing to remove from it.
+    ///
+    /// A place inside a list (a `matching` or `matchingPath` step) in a key that isn't there is not made up: the list is gone, and
+    /// so is the entry in it, which is `noMatch` at that step, as for an entry that is gone from a list that is there.
+    private static func applying(_ edit: PathEdit, to top: PlistValue?, codec: (any PlistBlobCodec)?, key: String) throws -> PlistValue? {
+        if top == nil, edit.value == nil { return nil }
+        if top == nil, let step = edit.path.firstIndex(where: \.findsAnEntry) { throw PlistAccessError.path(.noMatch(step: step)) }
+        guard let codec else {
+            do throws(KeyPathError) {
+                return try (top ?? .dictionary([:])).setting(edit.value, at: edit.path)
+            } catch {
+                throw PlistAccessError.path(error)
+            }
+        }
+        // A blob can't be made out of nothing.
+        guard let top else { throw PlistAccessError.notRepresentable(key: key) }
+        guard case .data(let blob) = top else { throw PlistAccessError.notRepresentable(key: key) }
+        do {
+            return .data(try codec.setting(edit.value, at: edit.path, in: blob))
+        } catch let error as KeyPathError {
+            throw PlistAccessError.path(error)
+        }
+    }
+
+    /// How many of the containers on the way to the place `edit` writes the write is about to make (the deepest ones: a chain of
+    /// containers that exists is a chain from the top-level value down). None when the place held something, or the edit removes.
+    private static func createdContainers(by edit: PathEdit, original: PlistValue?, in top: PlistValue?, codec: (any PlistBlobCodec)?,
+                                          key: String) throws -> Int {
+        guard original == nil, edit.value != nil else { return 0 }
+        var existing = 0
+        for depth in 0..<edit.path.count {
+            // The top-level value is the container at depth 0; one that is a blob has its root as long as the blob is there.
+            let container = depth == 0 ? top : try value(at: Array(edit.path.prefix(depth)), in: top, codec: codec, key: key)
+            guard container != nil else { break }
+            existing += 1
+        }
+        return edit.path.count - existing
+    }
+
+    /// The top-level value without the empty dictionaries that are left at the end of `path`, the deepest `created` containers of
+    /// it at most, from the deepest up; `nil` when that is the top-level value itself (the key goes).
+    private static func removingEmptyContainers(created: Int, along path: PlistKeyPath, in top: PlistValue?, codec: (any PlistBlobCodec)?,
+                                                key: String) throws -> PlistValue? {
+        var current = top
+        // A blob is never made by a write, so the top-level value is only ever a container to remove when there is no codec.
+        let shallowest = codec == nil ? 0 : 1
+        for depth in stride(from: path.count - 1, through: max(shallowest, path.count - created), by: -1) {
+            let address = Array(path.prefix(depth))
+            let container = depth == 0 ? current : try value(at: address, in: current, codec: codec, key: key)
+            guard case .dictionary(let entries)? = container, entries.isEmpty else { break }
+            if depth == 0 { return nil }
+            current = try applying(PathEdit(path: address, value: nil), to: current, codec: codec, key: key)
+        }
+        return current
+    }
+
+    private func blobCodec(for id: PlistBlobCodecID) throws -> (any PlistBlobCodec)? {
+        guard id != .none else { return nil }
+        guard let codec = codecs[id] else { throw PlistAccessError.codecMissing(id.rawValue) }
+        return codec
+    }
+
+    // MARK: Files
+
     /// Runs `body` with the file's URL: through the grant that is for the file if there is one, otherwise as it is.
     private func withFile<T: Sendable>(_ file: URL, grants: FileGrantStore? = nil,
                                        _ body: @escaping @Sendable (URL) throws -> T) async throws -> T {
@@ -285,35 +722,33 @@ public struct PlistFileAccess: Sendable {
         return try body(file)
     }
 
+    /// `.atomicFile` is for any file but macOS's two (and for putting back what an earlier version did to them).
+    private func refuseAtomicReplacement(of target: URL, strategy: PlistWriteStrategy) async throws {
+        guard strategy == .atomicFile, await isMacOSMenuBarFile(target, grants: grants) else { return }
+        throw PlistAccessError.atomicFileRefused(file: target.lastPathComponent)
+    }
+
+    /// Whether the file is one of the two that macOS keeps for the menu bar (`FileGrantKind`): the one a grant is for, or the one
+    /// where macOS keeps it for this user (compared as text: nothing is looked up in another app's folders).
+    private func isMacOSMenuBarFile(_ file: URL, grants: FileGrantStore?) async -> Bool {
+        if let store = grants ?? self.grants, await Self.grantKind(for: file, in: store) != nil { return true }
+        let path = file.standardizedFileURL.path(percentEncoded: false)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return FileGrantKind.allCases.contains { ExpectedFile.expected($0, home: home).candidates.contains(path) }
+    }
+
     /// The kind of grant whose file this is, compared by canonical path.
     private static func grantKind(for file: URL, in store: FileGrantStore) async -> FileGrantKind? {
-        let wanted = canonical(file)
+        let wanted = CanonicalPath.of(file)
         for kind in FileGrantKind.allCases {
-            if let grant = await store.grant(for: kind), canonical(URL(filePath: grant.path)) == wanted { return kind }
+            if let grant = await store.grant(for: kind), CanonicalPath.of(URL(filePath: grant.path)) == wanted { return kind }
         }
         return nil
     }
-
-    /// The path with every symlink in it resolved (`/private` included), also for a file that isn't there: the part that
-    /// exists is resolved, and the rest is kept as it is. A grant for a file that has gone must still be found, to say so.
-    static func canonical(_ url: URL) -> String {
-        var existing = url.standardizedFileURL
-        var rest: [String] = []
-        while existing.path != "/", !FileManager.default.fileExists(atPath: existing.path(percentEncoded: false)) {
-            rest.insert(existing.lastPathComponent, at: 0)
-            existing = existing.deletingLastPathComponent()
-        }
-        var base = existing.path(percentEncoded: false)
-        if let resolved = realpath(base, nil) {
-            base = String(cString: resolved)
-            free(resolved)
-        }
-        return rest.reduce(base) { ($0 as NSString).appendingPathComponent($1) }
-    }
 }
 
-/// Restores what the journal says a plist file's key was, with the strategy the entry was written with, through the grant that
-/// is for the file when there is one.
+/// Restores what the journal says a plist file's key, or a place inside it, was, with the strategy the entry was written with,
+/// through the grant that is for the file when there is one.
 public struct PlistJournalRestorer: JournalRestoring {
     private let access: PlistFileAccess
     private let grants: FileGrantStore
@@ -328,5 +763,10 @@ public struct PlistJournalRestorer: JournalRestoring {
         // in the journal for the next launch.
         try Task.checkCancellation()
         try await access.restore(entry, grants: grants)
+    }
+
+    /// Reads the value at the entry's place, and compares it with what Mantel wrote.
+    public func stillHolds(_ written: WrittenValue, for entry: JournalEntry) async -> Bool? {
+        await access.stillHolds(written, for: entry, grants: grants)
     }
 }

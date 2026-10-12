@@ -173,20 +173,23 @@ final class FakeAX: AXReading {
         var frame: CGRect? = nil
     }
 
-    /// An app with these status items in its extras menu bar.
-    func addApp(pid: pid_t, extras: [Extra]) {
+    /// An app with these status items in its extras menu bar. The elements of the items are given back.
+    @discardableResult
+    func addApp(pid: pid_t, extras: [Extra]) -> [Int] {
         let root = root(ofApp: pid)
-        guard !extras.isEmpty else { return }
+        guard !extras.isEmpty else { return [] }
         let bar = addNode(attributes: [AXName.role: .string("AXMenuBar")])
+        var items: [Int] = []
         for extra in extras {
             var attributes: [String: AXValueBox] = [AXName.role: .string("AXMenuBarItem")]
             if let title = extra.title { attributes[AXName.title] = .string(title) }
             if let identifier = extra.identifier { attributes[AXName.identifier] = .string(identifier) }
             if let description = extra.description { attributes[AXName.description] = .string(description) }
             if let frame = extra.frame { attributes.merge(Self.frameAttributes(frame)) { $1 } }
-            addNode(attributes: attributes, under: bar)
+            items.append(addNode(attributes: attributes, under: bar))
         }
         setAttribute(AXName.extrasMenuBar, .elements([ref(bar)]), on: root)
+        return items
     }
 
     static func frameAttributes(_ frame: CGRect) -> [String: AXValueBox] {

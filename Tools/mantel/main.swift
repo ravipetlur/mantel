@@ -29,11 +29,26 @@ switch CLIParser.parse(arguments) {
 case .failure(let error):
     finish(CLIOutput.outcome(for: error))
 case .success(let invocation):
+    // A command that has to be agreed to is asked about first, on a terminal; with nobody to ask it isn't sent. The question goes to
+    // standard error, so that what is printed to standard output is only ever the answer.
+    if let question = invocation.confirmation {
+        guard isatty(STDIN_FILENO) != 0 else {
+            finish(CLIOutput.needsAnswerBeforehand)
+        }
+        FileHandle.standardError.write(Data(question.utf8))
+        guard CLIConfirmation.accepts(readLine()) else {
+            finish(CLIOutput.declined)
+        }
+    }
     let client = ControlSocketClient(path: MantelPaths.live().controlSocket)
     // A probe can hold the menu bar for half a minute or more (its own hold, and its checks before and after), so it is given
-    // longer than the other commands to answer.
+    // longer than the other commands to answer; a reset restarts the menu bar and waits for it to come back.
     let timeout: Duration
-    if case .probe = invocation.command { timeout = .seconds(180) } else { timeout = .seconds(30) }
+    switch invocation.command {
+    case .probe: timeout = .seconds(180)
+    case .reset: timeout = .seconds(60)
+    default: timeout = .seconds(30)
+    }
     do throws(ClientError) {
         let result = try await client.send(invocation.command, timeout: timeout)
         finish(CLIOutput.outcome(for: result, json: invocation.json))

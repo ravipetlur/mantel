@@ -83,6 +83,32 @@ struct CLIOutputTests {
         #expect(protocolError == CLIOutcome(stdout: "", stderr: "mantel: Mantel's answer couldn't be read.", exitCode: 1))
     }
 
+    // MARK: Confirming
+
+    @Test(arguments: ["y", "Y", "yes", "YES", "Yes", " y ", "\tyes\n", "  Yes  "])
+    func confirmationAcceptsYAndYes(answer: String) {
+        #expect(CLIConfirmation.accepts(answer))
+    }
+
+    @Test(arguments: ["", " ", "\n", "n", "N", "no", "No", "yep", "yess", "ye", "y es", "ok", "sure", "1", "true", "yes please", "yn"])
+    func confirmationRejectsEmpty(answer: String) {
+        // An empty line is a no (the question says [y/N]), and so is anything that isn't one of the two words.
+        #expect(!CLIConfirmation.accepts(answer))
+    }
+
+    @Test func confirmationRejectsTheEndOfTheInput() {
+        #expect(!CLIConfirmation.accepts(nil))
+    }
+
+    @Test func notAgreeingToAResetPrintsThatItWasNotDone() {
+        #expect(CLIOutput.declined == CLIOutcome(stdout: "", stderr: "mantel: Not reset.", exitCode: 1))
+    }
+
+    @Test func aResetWithNobodyToAskIsWrongArguments() {
+        #expect(CLIOutput.needsAnswerBeforehand
+                == CLIOutcome(stdout: "", stderr: "mantel: Add --yes to reset without being asked.", exitCode: 2))
+    }
+
     // MARK: Usage
 
     @Test func wrongArgumentsExitWith2AndSayWhatToTypeInstead() {

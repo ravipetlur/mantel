@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 struct PermissionsPane: View {
     let checker: any PermissionChecking
     let grants: FileGrantStore
+    /// Called when the person has chosen a file and Mantel keeps it: what depends on the file is asked again.
+    let fileGranted: () -> Void
     @State private var states: [PermissionKind: PermissionState] = [:]
 
     var body: some View {
@@ -69,6 +71,7 @@ struct PermissionsPane: View {
 
         do {
             _ = try await grants.grant(kind, chosen: url, home: home)
+            fileGranted()
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning

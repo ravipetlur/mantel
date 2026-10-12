@@ -3,21 +3,24 @@ import MKCore
 
 /// What the keyboard layout in use prints on a key, from `UCKeyTranslate` with the layout of the current input source.
 ///
-/// The Text Input Sources calls are for the main thread, which is where the Hotkeys pane asks. A shortcut is kept as a key
-/// code, so the name is looked up each time it is shown and follows the layout the person switches to.
-nonisolated struct LiveKeyTranslator: KeyTranslating {
-    func character(for keyCode: UInt16) -> String? {
+/// The Text Input Sources calls are for the main thread, so this is on the main actor, which is where the Hotkeys pane asks. A
+/// shortcut is kept as a key code, so the name is looked up each time it is shown and follows the layout the person switches to.
+@MainActor
+struct LiveKeyTranslator: KeyTranslating {
+    func character(for keyCode: UInt16, options: KeyTranslationOptions) -> String? {
         guard let layout = Self.currentLayoutData() else { return nil }
 
+        // `UCKeyTranslate` takes a mask of options. `kUCKeyTranslateNoDeadKeysBit` is the number of the bit, which is 0: passed as
+        // the options it asks for nothing, so the mask is `1 << kUCKeyTranslateNoDeadKeysBit`.
+        let translateOptions: OptionBits = options.contains(.noDeadKeys) ? OptionBits(1 << kUCKeyTranslateNoDeadKeysBit) : 0
         var deadKeyState: UInt32 = 0
         var characters = [UniChar](repeating: 0, count: 4)
         var length = 0
         let status = layout.withUnsafeBytes { bytes -> OSStatus in
             guard let layout = bytes.bindMemory(to: UCKeyboardLayout.self).baseAddress else { return OSStatus(paramErr) }
-            // Display mode with no dead keys: the key as it is printed, without waiting for a second key to combine with.
+            // Display mode, so that the key is shown as it is printed.
             return UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDisplay), 0, UInt32(LMGetKbdType()),
-                                  OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeyState, characters.count, &length,
-                                  &characters)
+                                  translateOptions, &deadKeyState, characters.count, &length, &characters)
         }
         guard status == noErr, length > 0 else { return nil }
         return String(utf16CodeUnits: characters, count: length)

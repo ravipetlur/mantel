@@ -1,4 +1,5 @@
 import Foundation
+import MKCore
 
 /// What the app learned about the process on the other end of a connection.
 public struct PeerInfo: Sendable, Equatable {
@@ -8,14 +9,21 @@ public struct PeerInfo: Sendable, Equatable {
     public let teamIdentifier: String?
     public let isValidSignature: Bool
     public let executablePath: String?
+    /// The program's file as `CanonicalPath` writes it, so that it can be compared with another path to the same file.
+    public let canonicalPath: String?
+    /// The hash of the program's code directory (its "cdhash"), in lowercase hex: what its signature is a signature of. Nil
+    /// when it couldn't be read.
+    public let codeDirectoryHash: String?
 
     public init(pid: pid_t, signingIdentifier: String?, teamIdentifier: String?, isValidSignature: Bool,
-                executablePath: String?) {
+                executablePath: String?, canonicalPath: String? = nil, codeDirectoryHash: String? = nil) {
         self.pid = pid
         self.signingIdentifier = signingIdentifier
         self.teamIdentifier = teamIdentifier
         self.isValidSignature = isValidSignature
         self.executablePath = executablePath
+        self.canonicalPath = canonicalPath
+        self.codeDirectoryHash = codeDirectoryHash
     }
 }
 
@@ -26,11 +34,25 @@ public struct OwnSigning: Sendable, Equatable {
     public let teamIdentifier: String?
     /// The running Mantel.app.
     public let bundlePath: String
+    /// Where the tool is in the app, written as `CanonicalPath` writes a path: `<bundle>/Contents/Helpers/mantel`.
+    public let helperCanonicalPath: String
+    /// The hash of the tool's code directory (lowercase hex) as the app's own signature has sealed it: read only from an app
+    /// whose signature, and that of every piece of code nested in it, checked out. Nil when that couldn't be checked, which
+    /// is also what an unsigned app, or a tool that has been swapped, gives.
+    public let helperCodeDirectoryHash: String?
 
-    public init(bundleIdentifier: String, teamIdentifier: String?, bundlePath: String) {
+    /// Where the tool is in the app, below the app's folder.
+    public static let helperPathInBundle = "Contents/Helpers/mantel"
+
+    /// `helperCanonicalPath` is the tool's place in the bundle unless one is given.
+    public init(bundleIdentifier: String, teamIdentifier: String?, bundlePath: String, helperCanonicalPath: String? = nil,
+                helperCodeDirectoryHash: String? = nil) {
         self.bundleIdentifier = bundleIdentifier
         self.teamIdentifier = teamIdentifier
         self.bundlePath = bundlePath
+        self.helperCanonicalPath = helperCanonicalPath
+            ?? CanonicalPath.of(URL(filePath: bundlePath, directoryHint: .isDirectory).appending(path: Self.helperPathInBundle))
+        self.helperCodeDirectoryHash = helperCodeDirectoryHash
     }
 }
 
@@ -45,9 +67,10 @@ public enum PeerDecision: Sendable, Equatable {
 /// - A build signed with a team accepts a program signed by that team with one of the accepted identifiers. What the
 ///   program says about its team is only a claim until the system has checked it against the certificate, so the
 ///   inspector is given `requirement(for:)` to check the program against, and a program that fails it is "invalid".
-/// - A build signed ad hoc has no team to go by, and anyone can sign a program ad hoc under any identifier, so it also
-///   wants the program to be a file inside the running app. (Changing the files in the app takes the person's own
-///   permission.)
+/// - A build signed ad hoc has no team to go by, and anyone can sign a program ad hoc under any identifier, so it wants more
+///   of the program: that it is the tool in the running app (its canonical path is the app's `Contents/Helpers/mantel`),
+///   and that it is the very tool the app's own signature seals (its code directory hash is the one the app was found to hold
+///   for it when the app started; see `OwnSigningReader`). A tool put in the app's place, or a copy of it, doesn't match.
 public enum PeerPolicy {
     /// The identifiers of the tools that may connect: for now the command-line tool's, the app's with `.cli` after it.
     public static func acceptedIdentifiers(for own: OwnSigning) -> Set<String> {
@@ -84,8 +107,10 @@ public enum PeerPolicy {
         if let team = own.teamIdentifier {
             return peer.teamIdentifier == team ? .accept : notATool
         }
-        let bundle = own.bundlePath.hasSuffix("/") ? own.bundlePath : own.bundlePath + "/"
-        guard let path = peer.executablePath, path.hasPrefix(bundle) else { return notATool }
+        guard let path = peer.canonicalPath, path == own.helperCanonicalPath,
+              let hash = peer.codeDirectoryHash, let sealed = own.helperCodeDirectoryHash, hash == sealed else {
+            return notATool
+        }
         return .accept
     }
 }

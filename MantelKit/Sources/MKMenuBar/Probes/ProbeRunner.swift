@@ -5,11 +5,17 @@ import MKCore
 /// Runs the probes, one at a time where they change something, and writes each one's report.
 ///
 /// - **Reports.** Each probe's report goes to `<root>/Probes/<name>-<yyyyMMdd-HHmmss>.json` and comes back from `run`. A
-///   probe that wasn't run (Mantel is quitting, another probe is busy changing the menu bar, the safety rule said no) comes
+///   probe that wasn't run (Mantel is quitting, another probe is busy changing the menu bar, a safety rule said no) comes
 ///   back as a report with its reason in `errors`, and isn't written.
-/// - **One that changes things at a time.** `allowlist-activate`, `approvals-toggle`, `layout-move` and `click-replay`
-///   change the person's menu bar for a while; a second of them while one runs is refused. The probes that only read go on
-///   running meanwhile.
+/// - **The probes that change things.** `allowlist-activate`, `approvals-toggle`, `layout-move`, `click-replay`, `reveal-latency`
+///   and `approvals-flip` change the person's menu bar for a while (`changesState`, `stateChangingProbes`). Each one:
+///   - runs only from the copy in `/Applications` (macOS honours the allowlist for no other copy);
+///   - runs only while the person has turned on "Enable platform test" in Settings › Diagnostics (`stateChangingAllowed`; the
+///     switch is off at every launch and isn't saved), also when it is asked for from the command line;
+///   - is refused while a reset of the menu bar is under way (`resetUnderWay`): the reset puts back the journal and restarts the menu bar's
+///     process, in the middle of what the probe measures;
+///   - is refused while another of them runs. The probes that only read go on running meanwhile, and are never refused for
+///     any of the first three reasons.
 /// - **Quitting.** `shutDown()` (the app calls it as quitting begins) refuses anything new, and cancels what runs: a probe
 ///   that changed something puts it back on its way out, and the journal covers a crash. Requests that were queued on the
 ///   control socket can still reach `run` after the socket stopped, so `run` checks too.
@@ -21,6 +27,8 @@ public actor ProbeRunner {
     private let layoutProvider: @Sendable () async -> DisplayLayout
     private let clock: any Clock
     private let platform: ProbePlatform
+    private let stateChangingAllowed: @Sendable () -> Bool
+    private let resetUnderWay: @Sendable () -> Bool
     private let store: ProbeReportStore
 
     private var isShuttingDown = false
@@ -28,11 +36,17 @@ public actor ProbeRunner {
     private var changing: ProbeName?
     private var running: [UUID: Task<ProbeReport, Never>] = [:]
 
-    /// - Parameter platform: everything a probe reaches the system through. There is no default: the app passes `.live`, and a
-    ///   test passes its fakes, so that a test that forgets one doesn't run against the real system.
+    /// - Parameters:
+    ///   - platform: everything a probe reaches the system through. There is no default: the app passes `.live`, and a
+    ///     test passes its fakes, so that a test that forgets one doesn't run against the real system.
+    ///   - stateChangingAllowed: whether the person has turned on "Enable platform test". Asked each time a probe that changes
+    ///     the menu bar is about to run. There is no default either: the app passes what its switch says.
+    ///   - resetUnderWay: whether a reset of the menu bar is under way (`ResetActivity.isUnderWay`), asked at the same moment. The app
+    ///     passes what its reset says; the default is that none is.
     public init(paths: MantelPaths, reader: MenuBarReader, plist: PlistFileAccess, grants: FileGrantStore,
                 layoutProvider: @escaping @Sendable () async -> DisplayLayout, clock: any Clock = SystemClock(),
-                platform: ProbePlatform) {
+                platform: ProbePlatform, stateChangingAllowed: @escaping @Sendable () -> Bool,
+                resetUnderWay: @escaping @Sendable () -> Bool = { false }) {
         self.paths = paths
         self.reader = reader
         self.plist = plist
@@ -40,22 +54,37 @@ public actor ProbeRunner {
         self.layoutProvider = layoutProvider
         self.clock = clock
         self.platform = platform
+        self.stateChangingAllowed = stateChangingAllowed
+        self.resetUnderWay = resetUnderWay
         store = ProbeReportStore(folder: paths.probes)
+    }
+
+    /// Whether a probe is changing the person's menu bar right now: what is journaled is then that probe's, and replaying the
+    /// journal would undo it from under the probe.
+    public var isChangingMenuBar: Bool {
+        changing != nil
     }
 
     /// Whether the probe changes the person's menu bar while it runs.
     public static func changesState(_ name: ProbeName) -> Bool {
         switch name {
-        case .allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay: true
+        case .allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay, .revealLatency, .approvalsFlip: true
         case .allowlistInfo, .inventory, .approvalsRead, .layoutRead, .capture, .overflow, .screenShare, .menuBarHeight,
-             .grantPersistence: false
+             .grantPersistence, .approvalsDecode, .notchCoordinates: false
         }
     }
 
-    /// The probes that change the person's menu bar: the ones that run only from the installed copy.
+    /// The probes that change the person's menu bar: the ones that run only from the installed copy, and only while "Enable platform
+    /// test" is on.
     public static let stateChangingProbes: [ProbeName] = ProbeName.allCases.filter(changesState)
 
     // MARK: Running
+
+    /// The text of the refusal when "Enable platform test" is off.
+    static let platformTestOffMessage = "Turn on “Enable platform test” in Settings › Diagnostics first."
+
+    /// The text of the refusal while a reset of the menu bar is under way.
+    static let resetUnderWayMessage = CommandAnswers.resetUnderWay
 
     public func run(_ name: ProbeName, options: ProbeOptions) async -> ProbeReport {
         if isShuttingDown { return notRun(name, "Mantel is quitting") }
@@ -66,6 +95,10 @@ public actor ProbeRunner {
             if !platform.isInstalledCopy {
                 return notRun(name, "Run this probe from the copy in /Applications. This copy is at \(platform.copyPath).")
             }
+            // Not while the menu bar is being reset: that would put back what the probe has changed and restart what it reads.
+            if resetUnderWay() { return notRun(name, Self.resetUnderWayMessage) }
+            // And only when the person has said so: these change the menu bar, in a way that is seen.
+            if !stateChangingAllowed() { return notRun(name, Self.platformTestOffMessage) }
             if changing != nil { return notRun(name, "Another probe is changing the menu bar; try again when it finishes") }
             changing = name
         }
@@ -177,6 +210,10 @@ public actor ProbeRunner {
         case .screenShare: ScreenShareProbe.run
         case .menuBarHeight: MenuBarHeightProbe.run
         case .grantPersistence: GrantPersistenceProbe.run
+        case .revealLatency: RevealLatencyProbe.run
+        case .approvalsDecode: ApprovalsDecodeProbe.run
+        case .approvalsFlip: ApprovalsFlipProbe.run
+        case .notchCoordinates: NotchCoordinatesProbe.run
         }
     }
 }

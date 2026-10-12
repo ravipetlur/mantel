@@ -1,8 +1,10 @@
 import Darwin
 import Foundation
-import MKCommands
 import MKTestSupport
+import Synchronization
 import Testing
+
+@testable import MKCommands
 
 @Suite("Control socket server", .timeLimit(.minutes(1)))
 struct ControlSocketServerTests {
@@ -84,7 +86,8 @@ struct ControlSocketServerTests {
         try server.start()
         defer { server.stop() }
 
-        let requests = (0..<40).map { request($0.isMultiple(of: 3) ? .openSettings(nil) : .ping) }
+        // Fewer than the 32 a connection may have waiting.
+        let requests = (0..<30).map { request($0.isMultiple(of: 3) ? .openSettings(nil) : .ping) }
         var batch = Data()
         for envelope in requests { batch.append(try LineCodec.encode(envelope)) }
 
@@ -326,6 +329,193 @@ struct ControlSocketServerTests {
         #expect(try await client.readReply()?.id == good.id)
     }
 
+
+    // MARK: Clients that don't behave
+
+    @Test func slowReaderIsClosedAfterOneSecond() async throws {
+        // A reply far bigger than the socket's buffers, for a client that reads none of it.
+        let big = String(repeating: "x", count: 4 << 20)
+        let server = makeServer { command, _ in
+            if case .diagnostics = command { return .ok(.string(big)) }
+            return .ok(.string("handled \(command.name)"))
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let slow = try RawClient(path: socketURL)
+        let started = ContinuousClock.now
+        try await slow.send(request(.diagnostics))
+
+        // Meanwhile another client is answered at once: waiting for the slow one holds nobody else up.
+        let other = try RawClient(path: socketURL)
+        let ping = request(.ping)
+        try await other.send(ping)
+        #expect(try await other.readReply()?.id == ping.id)
+        #expect(ContinuousClock.now - started < .seconds(1), "answered while the slow client was still being waited for")
+
+        // The server gives up on the slow one and hangs up, which the client finds out by writing: its write fails then.
+        var closedAfter: Duration?
+        while ContinuousClock.now - started < .seconds(6) {
+            if await !slow.sendRaw(Data(" ".utf8)) {
+                closedAfter = ContinuousClock.now - started
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let elapsed = try #require(closedAfter, "the server never closed the connection")
+        #expect(elapsed >= .milliseconds(900), "it waited the second: \(elapsed)")
+        #expect(elapsed < .seconds(3), "and not much longer: \(elapsed)")
+    }
+
+    @Test func aReaderThatCatchesUpWithinTheSecondIsKept() async throws {
+        // The second is for a client that has stopped reading, not one that is slow. (A line the client itself would call too long
+        // is not what this is about, so the reply is big for a socket's buffers and not for a line.)
+        let big = String(repeating: "x", count: 512 << 10)
+        let server = makeServer { _, _ in .ok(.string(big)) }
+        try server.start()
+        defer { server.stop() }
+
+        let client = try RawClient(path: socketURL)
+        let asked = request(.diagnostics)
+        try await client.send(asked)
+        try await Task.sleep(for: .milliseconds(300))
+        let reply = try await client.readReply()
+        #expect(reply?.id == asked.id)
+        #expect(reply?.result == .ok(.string(big)))
+    }
+
+    @Test func floodOfLinesIsCappedAndClosed() async throws {
+        let gate = Gate()
+        let server = makeServer { command, _ in
+            // The first request holds the connection, so that nothing that follows it can be answered, and so is waiting.
+            if case .version = command { await gate.wait() }
+            return .ok(.string("handled \(command.name)"))
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let client = try RawClient(path: socketURL)
+        let held = request(.version)
+        try await client.send(held)
+        while calls.commands.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+
+        var flood = Data()
+        for _ in 0..<300 { flood.append(try LineCodec.encode(request(.ping))) }
+        // Sent on the side: once the server has had enough it stops reading, and a write that is bigger than the socket's buffers
+        // waits until the server closes the connection.
+        let flooding = Task { await client.sendRaw(flood) }
+        // The server reads what was sent at once; the lines past the 32 that can wait are not kept.
+        try await Task.sleep(for: .milliseconds(300))
+        await gate.open()
+
+        var replies: [ReplyEnvelope] = []
+        while let reply = try await client.readReply() { replies.append(reply) }
+
+        #expect(replies.first?.id == held.id, "what it asked first is answered first")
+        #expect(replies.last == ReplyEnvelope(id: nil, result: .failure(code: .badRequest, message: "Too many requests at once")))
+        let answered = replies.dropLast().count
+        #expect(answered <= 33, "the held request and the 32 that could wait were answered, no more: \(answered)")
+        #expect(answered >= 2, "and what had been kept was answered: \(answered)")
+        #expect(calls.commands.count == answered, "the handler heard of exactly the requests that were answered")
+        // The connection was closed: nothing more comes, and what was still being sent has nowhere to go.
+        #expect(try await client.readReply() == nil)
+        #expect(await flooding.value == false)
+
+        // And the server carries on with the next client.
+        let fresh = try RawClient(path: socketURL)
+        let good = request(.ping)
+        try await fresh.send(good)
+        #expect(try await fresh.readReply()?.id == good.id)
+    }
+
+    @Test func aBurstThatFitsIsAnsweredInFull() async throws {
+        // The cap is for a flood: a client that sends 30 requests at once gets 30 answers.
+        let server = makeServer()
+        try server.start()
+        defer { server.stop() }
+
+        let requests = (0..<30).map { _ in request(.ping) }
+        var batch = Data()
+        for envelope in requests { batch.append(try LineCodec.encode(envelope)) }
+        let client = try RawClient(path: socketURL)
+        await client.sendRaw(batch)
+        for envelope in requests {
+            #expect(try await client.readReply()?.id == envelope.id)
+        }
+    }
+
+    // MARK: Running out of descriptors
+
+    @Test func acceptEMFILEPausesInsteadOfSpinning() async throws {
+        let accepts = AcceptScript(failures: .max, error: EMFILE)
+        let warnings = Mutex<[String]>([])
+        let server = ControlSocketServer(path: socketURL, inspector: FakePeerInspector(peer: Fixtures.tool), own: Fixtures.own,
+                                         accept: accepts.accept, pauseOnExhaustion: .seconds(1),
+                                         warn: { message in warnings.withLock { $0.append(message) } }) { _, _ in .ok(.null) }
+        try server.start()
+        defer { server.stop() }
+
+        // A client is waiting to be accepted, which makes the listening source ready for as long as it stays there. (The time is taken before
+        // the client connects, so that a poll that notices the first try late, on a busy machine, can't make the second look too soon.)
+        let first = ContinuousClock.now
+        let waiting = try RawClient(path: socketURL)
+        defer { withExtendedLifetime(waiting) {} }
+        while accepts.count == 0 { try await Task.sleep(for: .milliseconds(5)) }
+
+        // For the next half second the source isn't called at all: without the pause it would be called without end.
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(accepts.count == 1, "called \(accepts.count) times in half a second")
+
+        // After a second it tries again, once, and rests again.
+        while accepts.count < 2, ContinuousClock.now - first < .seconds(5) { try await Task.sleep(for: .milliseconds(10)) }
+        let gap = ContinuousClock.now - first
+        #expect(accepts.count == 2)
+        #expect(gap >= .milliseconds(900), "the second try was \(gap) after the first")
+        // Said once, however long it lasts.
+        #expect(warnings.withLock { $0 } == ["too many open files; pausing new connections for a second"])
+    }
+
+    @Test func aClientIsServedOnceDescriptorsAreBack() async throws {
+        let accepts = AcceptScript(failures: 2, error: ENFILE)
+        let warnings = Mutex<[String]>([])
+        let server = ControlSocketServer(path: socketURL, inspector: FakePeerInspector(peer: Fixtures.tool), own: Fixtures.own,
+                                         accept: accepts.accept, pauseOnExhaustion: .milliseconds(100),
+                                         warn: { message in warnings.withLock { $0.append(message) } }) { command, _ in
+            .ok(.string("handled \(command.name)"))
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let client = try RawClient(path: socketURL)
+        let asked = request(.ping)
+        try await client.send(asked)
+        #expect(try await client.readReply() == ReplyEnvelope(id: asked.id, result: .ok(.string("handled ping"))))
+        #expect(accepts.count >= 3, "it failed twice and then accepted")
+        #expect(warnings.withLock { $0.count } == 1, "one episode, one line")
+
+        // The next time it runs out, that is a new episode, and is said again.
+        accepts.fail(times: 1, error: EMFILE)
+        let second = try RawClient(path: socketURL)
+        let again = request(.version)
+        try await second.send(again)
+        #expect(try await second.readReply()?.id == again.id)
+        #expect(warnings.withLock { $0.count } == 2)
+    }
+
+    @Test func stopWhileTheListenerRestsDoesNotHang() async throws {
+        let accepts = AcceptScript(failures: .max, error: EMFILE)
+        let server = ControlSocketServer(path: socketURL, inspector: FakePeerInspector(peer: Fixtures.tool), own: Fixtures.own,
+                                         accept: accepts.accept, pauseOnExhaustion: .seconds(30), warn: { _ in }) { _, _ in .ok(.null) }
+        try server.start()
+        let waiting = try RawClient(path: socketURL)
+        defer { withExtendedLifetime(waiting) {} }
+        while accepts.count == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        // The source is suspended now, for half a minute. Stopping waits for it to finish being cancelled, which a suspended
+        // source doesn't do until it is resumed.
+        server.stop()
+        #expect(!FileManager.default.fileExists(atPath: socketURL.path))
+    }
+
     // MARK: The socket file
 
     @Test func socketFileIsMode0600() throws {
@@ -374,7 +564,7 @@ struct ControlSocketServerTests {
 
         // Once the first is gone the path is free for the second.
         first.stop()
-        try second.start()
+        try await second.startWhenTheLockIsFree()
         defer { second.stop() }
         let again = try RawClient(path: socketURL)
         try await again.send(good)
@@ -424,6 +614,24 @@ struct ControlSocketServerTests {
         #expect(info.st_mode & 0o777 == 0o600, "the lock file is private too")
     }
 
+    @Test(arguments: StaleThing.allCases)
+    func aServerSaysItReplacedAFileLeftBehind(thing: StaleThing) throws {
+        // The app starts the server before its log has a file, so it asks the server and says it there.
+        try thing.make(at: socketURL)
+        let server = makeServer()
+        #expect(!server.replacedLeftoverSocket, "nothing has been started")
+        try server.start()
+        defer { server.stop() }
+        #expect(server.replacedLeftoverSocket)
+    }
+
+    @Test func aServerThatFoundNothingAtThePathSaysSo() throws {
+        let server = makeServer()
+        try server.start()
+        defer { server.stop() }
+        #expect(!server.replacedLeftoverSocket)
+    }
+
     @Test func serversStartingAtTheSameTimeLeaveExactlyOne() async throws {
         let servers = (0..<8).map { _ in makeServer() }
         defer { servers.forEach { $0.stop() } }
@@ -463,7 +671,7 @@ struct ControlSocketServerTests {
         #expect(LockHolder(url: lockURL) == nil, "a running server holds the lock")
 
         server.stop()
-        let free = LockHolder(url: lockURL)
+        let free = await LockHolder.takeWhenFree(url: lockURL)
         #expect(free != nil, "a stopped one doesn't")
         withExtendedLifetime(free) {}
     }
@@ -474,7 +682,7 @@ struct ControlSocketServerTests {
         first.stop()
 
         let second = makeServer { _, _ in .ok(.string("second")) }
-        try second.start()
+        try await second.startWhenTheLockIsFree()
         defer { second.stop() }
 
         let client = try RawClient(path: socketURL)
@@ -483,13 +691,13 @@ struct ControlSocketServerTests {
         #expect(try await client.readReply() == ReplyEnvelope(id: good.id, result: .ok(.string("second"))))
     }
 
-    @Test func aFailedStartReleasesTheLock() throws {
+    @Test func aFailedStartReleasesTheLock() async throws {
         // A folder at the socket's path can't be replaced, so binding fails after the lock was taken.
         try FileManager.default.createDirectory(at: socketURL, withIntermediateDirectories: false)
         let server = makeServer()
         #expect(throws: SocketError.bindFailed(EADDRINUSE)) { try server.start() }
 
-        let free = LockHolder(url: lockURL)
+        let free = await LockHolder.takeWhenFree(url: lockURL)
         #expect(free != nil)
         withExtendedLifetime(free) {}
     }
@@ -538,7 +746,9 @@ struct ControlSocketServerTests {
         try server.start()
         try server.start()  // already running: nothing to do
         server.stop()
-        try server.start()
+        // The lock can look held for a few milliseconds after `stop()` (the server's own doc says so), as it does for any server that starts
+        // right after another: the wait the other tests use.
+        try await server.startWhenTheLockIsFree()
         defer { server.stop() }
 
         let client = try RawClient(path: socketURL)

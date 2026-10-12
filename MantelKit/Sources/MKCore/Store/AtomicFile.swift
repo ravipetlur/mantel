@@ -1,5 +1,37 @@
 import Foundation
 
+/// The calls that make a written file durable, handed to `AtomicFile.write` so that a test can see which are made and in what
+/// order.
+package struct FileSyncing: Sendable {
+    /// Gets the data written through `descriptor` onto the disk itself, not only into the drive's cache.
+    package var syncFile: @Sendable (_ descriptor: Int32) throws -> Void
+    /// Gets a change to the folder (the new name of a file) onto the disk.
+    package var syncFolder: @Sendable (_ folder: URL) throws -> Void
+
+    package init(syncFile: @escaping @Sendable (_ descriptor: Int32) throws -> Void,
+                 syncFolder: @escaping @Sendable (_ folder: URL) throws -> Void) {
+        self.syncFile = syncFile
+        self.syncFolder = syncFolder
+    }
+
+    /// What the system does: `fcntl(F_FULLFSYNC)` for the file, which asks the drive to empty its cache too (a plain `fsync`
+    /// doesn't on macOS), and `fsync` where a drive or a file system refuses that; `fsync` for the folder.
+    package static let system = FileSyncing(
+        syncFile: { descriptor in
+            if fcntl(descriptor, F_FULLFSYNC) == 0 { return }
+            guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        },
+        syncFolder: { folder in
+            let descriptor = open(folder.path(percentEncoded: false), O_RDONLY | O_DIRECTORY)
+            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(descriptor) }
+            // A file system that can't sync a folder has nothing to say about the file: it is not a failure to write.
+            if fsync(descriptor) != 0, errno != EINVAL, errno != ENOTSUP {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        })
+}
+
 /// Writing a file so that a reader, or a crash, finds the old file or the new one whole and never half of one, and so that
 /// nobody but the owner can read it (unless the file is macOS's: see `Ownership`).
 package enum AtomicFile {
@@ -14,12 +46,14 @@ package enum AtomicFile {
 
     /// Writes `data` to `url`: into a temporary file in the same folder (mode 0600 from the start, a name of its own so
     /// that two writes never share one), then moves that over `url`. With `synchronize`, the temporary file's data is on
-    /// disk before it replaces the old one, so after a power loss the file is the old one or the new one, never an empty
-    /// one; the journal asks for that, settings, which are rewritten from memory, don't.
+    /// disk before it replaces the old one (`syncing.syncFile`: a full sync, which reaches the drive itself), so after a power
+    /// loss the file is the old one or the new one, never an empty one; and the folder is synced after the move, so that the new
+    /// name is on disk too (`syncing.syncFolder`). The journal asks for that; settings, which are rewritten from memory, don't.
     ///
     /// The temporary file is gone whatever happens: when the write fails at any step it is removed (an ACL it took from the old
     /// file that forbids deleting it is taken off first), and when it succeeds it has become `url`.
-    package static func write(_ data: Data, to url: URL, synchronize: Bool = false, ownership: Ownership = .mantel) throws {
+    package static func write(_ data: Data, to url: URL, synchronize: Bool = false, ownership: Ownership = .mantel,
+                              syncing: FileSyncing = .system) throws {
         let fileManager = FileManager.default
         let path = url.path(percentEncoded: false)
         let temporary = url.deletingLastPathComponent()
@@ -37,7 +71,7 @@ package enum AtomicFile {
         do {
             try handle.write(contentsOf: data)
             if ownership == .system { try copyModeAndOwner(ofFileAt: path, to: descriptor) }
-            if synchronize { try handle.synchronize() }
+            if synchronize { try syncing.syncFile(descriptor) }
             try handle.close()
         } catch {
             try? handle.close()
@@ -57,6 +91,15 @@ package enum AtomicFile {
             try fileManager.moveItem(at: temporary, to: url)
         }
         replaced = true
+        if synchronize {
+            // The file is in place. A folder that couldn't be synced is a weaker promise about a power loss, not a failed write:
+            // throwing here would have the caller believe the old file is still there.
+            do {
+                try syncing.syncFolder(url.deletingLastPathComponent())
+            } catch {
+                Log.warning("files", "couldn't sync the folder of \(url.lastPathComponent); the file itself is written")
+            }
+        }
     }
 
     /// Gives the file `descriptor` is for the mode, owner and group of the file at `path`. A file that isn't there has nothing to

@@ -7,6 +7,8 @@ enum AXName {
     static let role = "AXRole"
     static let subrole = "AXSubrole"
     static let identifier = "AXIdentifier"
+    static let main = "AXMain"
+    static let focused = "AXFocused"
     static let description = "AXDescription"
     static let title = "AXTitle"
     static let position = "AXPosition"
@@ -14,13 +16,15 @@ enum AXName {
     static let children = "AXChildren"
     static let windows = "AXWindows"
     static let extrasMenuBar = "AXExtrasMenuBar"
+    static let menuBar = "AXMenuBar"
 }
 
 /// An element of some app's accessibility tree.
 ///
 /// `AXUIElement` is a Core Foundation reference that Swift can't know to be safe to share between threads. It is: an
-/// element is an immutable handle, and the calls on it are thread-safe. This wrapper is the one place that says so, and
-/// the rest of the platform layer passes elements around as `AXElementRef`s.
+/// element is an immutable handle, and the calls on it are thread-safe (those about another process; this one's own are for the
+/// main thread, see `OwnProcessAccess`). This wrapper is the one place that says so, and the rest of the platform layer passes
+/// elements around as `AXElementRef`s.
 public struct AXElementRef: @unchecked Sendable, Hashable {
     let element: AXUIElement
 
@@ -78,20 +82,28 @@ extension AXReading {
 
 /// The real Accessibility API. Every call has a messaging timeout (`timeout`, in seconds), so that one app that doesn't
 /// answer can't hold the whole read: it is `AXReadError.timeout`.
+///
+/// It is for any thread. **Calls about Mantel's own process are made on the main thread** (`OwnProcessAccess`): AppKit answers them on
+/// the calling thread, and wants the main one. They are answered in the process itself, so the messaging timeout doesn't apply to them.
 public struct AXClient: AXReading {
     private let timeout: Float
+    private let ownProcess: OwnProcessAccess
 
-    public init(timeout: Float = 0.25) {
+    public init(timeout: Float = 0.25, ownProcess: OwnProcessAccess = OwnProcessAccess()) {
         self.timeout = timeout
+        self.ownProcess = ownProcess
     }
 
     public func attribute(_ name: String, of element: AXElementRef) throws(AXReadError) -> AXValueBox {
-        AXUIElementSetMessagingTimeout(element.element, timeout)
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element.element, name as CFString, &value)
-        guard result == .success else { throw Self.map(result) }
-        guard let value else { return .none }
-        return Self.box(value)
+        let timeout = timeout
+        return try ownProcess.call(about: element) { () throws(AXReadError) -> AXValueBox in
+            AXUIElementSetMessagingTimeout(element.element, timeout)
+            var value: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(element.element, name as CFString, &value)
+            guard result == .success else { throw Self.map(result) }
+            guard let value else { return .none }
+            return Self.box(value)
+        }
     }
 
     public func children(of element: AXElementRef) throws(AXReadError) -> [AXElementRef] {
@@ -110,17 +122,23 @@ public struct AXClient: AXReading {
     }
 
     public func press(_ element: AXElementRef) throws(AXReadError) {
-        AXUIElementSetMessagingTimeout(element.element, timeout)
-        let result = AXUIElementPerformAction(element.element, kAXPressAction as CFString)
-        guard result == .success else { throw Self.map(result) }
+        let timeout = timeout
+        try ownProcess.call(about: element) { () throws(AXReadError) in
+            AXUIElementSetMessagingTimeout(element.element, timeout)
+            let result = AXUIElementPerformAction(element.element, kAXPressAction as CFString)
+            guard result == .success else { throw Self.map(result) }
+        }
     }
 
     public func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] {
-        AXUIElementSetMessagingTimeout(element.element, timeout)
-        var names: CFArray?
-        let result = AXUIElementCopyAttributeNames(element.element, &names)
-        guard result == .success else { throw Self.map(result) }
-        return (names as? [String]) ?? []
+        let timeout = timeout
+        return try ownProcess.call(about: element) { () throws(AXReadError) -> [String] in
+            AXUIElementSetMessagingTimeout(element.element, timeout)
+            var names: CFArray?
+            let result = AXUIElementCopyAttributeNames(element.element, &names)
+            guard result == .success else { throw Self.map(result) }
+            return (names as? [String]) ?? []
+        }
     }
 
     // MARK: Translating

@@ -102,6 +102,23 @@ struct ClickReplayLifecycleTests {
         #expect(!lifecycle.keepsRunLoopGoing, "a stop that couldn't wake the loop is seen the next time it asks")
     }
 
+    @Test func finishedRunLoopExits() {
+        // A loop with nothing to wait for returns `.finished` at once, and would be run again at once for ever.
+        let running = started()
+        #expect(!running.keepsRunLoopGoing(after: .finished))
+        #expect(!running.keepsRunLoopGoing(after: .stopped), "a stop that ended the slice ends the thread's loop")
+        // The ordinary ends of a slice go on while the tap runs.
+        #expect(running.keepsRunLoopGoing(after: .timedOut))
+        #expect(running.keepsRunLoopGoing(after: .handledSource))
+        // And nothing goes on once the tap is stopped.
+        var stopped = started()
+        _ = stopped.stop()
+        #expect(!stopped.keepsRunLoopGoing(after: .timedOut))
+        #expect(!stopped.keepsRunLoopGoing(after: .handledSource))
+        // Before the first slice the result is the ordinary one.
+        #expect(started().keepsRunLoopGoing(after: .timedOut))
+    }
+
     @Test func theLoopIsRunInSlicesSoAStopIsSeenWithinOne() {
         #expect(ClickReplayTap.runLoopSlice == 0.25)
     }

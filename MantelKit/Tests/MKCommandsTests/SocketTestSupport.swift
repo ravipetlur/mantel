@@ -1,10 +1,12 @@
 import Darwin
 import Foundation
 import MKCommands
+import MKTestSupport
 import Synchronization
 
 // What the socket tests share: a pretend peer inspector, a client that speaks the wire format by hand, and a gate for
-// making a handler wait for the test. Nothing here sleeps: a test waits for an event, with a limit.
+// making a handler wait for the test. Nothing here waits a fixed time: a test waits for an event, with a limit (the one place a poll is
+// used is a lock that a child process in the middle of being spawned still holds; see `LockHolder.takeWhenFree`).
 
 /// An inspector that knows nobody: it says whatever it was told, whoever connects.
 struct FakePeerInspector: PeerInspecting {
@@ -19,7 +21,7 @@ enum Fixtures {
                                 bundlePath: "/Applications/Mantel.app")
     /// Mantel's own tool, as `own` sees it.
     static let tool = PeerInfo(pid: 4321, signingIdentifier: "com.example.mantel.cli", teamIdentifier: team,
-                               isValidSignature: true, executablePath: "/Applications/Mantel.app/Contents/MacOS/mantel")
+                               isValidSignature: true, executablePath: "/Applications/Mantel.app/Contents/Helpers/mantel")
     /// Some other program, validly signed by the same team.
     static let stranger = PeerInfo(pid: 4322, signingIdentifier: "com.apple.Terminal", teamIdentifier: team,
                                    isValidSignature: true, executablePath: "/System/Applications/Utilities/Terminal.app")
@@ -75,6 +77,41 @@ final class LockHolder: Sendable {
 
     deinit {
         close(fd)
+    }
+
+    /// Takes the lock once it is free: for a lock that was let go of a moment ago, which a test asks about right away. Nil when it is
+    /// still held after `limit`.
+    ///
+    /// **Why not just `init?(url:)`.** The tests run in one process, and some of them start child programs (`codesign`, `clang`) on
+    /// other threads. A child gets a copy of every descriptor the process has open when it is made and drops the ones marked
+    /// close-on-exec (which the lock file's is) only when it runs its program, a few milliseconds later. An `flock` belongs to the open
+    /// file, not to the descriptor, so for those milliseconds a lock the test has just closed is still held, by a child that is on its
+    /// way to being somebody else. A lock that is meant to be held (a test about that) never waits.
+    static func takeWhenFree(url: URL, within limit: Duration = .seconds(5)) async -> LockHolder? {
+        await withinTimeLimit(limit) {
+            while true {
+                if let holder = LockHolder(url: url) { return holder }
+                guard (try? await Task.sleep(for: .milliseconds(1))) != nil else { return nil }
+            }
+        } ?? nil
+    }
+}
+
+extension ControlSocketServer {
+    /// Starts the server once the lock is free: the same wait as `LockHolder.takeWhenFree`, for a server that starts right after
+    /// another one that held the lock has stopped (or after a start that failed). Throws what `start()` throws, `.inUse` included if
+    /// the lock is still held after `limit`.
+    func startWhenTheLockIsFree(within limit: Duration = .seconds(5)) async throws(SocketError) {
+        let deadline = ContinuousClock.now.advanced(by: limit)
+        while true {
+            do throws(SocketError) {
+                try start()
+                return
+            } catch {
+                guard error == .inUse, ContinuousClock.now < deadline else { throw error }
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
     }
 }
 
@@ -257,5 +294,47 @@ final class CannedServer: Sendable {
     deinit {
         close(listener)
         unlink(path)
+    }
+}
+
+/// An `accept` that fails as a test says, a number of times, and then does what `accept(2)` does. It counts every call.
+final class AcceptScript: Sendable {
+    private struct State {
+        var failuresLeft: Int
+        var error: Int32
+        var count = 0
+    }
+
+    private let state: Mutex<State>
+
+    init(failures: Int, error: Int32) {
+        state = Mutex(State(failuresLeft: failures, error: error))
+    }
+
+    /// How many times it has been called.
+    var count: Int { state.withLock { $0.count } }
+
+    /// Makes the next `times` calls fail with `error`.
+    func fail(times: Int, error: Int32) {
+        state.withLock {
+            $0.failuresLeft = times
+            $0.error = error
+        }
+    }
+
+    var accept: @Sendable (Int32) -> Int32 {
+        { [self] listener in
+            let failure = state.withLock { state -> Int32? in
+                state.count += 1
+                guard state.failuresLeft > 0 else { return nil }
+                state.failuresLeft -= 1
+                return state.error
+            }
+            if let failure {
+                errno = failure
+                return -1
+            }
+            return Darwin.accept(listener, nil, nil)
+        }
     }
 }

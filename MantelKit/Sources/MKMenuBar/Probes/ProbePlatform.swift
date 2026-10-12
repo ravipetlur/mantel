@@ -2,12 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import MKCore
-
-/// Which windows an app has on screen. `click-replay` watches Notification Center's: a click on the clock that works opens one.
-public protocol WindowWatching: Sendable {
-    /// The numbers of the windows on screen that belong to a running app with this bundle ID.
-    func onScreenWindows(ownedBy bundleID: String) -> Set<Int>
-}
+import Synchronization
 
 /// A tap that holds clicks and replays them (`ClickReplayTap`, or a stand-in in a test).
 public protocol ClickReplaying: Sendable {
@@ -18,9 +13,8 @@ public protocol ClickReplaying: Sendable {
 extension ClickReplayTap: ClickReplaying {}
 
 /// Everything a probe reaches the system through, other than the reader, the plist files and the grants, which the runner is
-/// given. The live one is `.live`; tests give a fake of each piece, so that no probe in a test touches the real system.
+/// given. The live one is `.live(runningApps:)`; tests give a fake of each piece, so that no probe in a test touches the real system.
 public struct ProbePlatform: Sendable {
-    public typealias RunningApp = (pid: pid_t, bundleID: String?, name: String?)
     /// `onClick` is called inside the tap's event callback for each click it holds, before the replay is scheduled; `onReplay`
     /// right after the replayed mouse-down is posted.
     public typealias MakeClickTap = @Sendable (_ rects: [CGRect], _ delay: Duration, _ lifetime: Duration,
@@ -29,15 +23,19 @@ public struct ProbePlatform: Sendable {
 
     public var allowlist: any AllowlistControlling
     public var capture: any StripCapturing
-    public var windows: any WindowWatching
+    /// The windows on screen: `click-replay` watches for the panel a click on the clock opens (`OpenedSystemUI`), and the inventory
+    /// lists the menu bar's own windows.
+    public var windowList: any WindowListReading
     public var makeClickTap: MakeClickTap
     /// Every running app that has a bundle ID, background-only ones included: what an allowlist has to name, since one that
-    /// left an app out would conceal its status items. (The reader is given the narrower `RunningApps.current()`.)
+    /// left an app out would conceal its status items (`RunningAppsSource.all`; the reader is given the narrower `regular`).
     public var runningApps: @Sendable () -> [RunningApp]
     /// What the numbers were measured on: macOS build, model and Mantel version.
     public var environment: @Sendable () async -> [String: String]
     /// `NSStatusBar.system.thickness`, which can only be read on the main actor.
     public var statusBarThickness: @Sendable () async -> Double
+    /// What AppKit says of each screen, which can only be read on the main actor.
+    public var screens: @Sendable () async -> [ScreenFacts]
     public var screenRecordingGranted: @Sendable () -> Bool
     /// Mantel's own bundle ID; the test item's is this with `.testitem` after it.
     public var ownBundleID: String
@@ -46,76 +44,72 @@ public struct ProbePlatform: Sendable {
     public var isInstalledCopy: Bool
     /// Where this copy is, for the refusal's text.
     public var copyPath: String
+    /// The process ID of the app that is in front, if there is one: the inventory records where its menus are.
+    public var frontAppPID: @Sendable () -> pid_t? = { nil }
 
-    public init(allowlist: any AllowlistControlling, capture: any StripCapturing, windows: any WindowWatching,
+    public init(allowlist: any AllowlistControlling, capture: any StripCapturing, windowList: any WindowListReading,
                 makeClickTap: @escaping MakeClickTap, runningApps: @escaping @Sendable () -> [RunningApp],
                 environment: @escaping @Sendable () async -> [String: String],
                 statusBarThickness: @escaping @Sendable () async -> Double,
+                screens: @escaping @Sendable () async -> [ScreenFacts],
                 screenRecordingGranted: @escaping @Sendable () -> Bool, ownBundleID: String, isInstalledCopy: Bool,
-                copyPath: String) {
+                copyPath: String, frontAppPID: @escaping @Sendable () -> pid_t? = { nil }) {
         self.allowlist = allowlist
         self.capture = capture
-        self.windows = windows
+        self.windowList = windowList
         self.makeClickTap = makeClickTap
         self.runningApps = runningApps
         self.environment = environment
         self.statusBarThickness = statusBarThickness
+        self.screens = screens
         self.screenRecordingGranted = screenRecordingGranted
         self.ownBundleID = ownBundleID
         self.isInstalledCopy = isInstalledCopy
         self.copyPath = copyPath
+        self.frontAppPID = frontAppPID
     }
 
     /// Whether the app at `bundleURL` is the copy macOS honours the allowlist for: directly in `/Applications`, not in the
     /// person's own `~/Applications`, not a translocated one, not one in a build folder.
+    ///
+    /// Both sides are compared as canonical paths (`CanonicalPath.of`: every link resolved), so a folder that is a link to
+    /// `/Applications` holds the installed copy, and an entry in `/Applications` that is a link to a build folder doesn't.
     public static func isInstalledCopy(at bundleURL: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         InstallLocation.verdict(for: bundleURL, home: home) == .applications
     }
 
-    /// The real system.
-    public static var live: ProbePlatform {
+    /// The real system, with the running apps from the one source the app keeps.
+    public static func live(runningApps: RunningAppsSource) -> ProbePlatform {
         ProbePlatform(
             allowlist: LiveAllowlist(),
             capture: StripCapture(),
-            windows: LiveWindowWatcher(),
+            windowList: LiveWindowList(),
             makeClickTap: { rects, delay, lifetime, onClick, onReplay in
                 ClickReplayTap(rects: rects, delay: delay, lifetime: lifetime, onClick: onClick, onReplay: onReplay)
             },
-            runningApps: { RunningApps.all() },
+            runningApps: { runningApps.all },
             environment: { ProbeEnvironment.current() },
             statusBarThickness: { await MainActor.run { NSStatusBar.system.thickness } },
+            screens: { await MainActor.run { NSScreen.screens.compactMap(ScreenFacts.init(screen:)) } },
             screenRecordingGranted: { CGPreflightScreenCaptureAccess() },
             ownBundleID: Bundle.main.bundleIdentifier ?? "com.example.mantel",
             isInstalledCopy: isInstalledCopy(at: Bundle.main.bundleURL),
-            copyPath: Bundle.main.bundleURL.path(percentEncoded: false))
+            copyPath: Bundle.main.bundleURL.path(percentEncoded: false),
+            frontAppPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
     }
 }
 
-/// The apps that are running, as the menu bar reader wants them.
-public enum RunningApps {
-    /// Every running app that can show something (not a background-only process), by process ID, bundle ID and name: what the
-    /// menu bar reader asks about.
-    public static func current() -> [(pid: pid_t, bundleID: String?, name: String?)] {
-        read(includingBackgroundOnly: false)
-    }
+/// "Enable platform test": whether the probes that change the person's menu bar may run. It is read by the probe runner from any
+/// thread, and set by the Settings pane, so it is a value of its own. It is never saved: a new one is off, and the app makes one at
+/// every launch.
+public final class PlatformTestSwitch: Sendable {
+    private let flag = Mutex(false)
 
-    /// Every running app that has a bundle ID, background-only ones too: what an allowlist has to name.
-    public static func all() -> [(pid: pid_t, bundleID: String?, name: String?)] {
-        read(includingBackgroundOnly: true).filter { $0.bundleID != nil }
-    }
+    public init() {}
 
-    /// `NSWorkspace` updates the list on the main thread, so it is read there: from another thread this waits for the main
-    /// thread, which nothing here makes wait for it.
-    private static func read(includingBackgroundOnly: Bool) -> [(pid: pid_t, bundleID: String?, name: String?)] {
-        if Thread.isMainThread { return list(includingBackgroundOnly) }
-        return DispatchQueue.main.sync { list(includingBackgroundOnly) }
-    }
-
-    private static func list(_ includingBackgroundOnly: Bool) -> [(pid: pid_t, bundleID: String?, name: String?)] {
-        NSWorkspace.shared.runningApplications.compactMap { app in
-            guard includingBackgroundOnly || app.activationPolicy != .prohibited else { return nil }
-            return (app.processIdentifier, app.bundleIdentifier, app.localizedName)
-        }
+    public var isOn: Bool {
+        get { flag.withLock { $0 } }
+        set { flag.withLock { $0 = newValue } }
     }
 }
 
@@ -140,23 +134,20 @@ public enum ProbeEnvironment {
     }
 }
 
-/// The windows on screen, from the window list (which gives owners and numbers without needing Screen Recording).
-struct LiveWindowWatcher: WindowWatching {
-    func onScreenWindows(ownedBy bundleID: String) -> Set<Int> {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        var numbers: Set<Int> = []
-        var owners: [pid_t: String?] = [:]
-        for window in list {
-            guard let pid = window["kCGWindowOwnerPID"] as? pid_t, let number = window["kCGWindowNumber"] as? Int else { continue }
-            let owner: String?
-            if let known = owners[pid] {
-                owner = known
-            } else {
-                owner = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-                owners[pid] = .some(owner)
-            }
-            if owner == bundleID { numbers.insert(number) }
+extension ScreenFacts {
+    /// What `NSScreen` says, for the notch probe. A screen without a display number can't be told apart from the others.
+    @MainActor
+    init?(screen: NSScreen) {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+        let id = CGDirectDisplayID(number.uint32Value)
+        let uuid: String
+        if let reference = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() {
+            uuid = CFUUIDCreateString(nil, reference) as String
+        } else {
+            uuid = "display-\(id)"
         }
-        return numbers
+        self.init(uuid: uuid, frame: screen.frame, safeAreaTop: screen.safeAreaInsets.top,
+                  auxiliaryTopLeft: screen.auxiliaryTopLeftArea, auxiliaryTopRight: screen.auxiliaryTopRightArea,
+                  isBuiltIn: CGDisplayIsBuiltin(id) != 0)
     }
 }

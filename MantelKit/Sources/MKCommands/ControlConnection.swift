@@ -1,6 +1,7 @@
 import Darwin
 import Dispatch
 import Foundation
+import MKCore
 import Synchronization
 
 /// One client of the control socket, as the server sees it: its descriptor, the lines that have come in, and the replies
@@ -8,16 +9,27 @@ import Synchronization
 ///
 /// - **Reading** happens on the server's queue, whenever the descriptor has something: the bytes go through a
 ///   `LineCodec`, and each line (or an over-long one) is handed to `inbound`, which the connection's own task reads.
-/// - **Writing** is done by that task, with the descriptor in non-blocking mode and a limit on how long a client that
-///   doesn't read may keep it waiting.
+/// - **Writing** is done off the server's queue and off the threads Swift's concurrency runs on (on a queue of its own, which
+///   `send` waits for without blocking anything), with the descriptor in non-blocking mode and a limit on how long a client
+///   that doesn't read may keep a reply waiting.
+/// - **How much a client may have waiting.** `inbound` holds at most `maxPendingLines` lines that haven't been answered. A
+///   client that says more than that is cut off: what it had asked is answered, then `hasOverflowed` says why it ended, and
+///   the server tells it so and closes.
 /// - **Closing** has two parts, and the descriptor is closed when both are done: the server asks for it (`close()`),
 ///   and the read source has finished (a source's descriptor must stay open until its cancel handler has run). A client
 ///   that has only stopped sending is still answered; the task closes the connection when it has.
 ///
 /// Everything that can change is behind one lock, held only for single system calls, never while waiting.
 final class ControlConnection: Sendable {
-    /// How long a reply may wait for a client that doesn't read it.
-    static let writeTimeout = Duration.seconds(5)
+    /// How long a reply may wait for a client that doesn't read it: a second. After that the connection is closed.
+    static let writeTimeout = Duration.seconds(1)
+    /// How many lines may be waiting to be answered. A client that is served one request at a time and sends more than this
+    /// at once is saying too much.
+    static let maxPendingLines = 32
+    /// Where a reply is written while it waits for a client that may not read it: a queue that isn't the server's, so that one
+    /// slow client never holds the others up, and that isn't one of the threads Swift's tasks run on.
+    private static let writeQueue = DispatchQueue(label: "\(Log.subsystem).control-write", qos: .userInitiated,
+                                                  attributes: .concurrent)
 
     let id = UUID()
     /// What the client has sent, in order. It ends when the client stops sending or the connection is closed.
@@ -30,6 +42,8 @@ final class ControlConnection: Sendable {
         /// True when no read source is left to finish: none was made, or its cancel handler has run.
         var sourceFinished = true
         var closeRequested = false
+        /// The client sent more lines than `maxPendingLines` while they were waiting.
+        var overflowed = false
     }
 
     private let continuation: AsyncStream<LineCodecOutput>.Continuation
@@ -37,7 +51,9 @@ final class ControlConnection: Sendable {
 
     init(fd: Int32) {
         state = Mutex(State(fd: fd))
-        (inbound, continuation) = AsyncStream.makeStream(of: LineCodecOutput.self)
+        // The oldest lines are kept: what a client asked first is what it is answered first.
+        (inbound, continuation) = AsyncStream.makeStream(of: LineCodecOutput.self,
+                                                         bufferingPolicy: .bufferingOldest(Self.maxPendingLines))
     }
 
     // MARK: Reading
@@ -70,7 +86,13 @@ final class ControlConnection: Sendable {
         }
         switch outcome {
         case .read(let outputs):
-            for output in outputs { continuation.yield(output) }
+            for output in outputs {
+                guard case .dropped = continuation.yield(output) else { continue }
+                // Too many lines were waiting: what is waiting is still answered, and nothing more is read.
+                state.withLock { $0.overflowed = true }
+                stopReading()
+                break
+            }
         case .endOfStream:
             stopReading()
         case .failed:
@@ -87,6 +109,11 @@ final class ControlConnection: Sendable {
         continuation.finish()
     }
 
+    /// Whether the client said more than `maxPendingLines` at once, which is why `inbound` ended.
+    var hasOverflowed: Bool {
+        state.withLock { $0.overflowed }
+    }
+
     private func sourceDidFinish() {
         state.withLock { state in
             state.sourceFinished = true
@@ -97,8 +124,8 @@ final class ControlConnection: Sendable {
 
     // MARK: Writing
 
-    /// Sends `reply`. False when it couldn't be sent in full: the client has gone or won't read.
-    func send(_ reply: ReplyEnvelope) -> Bool {
+    /// Sends `reply`. False when it couldn't be sent in full: the client has gone, or hasn't read it within `writeTimeout`.
+    func send(_ reply: ReplyEnvelope) async -> Bool {
         let line: Data
         if let encoded = try? LineCodec.encode(reply) {
             line = encoded
@@ -108,9 +135,12 @@ final class ControlConnection: Sendable {
         } else {
             return false
         }
-        return write(line)
+        return await withCheckedContinuation { continuation in
+            Self.writeQueue.async { continuation.resume(returning: self.write(line)) }
+        }
     }
 
+    /// Writes all of `data`, waiting for room as long as `writeTimeout` allows. It blocks: it runs on `writeQueue`.
     private func write(_ data: Data) -> Bool {
         let bytes = [UInt8](data)
         var offset = 0

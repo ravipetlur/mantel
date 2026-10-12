@@ -65,13 +65,13 @@ struct OnboardingView: View {
     private var isPrimaryDisabled: Bool {
         switch model.step {
         case .location: model.isMoving
-        case .welcome, .accessibility, .done: false
+        case .welcome, .accessibility, .dots, .done: false
         }
     }
 
     private func primaryAction() {
         switch model.step {
-        case .welcome:
+        case .welcome, .dots:
             model.advance()
         case .accessibility:
             AccessibilityTrust.promptAndOpenSettings()
@@ -92,6 +92,7 @@ struct OnboardingView: View {
         case .welcome: "hand.wave"
         case .accessibility: "accessibility"
         case .location: "folder"
+        case .dots: "ellipsis.circle"
         case .done: "checkmark.seal.fill"
         }
     }

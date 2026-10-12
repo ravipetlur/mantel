@@ -10,8 +10,9 @@ public struct DisplayInfo: Codable, Sendable, Equatable {
     /// `NSScreen.localizedName`, for showing to the person.
     public let name: String
     public let frame: CGRect
-    /// The part of the frame not taken by the menu bar or the Dock. It is the frame less the menu bar's height at the
-    /// top, so a display that shows no menu bar has a `visibleFrame` that reaches `frame.maxY`.
+    /// The part of the frame not taken by the menu bar or the Dock. It is only a rough guide to the menu bar: it is a point or
+    /// two off its height, and reaches `frame.maxY` while the bar is set to hide. The bar's rectangle comes from MenuBarAgent's
+    /// window (`MenuBarGeometry`).
     public let visibleFrame: CGRect
     /// Pixels per point.
     public let scale: CGFloat
@@ -41,6 +42,10 @@ extension DisplayInfo {
     /// It runs from the right edge of the top-left area to the left edge of the top-right area, and from
     /// `safeAreaTop` below the frame's top up to the top. A screen has one only when it has a safe area at the top and
     /// both areas beside the camera housing (an area that is missing or empty doesn't count), and they leave a gap.
+    ///
+    /// The two areas are in global coordinates, the same space as `frame`, wherever the screen is in the arrangement
+    /// (measured on a built-in screen that was not the main display), so they are used as they are and nothing is added to
+    /// them.
     static func notchRect(frame: CGRect, safeAreaTop: CGFloat, auxiliaryTopLeft: CGRect?,
                           auxiliaryTopRight: CGRect?) -> CGRect? {
         guard safeAreaTop > 0,

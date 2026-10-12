@@ -24,22 +24,24 @@ public enum InstallLocation {
     }
 
     /// The verdict with `home` as the home folder, for tests. Only the folder the bundle is directly in counts:
-    /// `/Applications/Utilities/Mantel.app` is "elsewhere". The path is read as it is, with `..` resolved but no links
-    /// followed, so nothing needs to exist.
+    /// `/Applications/Utilities/Mantel.app` is "elsewhere". The bundle is read by its canonical path (`CanonicalPath`), so a
+    /// link in `/Applications` that leads to a build folder is judged by where it leads; nothing needs to exist.
     public static func verdict(for bundleURL: URL, home: URL) -> Verdict {
-        let folder = path(of: bundleURL.standardizedFileURL.deletingLastPathComponent())
+        let folder = (CanonicalPath.of(bundleURL) as NSString).deletingLastPathComponent
         if folder.contains("/AppTranslocation/") { return .translocated }
-        if folder == "/Applications" { return .applications }
-        if folder == path(of: home.standardizedFileURL.appending(path: "Applications", directoryHint: .isDirectory)) {
+        if folder == CanonicalPath.of(applicationsFolder) { return .applications }
+        if folder == CanonicalPath.of(home.appending(path: "Applications", directoryHint: .isDirectory)) {
             return .userApplications
         }
         return .elsewhere(folder)
     }
 
-    /// Whether two URLs are the same bundle: the same path once links are followed, `..` is resolved and a trailing slash
-    /// is dropped. Used before an app is replaced, so that the running one is never taken for another copy.
+    private static let applicationsFolder = URL(filePath: "/Applications", directoryHint: .isDirectory)
+
+    /// Whether two URLs are the same bundle: the same canonical path, which follows links, resolves `..` and drops a trailing
+    /// slash. Used before an app is replaced, so that the running one is never taken for another copy.
     public static func isSameBundle(_ one: URL, _ other: URL) -> Bool {
-        path(of: one.resolvingSymlinksInPath().standardizedFileURL) == path(of: other.resolvingSymlinksInPath().standardizedFileURL)
+        CanonicalPath.of(one) == CanonicalPath.of(other)
     }
 
     /// Why the running Mantel must not be moved to `/Applications`.

@@ -13,46 +13,77 @@ public enum PlistValue: Codable, Sendable, Equatable {
     case string(String), integer(Int), real(Double), bool(Bool), date(Date), data(Data)
     case array([PlistValue]), dictionary([String: PlistValue])
 
-    /// The value for an object from a property list, or `nil` if it, or anything inside it, isn't a property list type
-    /// (or is an integer that doesn't fit in 64 bits).
-    public init?(propertyList: Any) {
+    /// What reading an object from a property list came to.
+    public enum Conversion: Equatable {
+        case value(PlistValue)
+        /// Something in it isn't a property list type (or is an integer that doesn't fit in 64 bits).
+        case unrepresentable
+        /// It has more values than the limit. A property list read from a file can refer to one object many times, so a small one can
+        /// be an enormous tree when each reference is followed, and it is not followed beyond the limit.
+        case tooLarge
+    }
+
+    /// How many values (each string, number, list and dictionary, and what is in them) a conversion reads before it gives up.
+    public static let defaultNodeLimit = 200_000
+
+    /// The value for an object from a property list, or `nil` if it, or anything inside it, isn't a property list type (or is an
+    /// integer that doesn't fit in 64 bits), or if it has more than `nodeLimit` values in all.
+    public init?(propertyList: Any, nodeLimit: Int = PlistValue.defaultNodeLimit) {
+        guard case .value(let value) = Self.converting(propertyList, nodeLimit: nodeLimit) else { return nil }
+        self = value
+    }
+
+    /// The same, saying which of the two it was that kept it from being a value.
+    public static func converting(_ propertyList: Any, nodeLimit: Int = PlistValue.defaultNodeLimit) -> Conversion {
+        var remaining = nodeLimit
+        var tooLarge = false
+        guard let value = convert(propertyList, remaining: &remaining, tooLarge: &tooLarge) else { return tooLarge ? .tooLarge : .unrepresentable }
+        return .value(value)
+    }
+
+    private static func convert(_ propertyList: Any, remaining: inout Int, tooLarge: inout Bool) -> PlistValue? {
+        remaining -= 1
+        guard remaining >= 0 else {
+            tooLarge = true
+            return nil
+        }
         switch propertyList {
         case let string as String:
-            self = .string(string)
+            return .string(string)
         case let date as Date:
-            self = .date(date)
+            return .date(date)
         case let data as Data:
-            self = .data(data)
+            return .data(data)
         case let array as [Any]:
             var values: [PlistValue] = []
             values.reserveCapacity(array.count)
             for element in array {
-                guard let value = PlistValue(propertyList: element) else { return nil }
+                guard let value = convert(element, remaining: &remaining, tooLarge: &tooLarge) else { return nil }
                 values.append(value)
             }
-            self = .array(values)
+            return .array(values)
         case let dictionary as [String: Any]:
             var values: [String: PlistValue] = [:]
             values.reserveCapacity(dictionary.count)
             for (key, element) in dictionary {
-                guard let value = PlistValue(propertyList: element) else { return nil }
+                guard let value = convert(element, remaining: &remaining, tooLarge: &tooLarge) else { return nil }
                 values[key] = value
             }
-            self = .dictionary(values)
+            return .dictionary(values)
         case let number as NSNumber:
             // A boolean is an NSNumber too, and one that answers `intValue` and `doubleValue` like 1 and 0. Only the
             // Core Foundation type tells them apart.
             let reference = number as CFNumber
             if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                self = .bool(number.boolValue)
+                return .bool(number.boolValue)
             } else if CFNumberIsFloatType(reference) {
-                self = .real(number.doubleValue)
+                return .real(number.doubleValue)
             } else {
                 // An unsigned 64-bit number above `Int64.max` reads as a negative one, without any sign of loss.
                 if String(cString: number.objCType) == "Q", number.uint64Value > UInt64(Int64.max) { return nil }
                 var integer: Int64 = 0
                 guard CFNumberGetValue(reference, .sInt64Type, &integer) else { return nil }
-                self = .integer(Int(integer))
+                return .integer(Int(integer))
             }
         default:
             return nil

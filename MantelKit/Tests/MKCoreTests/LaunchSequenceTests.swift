@@ -4,14 +4,23 @@ import Testing
 
 @Suite("LaunchSequence")
 struct LaunchSequenceTests {
-    @Test func foldersAndTheLogComeBeforeTheSocket() {
-        #expect(LaunchSequence.beforeSocket == [.createFolders, .configureLog])
+    @Test func theFoldersComeBeforeTheSocket() {
+        #expect(LaunchSequence.beforeSocket == [.createFolders])
     }
 
     @Test func afterTheSocketComesTheRestInOrder() {
         #expect(LaunchSequence.steps(after: .listening) == [
-            .replayJournal, .loadSettings, .registerHotkeys, .createStatusItem, .observeDisplays, .openOnboardingIfNeeded,
+            .configureLog, .replayJournal, .loadSettings, .registerHotkeys, .createStatusItem, .observeDisplays, .startMenuBar,
+            .openOnboardingIfNeeded,
         ])
+    }
+
+    @Test func theLogIsPointedAtItsFileOnlyByACopyThatHoldsTheSocket() {
+        // A second copy leaves the running copy's log alone: its lines go to the unified log, and `mantel.log` stays as it was.
+        #expect(!LaunchSequence.beforeSocket.contains(.configureLog))
+        #expect(!LaunchSequence.steps(after: .heldByAnotherMantel).contains(.configureLog))
+        #expect(LaunchSequence.steps(after: .listening).first == .configureLog)
+        #expect(LaunchSequence.steps(after: .notStarted).first == .configureLog)
     }
 
     @Test func aSocketThatCouldNotStartForAnotherReasonStillLaunches() {
@@ -26,9 +35,18 @@ struct LaunchSequenceTests {
         #expect(!LaunchSequence.steps(after: .heldByAnotherMantel).contains(.replayJournal))
     }
 
-    @Test func theJournalIsReplayedBeforeAnythingThatCouldRecordIntoIt() {
+    @Test func theJournalIsReplayedBeforeAnythingThatCouldRecordIntoIt() throws {
         let steps = LaunchSequence.steps(after: .listening)
-        #expect(steps.first == .replayJournal)
+        let log = try #require(steps.firstIndex(of: .configureLog))
+        let replay = try #require(steps.firstIndex(of: .replayJournal))
+        #expect(log < replay, "what the replay says is kept")
+        #expect(replay == steps.index(after: log))
+        #expect(steps.dropFirst(replay + 1).allSatisfy { $0 != .replayJournal })
+        // Everything that could record into the journal comes after it.
+        for later in [LaunchStep.loadSettings, .registerHotkeys, .createStatusItem, .observeDisplays, .startMenuBar, .openOnboardingIfNeeded] {
+            let index = try #require(steps.firstIndex(of: later))
+            #expect(index > replay)
+        }
     }
 
     @Test func settingsAreLoadedBeforeTheStatusItemAndOnboardingCanSaveThem() throws {
@@ -38,6 +56,24 @@ struct LaunchSequenceTests {
         let onboarding = try #require(steps.firstIndex(of: .openOnboardingIfNeeded))
         #expect(load < statusItem)
         #expect(load < onboarding)
+    }
+
+    @Test func startMenuBarComesAfterObserveDisplays() throws {
+        // The session hides by the sections and the displays' bars, so the displays are watched first; and it starts only once the
+        // journal's replay and the settings are behind it.
+        let steps = LaunchSequence.steps(after: .listening)
+        let displays = try #require(steps.firstIndex(of: .observeDisplays))
+        let menuBar = try #require(steps.firstIndex(of: .startMenuBar))
+        #expect(menuBar == steps.index(after: displays))
+        let replay = try #require(steps.firstIndex(of: .replayJournal))
+        let load = try #require(steps.firstIndex(of: .loadSettings))
+        let statusItem = try #require(steps.firstIndex(of: .createStatusItem))
+        #expect(replay < menuBar && load < menuBar && statusItem < menuBar)
+        // Onboarding opens with the menu bar already hiding what the person put away, not the other way round.
+        let onboarding = try #require(steps.firstIndex(of: .openOnboardingIfNeeded))
+        #expect(menuBar < onboarding)
+        // A copy that hands off never starts it.
+        #expect(!LaunchSequence.steps(after: .heldByAnotherMantel).contains(.startMenuBar))
     }
 
     @Test func hotkeysAreRegisteredFromTheSettingsThatHaveBeenLoaded() throws {

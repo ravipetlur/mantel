@@ -3,11 +3,16 @@ import SwiftUI
 
 /// The welcome window, a step at a time. It is `OnboardingView.size` and can't be resized, by the person or by what a step
 /// shows. Closing it ends what its steps were doing (their polling).
+///
+/// While it is open Mantel is an ordinary app, with a Dock icon and a place in ⌘-Tab, and it comes to the front through
+/// `ActivationPolicyOwner`, as Settings does.
 final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     private let content: DroppableContent
+    private let activation: ActivationPolicyOwner
 
     /// `finish` is called when the person presses Done.
-    init(finish: @escaping () -> Void) {
+    init(activation: ActivationPolicyOwner, finish: @escaping () -> Void) {
+        self.activation = activation
         let model = OnboardingModel(finish: finish)
         content = DroppableContent { AnyView(OnboardingView(model: model)) }
         let window = NSWindow(contentViewController: content.controller)
@@ -26,12 +31,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
     func show() {
         content.restore()
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        if let window { activation.show(window, as: .onboarding) }
     }
 
     func windowWillClose(_ notification: Notification) {
         content.drop()
+        activation.windowClosed(.onboarding)
     }
 }

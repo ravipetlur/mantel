@@ -14,10 +14,12 @@ import Foundation
 ///   to `init`. If the system won't make a security-scoped bookmark, a plain one is made (and logged).
 ///
 /// `grants.json` is read once, at first use. As with every settings document, it is saved a moment after the change
-/// (`SettingsStore.flush` writes it at once).
+/// (`SettingsStore.flush` writes it at once). Each change is handed to the store after the one before it, so that the store
+/// always ends up with the last change, which has all the others in it.
 public actor FileGrantStore {
     typealias BookmarkMaker = @Sendable (URL, URL.BookmarkCreationOptions) throws -> Data
     typealias DocumentLoader = @Sendable (SettingsStore) async -> GrantsDocument
+    typealias DocumentSaver = @Sendable (SettingsStore, GrantsDocument) async -> Void
 
     /// How a bookmark is made, and how the document is read, unless a test gives its own.
     static let systemBookmark: BookmarkMaker = { url, options in
@@ -26,18 +28,27 @@ public actor FileGrantStore {
     static let systemLoader: DocumentLoader = { store in
         await store.load(GrantsDocument.self)
     }
+    static let systemSaver: DocumentSaver = { store, document in
+        await store.save(document)
+    }
 
     private let store: SettingsStore
     private let bookmarkOptions: URL.BookmarkCreationOptions
     private let clock: any Clock
     private let makeBookmark: BookmarkMaker
     private let loadDocument: DocumentLoader
+    private let saveDocument: DocumentSaver
     /// Nil until the first use has read it.
     private var document: GrantsDocument?
     /// The read of the document that is under way, for every call that finds the document not yet read to wait for.
     private var loading: Task<GrantsDocument, Never>?
+    /// The last save handed to the store. Each save waits for the one before it, so that they reach the store in the order of
+    /// the changes, however long one of them takes.
+    private var lastSave: Task<Void, Never>?
     /// How many calls are waiting for that read. For tests.
     private(set) var loadWaiters = 0
+    /// Which renewals of a stale bookmark have been said in the log (`GrantRenewalLogging`).
+    private var renewalLogging = GrantRenewalLogging()
 
     /// `bookmarkOptions` are the options for the bookmarks it makes. The tests give `[]`, a plain bookmark, which doesn't
     /// depend on what the system lets an unsandboxed app scope.
@@ -47,18 +58,20 @@ public actor FileGrantStore {
         self.init(store: store, bookmarkOptions: bookmarkOptions, clock: clock, makeBookmark: Self.systemBookmark)
     }
 
-    /// As the public one, with the way a bookmark is made, and the way the document is read, given: a test makes a
-    /// bookmark fail, or counts the reads.
+    /// As the public one, with the way a bookmark is made, the way the document is read and the way it is saved given: a test
+    /// makes a bookmark fail, counts the reads, or holds a save.
     init(store: SettingsStore,
          bookmarkOptions: URL.BookmarkCreationOptions = [.withSecurityScope],
          clock: any Clock = SystemClock(),
          makeBookmark: @escaping BookmarkMaker,
-         loadDocument: @escaping DocumentLoader = FileGrantStore.systemLoader) {
+         loadDocument: @escaping DocumentLoader = FileGrantStore.systemLoader,
+         saveDocument: @escaping DocumentSaver = FileGrantStore.systemSaver) {
         self.store = store
         self.bookmarkOptions = bookmarkOptions
         self.clock = clock
         self.makeBookmark = makeBookmark
         self.loadDocument = loadDocument
+        self.saveDocument = saveDocument
     }
 
     // MARK: Granting
@@ -91,6 +104,7 @@ public actor FileGrantStore {
             document.grants.removeAll { $0.kind == kind }
             document.grants.append(grant)
         }
+        renewalLogging.startOver(kind)
         Log.info("grants", "\(kind.rawValue) granted")
         return grant
     }
@@ -103,7 +117,7 @@ public actor FileGrantStore {
     /// - Throws: `.stale` if there is no grant, or the file is gone or has moved (the grant is then removed, and `body`
     ///   doesn't run); otherwise whatever `body` throws.
     public func withAccess<T: Sendable>(_ kind: FileGrantKind, _ body: (URL) throws -> T) async throws -> T {
-        guard let grant = await grant(for: kind) else { throw FileGrantError.stale }
+        guard let grant = await grant(for: kind) else { throw FileGrantError.stale(fileName: kind.fileName) }
 
         let resolved: (url: URL, isStale: Bool)
         do {
@@ -111,13 +125,13 @@ public actor FileGrantStore {
         } catch {
             Log.warning("grants", "\(kind.rawValue) can't be opened any more (\(Self.describe(error))); the grant is removed")
             await revoke(kind)
-            throw FileGrantError.stale
+            throw FileGrantError.stale(fileName: kind.fileName)
         }
         // A bookmark follows a file that moves. The grant is for the file where it was granted.
-        guard ExpectedFile.canonicalPath(resolved.url) == ExpectedFile.canonicalPath(URL(filePath: grant.path)) else {
+        guard CanonicalPath.of(resolved.url) == CanonicalPath.of(URL(filePath: grant.path)) else {
             Log.warning("grants", "\(kind.rawValue) has moved; the grant is removed")
             await revoke(kind)
-            throw FileGrantError.stale
+            throw FileGrantError.stale(fileName: kind.fileName)
         }
 
         let url = resolved.url
@@ -136,7 +150,10 @@ public actor FileGrantStore {
         do {
             fresh = try bookmarkData(of: url)
         } catch {
-            Log.warning("grants", "\(old.kind.rawValue) has a stale bookmark that couldn't be renewed (\(Self.describe(error)))")
+            // Every failure is said: it is not the routine one.
+            if renewalLogging.shouldLog(.couldNotRenew, for: old.kind) {
+                Log.warning("grants", "\(old.kind.rawValue) has a stale bookmark that couldn't be renewed (\(Self.describe(error)))")
+            }
             return
         }
         await update { document in
@@ -144,7 +161,10 @@ public actor FileGrantStore {
             guard let index = document.grants.firstIndex(where: { $0.kind == old.kind && $0.bookmark == old.bookmark }) else { return }
             document.grants[index] = FileGrant(kind: old.kind, bookmark: fresh, path: old.path, grantedAt: old.grantedAt)
         }
-        Log.info("grants", "\(old.kind.rawValue) had a stale bookmark; it was renewed")
+        // macOS rewrites its files again and again: once for each grant, for as long as Mantel runs.
+        if renewalLogging.shouldLog(.renewed, for: old.kind) {
+            Log.info("grants", "\(old.kind.rawValue) had a stale bookmark; it was renewed")
+        }
     }
 
     // MARK: Keeping
@@ -153,6 +173,7 @@ public actor FileGrantStore {
     public func revoke(_ kind: FileGrantKind) async {
         guard await grant(for: kind) != nil else { return }
         await update { $0.grants.removeAll { $0.kind == kind } }
+        renewalLogging.startOver(kind)
         Log.info("grants", "\(kind.rawValue) revoked")
     }
 
@@ -183,12 +204,22 @@ public actor FileGrantStore {
     }
 
     /// Changes the document and hands it to the store to save. The change and the new state happen without a wait in
-    /// between, so a call that overlaps this one sees the document before or after the change, not a half of it.
+    /// between, so a call that overlaps this one sees the document before or after the change, not a half of it; and the save
+    /// is chained after the one before in the same step, so the store is given the documents in the order they were made. (A
+    /// save that overtook the one before it would leave the store with the older document, and the newer grant lost at the next
+    /// launch.) Returns when the store has been given this document.
     private func update(_ change: (inout GrantsDocument) -> Void) async {
         var changed = await loadedDocument()
         change(&changed)
         document = changed
-        await store.save(changed)
+        let saved = changed
+        let previous = lastSave
+        let save = Task { [store, saveDocument] in
+            await previous?.value
+            await saveDocument(store, saved)
+        }
+        lastSave = save
+        await save.value
     }
 
     // MARK: Bookmarks

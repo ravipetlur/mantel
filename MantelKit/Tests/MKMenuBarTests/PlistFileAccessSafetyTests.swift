@@ -8,7 +8,7 @@ import Testing
 
 /// What the preferences service (`cfprefsd`) is made to say, in place of the real one, which a test must never reach for a
 /// domain that isn't its own. The file is read for real, from the test's folder.
-private final class ScriptedService: Sendable {
+final class ScriptedService: Sendable {
     enum Answer: Sendable {
         /// Says what the file says, and writes the file (a service that is in step with it).
         case followsTheFile
@@ -16,31 +16,93 @@ private final class ScriptedService: Sendable {
         case says(PlistValue?)
         /// The key holds something that isn't a property list type of Mantel's.
         case unrepresentable
+        /// Says this until something is written through the service, and then what the file says: a cache that is ahead of the
+        /// file, with the write that follows making them one.
+        case saysUntilWritten(PlistValue?)
+        /// Says this for the first `reads` reads through the service, and then what the file says: a write that reaches the
+        /// file while it is being waited for.
+        case saysForReads(Int, PlistValue?)
+        /// A service that is ahead of the file: it keeps what is written through it, and says that; the file follows only when the
+        /// test calls `flush(to:)`. What a group container's preferences do for a while after a write.
+        case aheadOfTheFile
+        /// A service that takes a write and doesn't keep it: what it says is what the file says, and a write changes neither. The
+        /// next read of the key is the old value.
+        case dropsWrites
     }
 
-    private let answer: Mutex<Answer>
-    private let writes = Mutex(0)
+    private struct State {
+        var answer: Answer
+        var reads = 0
+        var writes = 0
+        /// What was written through the service and the file hasn't been given yet (`aheadOfTheFile`); a nil is a removal.
+        var held: [String: PlistValue?] = [:]
+    }
+
+    private let state: Mutex<State>
+    private let beforeWrite = Mutex<(@Sendable () -> Void)?>(nil)
 
     init(_ answer: Answer) {
-        self.answer = Mutex(answer)
+        state = Mutex(State(answer: answer))
     }
 
     /// How many times anything was written through the service.
-    var writeCount: Int { writes.withLock { $0 } }
+    var writeCount: Int { state.withLock { $0.writes } }
+    /// How many times the service was asked for the key's value.
+    var readCount: Int { state.withLock { $0.reads } }
+
+    /// What runs at the start of every write, before anything is written: a test looks at what exists at that moment.
+    func onWrite(_ body: (@Sendable () -> Void)?) { beforeWrite.withLock { $0 = body } }
+
+    /// From now on the service says what the file says (a flush that has reached it).
+    func follow() { state.withLock { $0.answer = .followsTheFile } }
+
+    /// What the service holds is given to the file: the flush that was pending (`aheadOfTheFile`).
+    func flush(to url: URL) throws {
+        let held = state.withLock { $0.held }
+        for (key, value) in held { try PlistIO.writeFile(value, key: key, to: url) }
+    }
+
+    /// Something other than Mantel changes the key through the service (`aheadOfTheFile`): the file doesn't have it yet either.
+    func someoneElseWrites(_ value: PlistValue?, key: String) {
+        state.withLock { _ = $0.held.updateValue(value, forKey: key) }
+    }
 
     var io: PlistIO {
         var io = PlistIO.system
         io.read = { [self] url, key, strategy in
             guard strategy == .cfPreferences else { return try PlistIO.readFile(url, key: key) }
-            switch answer.withLock({ $0 }) {
-            case .followsTheFile: return try PlistIO.readFile(url, key: key)
-            case .says(let value): return value
+            let answer = state.withLock { state -> Answer in
+                state.reads += 1
+                if case .saysForReads(let reads, _) = state.answer, state.reads > reads { state.answer = .followsTheFile }
+                return state.answer
+            }
+            switch answer {
+            case .followsTheFile, .dropsWrites: return try PlistIO.readFile(url, key: key)
+            case .says(let value), .saysUntilWritten(let value), .saysForReads(_, let value): return value
             case .unrepresentable: throw PlistAccessError.notRepresentable(key: key)
+            case .aheadOfTheFile:
+                if let held = state.withLock({ $0.held[key] }) { return held }
+                return try PlistIO.readFile(url, key: key)
             }
         }
         io.write = { [self] value, key, url, _ in
-            writes.withLock { $0 += 1 }
-            try PlistIO.writeFile(value, key: key, to: url)
+            beforeWrite.withLock { $0 }?()
+            // Where a write goes: to the file, into what the service holds until it is flushed, or nowhere.
+            enum Landing { case file, held, nowhere }
+            let landing = state.withLock { state -> Landing in
+                state.writes += 1
+                if case .saysUntilWritten = state.answer { state.answer = .followsTheFile }
+                switch state.answer {
+                case .dropsWrites:
+                    return .nowhere
+                case .aheadOfTheFile:
+                    _ = state.held.updateValue(value, forKey: key)
+                    return .held
+                default:
+                    return .file
+                }
+            }
+            if landing == .file { try PlistIO.writeFile(value, key: key, to: url) }
         }
         return io
     }
@@ -186,9 +248,15 @@ struct PlistFileAccessSafetyTests {
 
     @Test func theRefusalSaysWhatHappened() {
         #expect(PlistAccessError.disagree(key: "trackedApplications").errorDescription
-                == "macOS's preferences service and the file disagree about trackedApplications, so nothing was changed.")
+                == "macOS's preferences service and the file disagree about this setting, so nothing was changed.")
         #expect(PlistAccessError.serviceSeesNothing(key: "trackedApplications").errorDescription
-                == "macOS's preferences service reports no value for trackedApplications, but the file has one, so nothing was changed.")
+                == "macOS's preferences service reports no value for this setting, but the file has one, so nothing was changed.")
+        // The key's name is for the log, not the person: no sentence that reaches Diagnostics names one.
+        for error in [PlistAccessError.disagree(key: "trackedApplications"), .serviceSeesNothing(key: "trackedApplications"),
+                      .notPersisted(key: "trackedApplications"), .notRepresentable(key: "trackedApplications")] {
+            #expect(error.errorDescription?.contains("trackedApplications") == false)
+            #expect(error.errorDescription?.contains("\"") == false)
+        }
         #expect(PlistAccessError.backupFailed(file: "com.apple.MenuBar.plist", reason: "no room").errorDescription
                 == "Mantel couldn't make a backup copy of com.apple.MenuBar.plist first, so nothing was changed: no room")
     }

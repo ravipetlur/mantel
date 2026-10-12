@@ -7,12 +7,16 @@ import MKMenuBar
 struct DiagnosticsRow: Identifiable {
     enum Kind: String {
         case accessibility, screenRecording, allowlist, layoutFile, approvalsFile, controlSocket, journal, logFile
+        /// The rows that come from what the menu bar session last said (`MenuBarModel`), not from a read of their own.
+        case hidingMethod, menuBar
     }
 
     let kind: Kind
     let check: DiagnosticsCheck
+    /// Which of the rows of one kind this is: the menu bar has a row for each thing that kept its read from being whole.
+    var index = 0
 
-    var id: Kind { kind }
+    var id: String { "\(kind.rawValue)-\(index)" }
 }
 
 /// Reads where each part of Mantel stands, for the Diagnostics pane, "Copy diagnostics" and `mantel diagnostics`. It only
@@ -25,11 +29,31 @@ enum DiagnosticsReport {
             await screenRecording(coordinator),
             allowlist(),
             await file(.menuBarLayout, kind: .layoutFile, title: "Layout file", coordinator),
-            await file(.controlCenterApprovals, kind: .approvalsFile, title: "\"Allow in the Menu Bar\" file", coordinator),
+            await file(.controlCenterApprovals, kind: .approvalsFile, title: "“Allow in the Menu Bar” file", coordinator),
             controlSocket(coordinator),
             await journal(coordinator),
             logFile(coordinator),
         ]
+    }
+
+    /// The rows that come from what the menu bar session last said: how icons are hidden, and how much of the menu bar was read. They are
+    /// made from `state` as it is (the pane reads it from the menu bar model, so that they change when it does), and say that nothing is
+    /// known yet while there is none.
+    ///
+    /// `forPane` is for the pane's own rows: a problem that Refresh puts right says so ("Try Refresh menu bar below."), as the button is
+    /// under the checks. The copied report and `mantel diagnostics` have no button, and carry the message alone.
+    static func liveRows(state: MenuBarState?, forPane: Bool = false) -> [DiagnosticsRow] {
+        let method = DiagnosticsRow(kind: .hidingMethod, check: HidingDiagnostics.hidingMethodCheck(state?.engine))
+        let menuBar = HidingDiagnostics.menuBarChecks(state?.inventory, suggestingRefresh: forPane).enumerated().map { index, check in
+            DiagnosticsRow(kind: .menuBar, check: check, index: index)
+        }
+        return [method] + menuBar
+    }
+
+    /// Every row, in the order the pane and the report show them: the permission checks first, then what the menu bar says, then the files.
+    static func merged(polled: [DiagnosticsRow], live: [DiagnosticsRow]) -> [DiagnosticsRow] {
+        let permissions = polled.prefix { $0.kind == .accessibility || $0.kind == .screenRecording }
+        return Array(permissions) + live + polled.dropFirst(permissions.count)
     }
 
     /// The home folder, as the report writes it out (`~`).
@@ -37,15 +61,19 @@ enum DiagnosticsReport {
         FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false).trimmingTrailingSlash()
     }
 
-    /// What "Copy diagnostics" copies.
-    static func text(rows: [DiagnosticsRow], probes: [ProbeName: ProbeReport]) -> String {
-        DiagnosticsText.render(checks: rows.map(\.check), probes: probes, home: homeFolder)
+    /// What "Copy diagnostics" copies: the rows, then what hiding changes and how each app answered (by bundle ID), then the probes.
+    static func text(rows: [DiagnosticsRow], state: MenuBarState?, probes: [ProbeName: ProbeReport]) -> String {
+        DiagnosticsText.render(checks: rows.map(\.check), blocks: HidingDiagnostics.blocks(engine: state?.engine, inventory: state?.inventory),
+                               probes: probes, home: homeFolder)
     }
 
     /// What `mantel diagnostics` answers, besides the build.
     static func json(for coordinator: AppCoordinator) async -> JSONValue {
-        let rows = await rows(for: coordinator)
-        return DiagnosticsText.json(checks: rows.map(\.check), probes: await coordinator.probes.latestReports(), home: homeFolder)
+        let state = coordinator.menuBar?.model.state
+        let rows = merged(polled: await rows(for: coordinator), live: liveRows(state: state))
+        return DiagnosticsText.json(checks: rows.map(\.check),
+                                    blocks: HidingDiagnostics.blocks(engine: state?.engine, inventory: state?.inventory),
+                                    probes: await coordinator.probes.latestReports(), home: homeFolder)
     }
 
     // MARK: The checks
@@ -108,6 +136,12 @@ enum DiagnosticsReport {
     }
 
     private static func journal(_ coordinator: AppCoordinator) async -> DiagnosticsRow {
+        // A journal that couldn't be read is left as it is, and nothing is changed in the system until the person moves it away.
+        guard await coordinator.journal.isUsable else {
+            let path = coordinator.paths.journalFile.path(percentEncoded: false)
+            return DiagnosticsRow(kind: .journal, check: DiagnosticsCheck(
+                title: "Journal", status: .problem, detail: JournalError.unreadable(path: path).errorDescription ?? path))
+        }
         let waiting = await coordinator.journal.records().count
         let detail = switch waiting {
         case 0: "No change is waiting to be put back."

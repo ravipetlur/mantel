@@ -10,12 +10,14 @@ import MKCore
 ///   Mantel's is made or read.
 /// - **The control socket's lock**: the first Mantel holds it for as long as it runs (`ControlSocketServer.start()` throws
 ///   `.inUse`), which finds a copy LaunchServices doesn't list, such as one started from another place under another
-///   identifier. The socket is the first thing `AppCoordinator` starts after the folders and the log, before the journal
-///   replay, so a second copy never replays the journal under the running one.
+///   identifier. The socket is the first thing `AppCoordinator` starts after the folders, before the log is pointed at its
+///   file and before the journal replay, so a second copy neither replays the journal under the running one nor writes to its
+///   log (what it says goes to the unified log).
 ///
 /// A copy quits only when `HandOff.decide` says so: after a hand-off has reached the running Mantel, or when the lock shows
 /// that one is alive. If a copy LaunchServices lists can't be reached, this one starts anyway and the socket's lock decides
-/// which of them stays.
+/// which of them stays. The hand-off is made once: by `AppDelegate` when LaunchServices lists the other copy, and otherwise by
+/// `AppCoordinator` when the lock is found held; a copy that has handed off and started anyway is not handed off again.
 enum SingleInstance {
     /// The Mantel that is already running, which this copy hands off to rather than starting: another live process with
     /// this app's bundle identifier (a Debug build and the one in Applications share it). Nil when this is the only one,

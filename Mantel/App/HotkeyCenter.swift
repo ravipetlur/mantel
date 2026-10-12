@@ -9,6 +9,16 @@ nonisolated enum HotkeyRegistrationError: Error, Equatable, Sendable {
     case osStatus(Int32)
 }
 
+/// What came of giving an action a shortcut.
+nonisolated enum HotkeySetOutcome: Equatable, Sendable {
+    /// Kept, and registered with macOS.
+    case saved
+    /// Not kept, and the shortcut the action had is as it was; the text says why, for the person.
+    case notSaved(String)
+    /// Kept, but macOS wouldn't register it (another app has it, most likely). The other app may let go of it.
+    case savedButNotRegistered(HotkeyRegistrationError)
+}
+
 /// Mantel's global hotkeys, on Carbon's `RegisterEventHotKey`: it works without any permission and says when a key goes up
 /// as well as when it goes down, which push-to-talk later needs.
 ///

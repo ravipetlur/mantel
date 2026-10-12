@@ -4,7 +4,7 @@ import MKCore
 import ScreenCaptureKit
 
 public enum StripCaptureError: Error, Equatable, LocalizedError {
-    /// The display reports no menu bar (it has none drawn on it, or it is set to hide).
+    /// The bar's rectangle is empty: MenuBarAgent has no window for the display.
     case noMenuBar
     /// ScreenCaptureKit has no display with this display's UUID.
     case displayNotFound
@@ -29,10 +29,10 @@ struct StripGeometry: Equatable {
     /// The size of the captured image, in pixels.
     let pixelSize: CGSize
 
-    static func of(_ display: DisplayInfo, in layout: DisplayLayout) throws(StripCaptureError) -> StripGeometry {
-        let appKitStrip = layout.menuBarStrip(of: display)
-        guard !appKitStrip.isEmpty else { throw .noMenuBar }
-        let strip = layout.cgRect(fromAppKit: appKitStrip)
+    /// - Parameter bar: the display's menu bar as MenuBarAgent draws it, which is the strip.
+    static func of(_ bar: MenuBarGeometry, display: DisplayInfo, layout: DisplayLayout) throws(StripCaptureError) -> StripGeometry {
+        guard !bar.rect.isEmpty else { throw .noMenuBar }
+        let strip = bar.rect
         let origin = layout.cgRect(fromAppKit: display.frame).origin
         return StripGeometry(strip: strip,
                              sourceRect: strip.offsetBy(dx: -origin.x, dy: -origin.y),
@@ -43,11 +43,12 @@ struct StripGeometry: Equatable {
 
 /// Which part of a strip's image an item is, in pixels. Pure arithmetic, so it is tested on its own.
 public enum CropMath {
-    /// The pixels of `item` in an image of `strip`, which is `scale` pixels to the point. Both rectangles are in the same
-    /// space (CoreGraphics global points, where Accessibility frames are). The rectangle is rounded out to whole pixels and
-    /// cut at the strip's edges, with its origin at the image's top-left corner. Nil when the item has no area, isn't on the
-    /// strip, or `scale` is not positive.
-    public static func pixelRect(strip: CGRect, item: CGRect, scale: CGFloat) -> CGRect? {
+    /// The pixels of `item` in an image of `bar`'s strip, which is `scale` pixels to the point. The strip is the bar's rectangle,
+    /// and both rectangles are in the same space (CoreGraphics global points, where Accessibility frames are). The rectangle is
+    /// rounded out to whole pixels and cut at the strip's edges, with its origin at the image's top-left corner. Nil when the item
+    /// has no area, isn't on the strip, or `scale` is not positive.
+    public static func pixelRect(bar: MenuBarGeometry, item: CGRect, scale: CGFloat) -> CGRect? {
+        let strip = bar.rect
         guard scale > 0, !strip.isEmpty, !item.isEmpty else { return nil }
         let visible = item.intersection(strip)
         guard !visible.isNull, !visible.isEmpty else { return nil }
@@ -64,16 +65,16 @@ public enum CropMath {
 /// Takes a picture of a display's menu bar. Screen Recording is optional for Mantel: without it this throws, and the item
 /// pictures fall back to the app's icon.
 public protocol StripCapturing: Sendable {
-    func capture(display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage
+    func capture(bar: MenuBarGeometry, display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage
 }
 
 /// The real one, through ScreenCaptureKit.
 public struct StripCapture: StripCapturing {
     public init() {}
 
-    /// The menu bar strip of `display` as an image, `display.scale` pixels to the point.
-    public func capture(display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage {
-        let geometry = try StripGeometry.of(display, in: layout)
+    /// The menu bar strip of `display` (`bar`) as an image, `display.scale` pixels to the point.
+    public func capture(bar: MenuBarGeometry, display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage {
+        let geometry = try StripGeometry.of(bar, display: display, layout: layout)
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let target = content.displays.first(where: { Self.uuid(of: $0.displayID) == display.uuid }) else {
@@ -94,8 +95,8 @@ public struct StripCapture: StripCapturing {
     }
 
     /// The part of a strip's image that an item is, or nil when it isn't on the strip (see `CropMath`).
-    public static func crop(_ image: CGImage, strip: CGRect, item: CGRect, scale: CGFloat) -> CGImage? {
-        guard let rect = CropMath.pixelRect(strip: strip, item: item, scale: scale) else { return nil }
+    public static func crop(_ image: CGImage, bar: MenuBarGeometry, item: CGRect, scale: CGFloat) -> CGImage? {
+        guard let rect = CropMath.pixelRect(bar: bar, item: item, scale: scale) else { return nil }
         return image.cropping(to: rect)
     }
 

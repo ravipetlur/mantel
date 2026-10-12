@@ -66,6 +66,8 @@ targets:
       - package: MantelKit
         product: MKCommands
       - package: MantelKit
+        product: MKLayout
+      - package: MantelKit
         product: MKMenuBar
       # The command-line tool goes into the app at Contents/Helpers/mantel, signed again as it is copied (keeping the
       # identifier it was built with), and the app only lets a program in over the control socket that is signed as this

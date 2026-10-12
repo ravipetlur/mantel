@@ -59,17 +59,13 @@ struct MantelPathsTests {
     }
 
     @Test func liveUsesApplicationSupportAndLogs() {
+        // The paths are compared as text and nothing is looked up: the live folders are the person's own, and this test must not
+        // make them or read them.
         let home = fileManager.homeDirectoryForCurrentUser.path
-        let expected = ["\(home)/Library/Application Support/Mantel", "\(home)/Library/Logs/Mantel"]
-        // Only whether the folders exist is looked at, before and after: building the paths must not create them.
-        let existedBefore = expected.map { fileManager.fileExists(atPath: $0) }
-
         let live = MantelPaths.live()
         #expect(live.root.path.hasSuffix("Library/Application Support/Mantel"))
         #expect(live.logs.path.hasSuffix("Library/Logs/Mantel"))
-        #expect(live.root.path == expected[0])
-        #expect(live.logs.path == expected[1])
-
-        #expect(expected.map { fileManager.fileExists(atPath: $0) } == existedBefore)
+        #expect(live.root.path == "\(home)/Library/Application Support/Mantel")
+        #expect(live.logs.path == "\(home)/Library/Logs/Mantel")
     }
 }

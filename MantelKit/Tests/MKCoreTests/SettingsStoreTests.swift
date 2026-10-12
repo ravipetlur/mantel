@@ -23,7 +23,7 @@ private struct TestSettings: SettingsDocument {
     }
 
     static func migrate(_ document: JSONValueTree, from version: Int) throws -> JSONValueTree {
-        guard version == 1 else { throw SettingsMigrationError(found: version, current: currentVersion) }
+        guard version == 1 else { throw SettingsMigrationError.noMigration(file: fileName, from: version, to: currentVersion) }
         var migrated = document
         migrated["name"] = migrated.removeValue(forKey: "title")
         return migrated
@@ -52,6 +52,14 @@ struct SettingsStoreTests {
 
     private func makeStore() -> SettingsStore {
         SettingsStore(paths: paths, clock: clock)
+    }
+
+    /// A store that has loaded both documents, so that either can be saved (a document the store hasn't loaded isn't saved).
+    private func makeLoadedStore(debounce: Duration = .milliseconds(500)) async -> SettingsStore {
+        let store = SettingsStore(paths: paths, clock: clock, debounce: debounce)
+        _ = await store.load(TestSettings.self)
+        _ = await store.load(OtherSettings.self)
+        return store
     }
 
     private func file(_ name: String) -> URL { paths.settings.appending(path: name) }
@@ -254,8 +262,8 @@ struct SettingsStoreTests {
     @Test func theDefaultMigrationKeepsACurrentDocumentAndRefusesAnyOther() throws {
         let document: JSONValueTree = ["flag": true]
         #expect(try OtherSettings.migrate(document, from: 1)["flag"] as? Bool == true)
-        #expect(throws: SettingsMigrationError(found: 0, current: 1)) { try OtherSettings.migrate(document, from: 0) }
-        #expect(throws: SettingsMigrationError(found: 2, current: 1)) { try OtherSettings.migrate(document, from: 2) }
+        #expect(throws: SettingsMigrationError.noMigration(file: "other.json", from: 0, to: 1)) { try OtherSettings.migrate(document, from: 0) }
+        #expect(throws: SettingsMigrationError.noMigration(file: "other.json", from: 2, to: 1)) { try OtherSettings.migrate(document, from: 2) }
     }
 
     @Test func readOnlyIsPerDocument() async throws {
@@ -270,10 +278,92 @@ struct SettingsStoreTests {
         #expect(try JSONDecoder().decode(Envelope<OtherSettings>.self, from: contents(of: file("other.json"))).document.flag)
     }
 
+    // MARK: Saving what was never read
+
+    @Test func saveBeforeLoadIsRefused() async throws {
+        // The file holds what the person set. A store that saved the defaults over it, because nothing had read it yet, would
+        // lose it.
+        let original = #"{"version": 2, "document": {"name": "the person's", "count": 9}}"#
+        let url = try plant(original)
+        let store = makeStore()
+
+        await store.save(TestSettings(name: "defaults"))
+        #expect(clock.sleeperCount == 0, "nothing is waiting to be written")
+        await store.flush()
+
+        #expect(try contents(of: url) == Data(original.utf8), "the file is as it was")
+        #expect(await store.writeCount == 0)
+
+        // Once it has been read, saving works, and a document that hasn't been is still refused.
+        _ = await store.load(TestSettings.self)
+        await store.save(OtherSettings(flag: true))
+        await store.save(TestSettings(name: "changed", count: 9))
+        await store.flush()
+        #expect(!exists(file("other.json")), "the other document was never loaded")
+        #expect(await store.writeCount == 1)
+        #expect(try JSONDecoder().decode(Envelope<TestSettings>.self, from: contents(of: file("settings.json"))).document.name == "changed")
+    }
+
+    @Test func aDocumentThatWasLoadedFromNoFileCanBeSaved() async throws {
+        let store = makeStore()
+        _ = await store.load(OtherSettings.self)
+        await store.save(OtherSettings(flag: true))
+        await store.flush()
+        #expect(exists(file("other.json")))
+    }
+
+    @Test func migrationErrorsReadWell() {
+        let none = SettingsMigrationError.noMigration(file: "settings.json", from: 1, to: 3)
+        #expect(none.errorDescription == "Mantel can't update settings.json from version 1 to 3. It was set aside, and the defaults are used.")
+        #expect(none.localizedDescription == none.errorDescription)
+
+        let failed = SettingsMigrationError.failed(file: "profiles.json", reason: "wrong type at count")
+        #expect(failed.errorDescription == "Mantel couldn't update profiles.json: wrong type at count. It was set aside, and the defaults are used.")
+        #expect(SettingsMigrationError.noMigration(file: "a", from: 1, to: 2) == .noMigration(file: "a", from: 1, to: 2))
+        #expect(SettingsMigrationError.noMigration(file: "a", from: 1, to: 2) != .failed(file: "a", reason: "x"))
+    }
+
+    // MARK: Old copies
+
+    @Test func settingsBackupsArePruned() async throws {
+        try fileManager.createDirectory(at: paths.backups, withIntermediateDirectories: true)
+        func plantBackup(_ name: String) throws {
+            try Data(name.utf8).write(to: paths.backups.appending(path: name))
+        }
+        let oldMigrated = (1 ... 6).map { "settings.json-v1-2020010\($0)-100000.json" }
+        let oldCorrupt = (1 ... 7).map { "corrupt-settings-2020010\($0)-100000.json" }
+        let unrelated = ["settings.json-v2-20200101-100000.json", "other.json-v1-20200101-100000.json", "corrupt-other-20200101-100000.json",
+                         "com.apple.MenuBar-20200101-100000.plist"]
+        for name in oldMigrated + oldCorrupt + unrelated { try plantBackup(name) }
+        let store = makeStore()
+
+        // A migration makes a copy of the old file: of the copies of this version of this file, the oldest and the four newest
+        // are kept.
+        try plant(#"{"version": 1, "document": {"title": "old", "count": 1}}"#)
+        _ = await store.load(TestSettings.self)
+        let migrated = names(in: paths.backups).filter { $0.hasPrefix("settings.json-v1-") }
+        #expect(migrated.count == 5, "\(migrated)")
+        #expect(migrated.first == oldMigrated[0], "the first copy ever is the person's original")
+        #expect(migrated.contains(oldMigrated[5]) && migrated.contains(oldMigrated[3]) && !migrated.contains(oldMigrated[1]))
+        #expect(migrated.contains { $0.wholeMatch(of: #/settings\.json-v1-2023\d{4}-\d{6}\.json/#) != nil }, "the new copy is among them")
+
+        // A file set aside as corrupt: the five newest.
+        try plant("{ corrupt", as: "settings.json")
+        _ = await store.load(TestSettings.self)
+        let corrupt = names(in: paths.backups).filter { $0.hasPrefix("corrupt-settings-") }
+        #expect(corrupt.count == 5, "\(corrupt)")
+        #expect(!corrupt.contains(oldCorrupt[0]) && !corrupt.contains(oldCorrupt[2]) && corrupt.contains(oldCorrupt[6]) && corrupt.contains(oldCorrupt[3]))
+        #expect(corrupt.contains { $0.wholeMatch(of: #/corrupt-settings-2023\d{4}-\d{6}\.json/#) != nil }, "the one just set aside is kept")
+
+        // Nothing else in the folder was touched.
+        let left = names(in: paths.backups)
+        for name in unrelated { #expect(left.contains(name), "\(name) was left alone") }
+    }
+
     // MARK: Saving
 
     @Test func saveIsDebouncedThenWritten() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
 
         await store.save(TestSettings(name: "first"))
         await clock.waitForSleepers(1)
@@ -297,7 +387,7 @@ struct SettingsStoreTests {
     }
 
     @Test func aSaveAfterAWriteStartsANewDebounce() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "one"))
         await clock.waitForSleepers(1)
         clock.advance(by: .milliseconds(500))
@@ -317,7 +407,7 @@ struct SettingsStoreTests {
     }
 
     @Test func theDebounceIsTheOneTheStoreWasGiven() async throws {
-        let store = SettingsStore(paths: paths, clock: clock, debounce: .seconds(5))
+        let store = await makeLoadedStore(debounce: .seconds(5))
         await store.save(TestSettings(name: "slow"))
         await clock.waitForSleepers(1)
         clock.advance(by: .milliseconds(4_999))
@@ -329,7 +419,7 @@ struct SettingsStoreTests {
     }
 
     @Test func eachDocumentHasItsOwnDebounce() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "a"))
         await clock.waitForSleepers(1)
         clock.advance(by: .milliseconds(400))
@@ -350,7 +440,7 @@ struct SettingsStoreTests {
     @Test func roundTripEqualsOriginal() async throws {
         let original = TestSettings(name: "Mantel ✓ “quoted” /slash/", count: 42,
                                     created: Date(timeIntervalSince1970: 1_700_000_000.5))
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(original)
         await store.flush()
 
@@ -359,14 +449,14 @@ struct SettingsStoreTests {
     }
 
     @Test func loadSeesASaveThatHasNotBeenWrittenYet() async {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "pending", count: 7))
         #expect(await store.load(TestSettings.self) == TestSettings(name: "pending", count: 7))
         #expect(!exists(file("settings.json")))
     }
 
     @Test func flushWritesPendingNow() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "now"))
         await store.save(OtherSettings(flag: true))
         #expect(!exists(file("settings.json")))
@@ -384,7 +474,7 @@ struct SettingsStoreTests {
     }
 
     @Test func aSaveAfterAFlushIsStillWritten() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "one"))
         await store.flush()
         await store.save(TestSettings(name: "two"))
@@ -396,7 +486,7 @@ struct SettingsStoreTests {
     }
 
     @Test func theFileIsVersionAndDocumentWithSortedKeysAndISODates() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "A", count: 1, created: Date(timeIntervalSince1970: 1_700_000_000)))
         await store.flush()
         let text = try String(contentsOf: file("settings.json"), encoding: .utf8)
@@ -413,7 +503,7 @@ struct SettingsStoreTests {
     }
 
     @Test func filesAreMode0600() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await store.save(TestSettings(name: "private"))
         await store.flush()
         #expect(try mode(of: file("settings.json")) == 0o600)
@@ -446,7 +536,7 @@ struct SettingsStoreTests {
     }
 
     @Test func savesOfDifferentDocumentsNeverInterleaveAndLeaveNoTemporaryFiles() async throws {
-        let store = makeStore()
+        let store = await makeLoadedStore()
         await withTaskGroup(of: Void.self) { group in
             for index in 0 ..< 25 {
                 group.addTask { await store.save(TestSettings(name: "name \(index)", count: index)) }

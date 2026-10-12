@@ -8,6 +8,14 @@ public enum FileGrantKind: String, Codable, Sendable, CaseIterable {
     case menuBarLayout
     /// `group.com.apple.controlcenter.plist`: the "Allow in the Menu Bar" approvals.
     case controlCenterApprovals
+
+    /// The name of the file, as the person is asked to choose it.
+    public var fileName: String {
+        switch self {
+        case .menuBarLayout: "com.apple.MenuBar.plist"
+        case .controlCenterApprovals: "group.com.apple.controlcenter.plist"
+        }
+    }
 }
 
 /// One file the person has picked, kept as a bookmark.
@@ -49,8 +57,8 @@ public enum FileGrantError: Error, Equatable {
     /// The file couldn't be bookmarked (it isn't there, or the system refused). The text says why.
     case bookmarkFailed(String)
     /// There is no usable grant: none was made, or the file is gone or has moved. A stale grant is revoked as it is found,
-    /// so the next step is the same in each case, to ask for the file again.
-    case stale
+    /// so the next step is the same in each case, to ask for the file again. `fileName` is the file the grant was for.
+    case stale(fileName: String)
 }
 
 extension FileGrantError: LocalizedError {
@@ -60,8 +68,8 @@ extension FileGrantError: LocalizedError {
             "That's not the file Mantel needs. Choose \(expected) in the folder that opened."
         case .bookmarkFailed(let reason):
             "Mantel couldn't keep access to that file (\(reason)). Choose it again."
-        case .stale:
-            "Mantel can't open that file any more. Choose it again."
+        case .stale(let fileName):
+            "Mantel lost access to \(fileName). Choose it again in Settings › Permissions."
         }
     }
 }
@@ -82,9 +90,9 @@ public struct ExpectedFile: Sendable, Equatable {
     public static func expected(_ kind: FileGrantKind, home: URL) -> ExpectedFile {
         let relative = switch kind {
         case .menuBarLayout:
-            "Library/Group Containers/com.apple.MenuBar/Library/Preferences/com.apple.MenuBar.plist"
+            "Library/Group Containers/com.apple.MenuBar/Library/Preferences/\(kind.fileName)"
         case .controlCenterApprovals:
-            "Library/Group Containers/group.com.apple.controlcenter/Library/Preferences/group.com.apple.controlcenter.plist"
+            "Library/Group Containers/group.com.apple.controlcenter/Library/Preferences/\(kind.fileName)"
         }
         return ExpectedFile(kind: kind, candidates: [home.appending(path: relative).path(percentEncoded: false)])
     }
@@ -97,12 +105,7 @@ public struct ExpectedFile: Sendable, Equatable {
     /// Whether `url` is one of the candidates, compared with symlinks resolved and the path standardized on both sides:
     /// `~/Library/Group Containers` may be reached through a link, and the open panel hands back either spelling.
     func matches(_ url: URL) -> Bool {
-        let chosen = Self.canonicalPath(url)
-        return candidates.contains { Self.canonicalPath(URL(filePath: $0)) == chosen }
-    }
-
-    /// The form two spellings of one file have in common.
-    static func canonicalPath(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false)
+        let chosen = CanonicalPath.of(url)
+        return candidates.contains { CanonicalPath.of(URL(filePath: $0)) == chosen }
     }
 }

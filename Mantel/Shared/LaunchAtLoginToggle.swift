@@ -10,7 +10,7 @@ struct LaunchAtLoginToggle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Toggle("Launch at login", isOn: Binding(get: { state.isOn }, set: setEnabled))
+            SettingsToggle("Launch at login", isOn: Binding(get: { state.isOn }, set: setEnabled))
             if state == .requiresApproval {
                 HStack(spacing: 8) {
                     Text(LoginItemFeedback.approvalMessage)

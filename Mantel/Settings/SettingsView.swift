@@ -25,8 +25,12 @@ struct SettingsView: View {
     private func detail(for pane: SettingsPane) -> some View {
         switch pane {
         case .general: GeneralPane(coordinator: coordinator)
+        case .layout: LayoutPane(coordinator: coordinator)
         case .hotkeys: HotkeysPane(coordinator: coordinator)
-        case .permissions: PermissionsPane(checker: coordinator.permissionChecker, grants: coordinator.grants)
+        case .permissions:
+            PermissionsPane(checker: coordinator.permissionChecker, grants: coordinator.grants,
+                            fileGranted: { coordinator.permissionsChanged() })
+        case .advanced: AdvancedPane(coordinator: coordinator)
         case .diagnostics: DiagnosticsPane(coordinator: coordinator)
         case .about: AboutPane()
         }

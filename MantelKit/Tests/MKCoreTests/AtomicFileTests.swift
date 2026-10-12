@@ -1,8 +1,17 @@
 import Foundation
 import MKTestSupport
+import Synchronization
 import Testing
 
 @testable import MKCore
+
+/// The calls a recording `FileSyncing` saw, in order.
+private final class Events: Sendable {
+    private let list = Mutex<[String]>([])
+
+    func add(_ event: String) { list.withLock { $0.append(event) } }
+    var all: [String] { list.withLock { $0 } }
+}
 
 /// Writing a file whole, and what that does to the file it replaces. Mantel's own files are private to the owner; a file that
 /// belongs to macOS keeps the mode, owner and extended attributes it had. Every test works on files in its own folder.
@@ -145,5 +154,92 @@ struct AtomicFileTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.url.path)
         #expect(try names() == ["target.plist"])
         #expect(try Data(contentsOf: target) == Data("old".utf8))
+    }
+
+    // MARK: Durability
+
+    /// A `FileSyncing` that notes each call with what the folder looked like at that moment.
+    private func recordingSyncing(events: Events, target: URL, old: String, new: String) -> FileSyncing {
+        @Sendable func holds(_ text: String) -> Bool { (try? Data(contentsOf: target)) == Data(text.utf8) }
+        return FileSyncing(
+            syncFile: { descriptor in
+                events.add("file sync (open file: \(descriptor >= 0), target still \(old): \(holds(old)))")
+            },
+            syncFolder: { folder in
+                events.add("folder sync (\(folder.lastPathComponent), target now \(new): \(holds(new)))")
+            })
+    }
+
+    @Test(arguments: [AtomicFile.Ownership.mantel, .system])
+    func fullSyncBeforeRenameThenFolderSync(ownership: AtomicFile.Ownership) throws {
+        try Data("old".utf8).write(to: target)
+        let events = Events()
+        let syncing = recordingSyncing(events: events, target: target, old: "old", new: "new")
+
+        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, ownership: ownership, syncing: syncing)
+
+        #expect(events.all == [
+            "file sync (open file: true, target still old: true)",
+            "folder sync (\(folder.url.lastPathComponent), target now new: true)",
+        ], "the data is synced while the old file is still in place, and the folder after the move")
+        #expect(try Data(contentsOf: target) == Data("new".utf8))
+    }
+
+    @Test func aNewFileIsSyncedTheSameWay() throws {
+        let events = Events()
+        let syncing = FileSyncing(
+            syncFile: { _ in events.add("file") },
+            syncFolder: { _ in events.add("folder") })
+        try AtomicFile.write(Data("first".utf8), to: target, synchronize: true, syncing: syncing)
+        #expect(events.all == ["file", "folder"])
+    }
+
+    @Test func nothingIsSyncedUnlessAskedFor() throws {
+        let events = Events()
+        let syncing = FileSyncing(
+            syncFile: { _ in events.add("file") },
+            syncFolder: { _ in events.add("folder") })
+        try AtomicFile.write(Data("x".utf8), to: target, syncing: syncing)
+        #expect(events.all.isEmpty)
+    }
+
+    @Test func aSyncThatFailsLeavesTheOldFileAndNoTemporaryOne() throws {
+        try Data("old".utf8).write(to: target)
+        struct DiskFull: Error {}
+        let syncing = FileSyncing(syncFile: { _ in throw DiskFull() }, syncFolder: { _ in })
+
+        #expect(throws: DiskFull.self) {
+            try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, syncing: syncing)
+        }
+        #expect(try Data(contentsOf: target) == Data("old".utf8), "the file was never replaced")
+        #expect(try names() == ["target.plist"])
+    }
+
+    @Test(arguments: [AtomicFile.Ownership.mantel, .system])
+    func folderSyncFailureAfterRenameStillSucceeds(ownership: AtomicFile.Ownership) throws {
+        try Data("old".utf8).write(to: target)
+        struct NoFolderSync: Error {}
+        let events = Events()
+        let syncing = FileSyncing(
+            syncFile: { _ in events.add("file") },
+            syncFolder: { _ in
+                events.add("folder")
+                throw NoFolderSync()
+            })
+
+        // The file is replaced by then; a throw would tell the caller it wasn't, and its memory and the file would disagree.
+        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, ownership: ownership, syncing: syncing)
+
+        #expect(events.all == ["file", "folder"])
+        #expect(try Data(contentsOf: target) == Data("new".utf8))
+        #expect(try names() == ["target.plist"], "and no temporary file is left")
+    }
+
+    @Test func theSystemsSyncingWorksOnARealFileAndFolder() throws {
+        // Not a way to see that F_FULLFSYNC was used, only that the real calls succeed where a write is made.
+        try AtomicFile.write(Data("durable".utf8), to: target, synchronize: true, syncing: .system)
+        #expect(try Data(contentsOf: target) == Data("durable".utf8))
+        try FileSyncing.system.syncFolder(folder.url)
+        #expect(throws: (any Error).self) { try FileSyncing.system.syncFolder(folder.url.appending(path: "no-such-folder")) }
     }
 }

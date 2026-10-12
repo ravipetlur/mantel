@@ -43,6 +43,7 @@ struct HotkeyBindingsTests {
 
     @Test func theFileIsAnObjectKeyedByActionWithNamedModifiers() async throws {
         let store = SettingsStore(paths: paths)
+        _ = await store.load(HotkeyBindings.self)
         await store.save(HotkeyBindings(bindings: [.openSettings: combo]))
         await store.flush()
 
@@ -69,6 +70,7 @@ struct HotkeyBindingsTests {
         // A newer Mantel's action must survive a save by this one.
         let future = HotkeyID(rawValue: "future-action")
         let store = SettingsStore(paths: paths)
+        _ = await store.load(HotkeyBindings.self)
         await store.save(HotkeyBindings(bindings: [future: combo, .openSettings: combo]))
         await store.flush()
         let loaded = await SettingsStore(paths: paths).load(HotkeyBindings.self)
@@ -77,11 +79,47 @@ struct HotkeyBindingsTests {
 
     @Test func aCorruptFileIsSetAsideAndTheDefaultsLoad() async throws {
         try FileManager.default.createDirectory(at: paths.settings, withIntermediateDirectories: true)
-        try Data(#"{"version":1,"document":{"bindings":{"open-settings":{"keyCode":40,"modifiers":["hyper"]}}}}"#.utf8)
+        // A key code that isn't a number: not a file this version can read at all.
+        try Data(#"{"version":1,"document":{"bindings":{"open-settings":{"keyCode":"K","modifiers":["command"]}}}}"#.utf8)
             .write(to: paths.settings.appending(path: "hotkeys.json"))
         let store = SettingsStore(paths: paths)
         #expect(await store.load(HotkeyBindings.self) == HotkeyBindings())
         #expect(!FileManager.default.fileExists(atPath: paths.settings.appending(path: "hotkeys.json").path))
+    }
+
+    @Test func unknownModifierSkipsOnlyThatBinding() throws {
+        let json = """
+        {"bindings": {
+          "open-settings": {"keyCode": 40, "modifiers": ["control", "option", "command"]},
+          "other-action": {"keyCode": 41, "modifiers": ["command", "hyper"]},
+          "third-action": {"keyCode": 96, "modifiers": []}
+        }}
+        """
+        let loaded = try JSONDecoder().decode(HotkeyBindings.self, from: Data(json.utf8))
+        #expect(loaded.bindings.keys.map(\.rawValue).sorted() == ["open-settings", "third-action"])
+        #expect(loaded.bindings[.openSettings] == KeyCombo(keyCode: 40, modifiers: [.control, .option, .command]))
+        #expect(loaded.bindings[HotkeyID(rawValue: "third-action")] == KeyCombo(keyCode: 96, modifiers: []))
+    }
+
+    @Test func aFileWithAnUnknownModifierIsNotSetAside() async throws {
+        // The one binding that can't be read is left out and logged; the file stays where it is and the rest loads.
+        try FileManager.default.createDirectory(at: paths.settings, withIntermediateDirectories: true)
+        let file = paths.settings.appending(path: "hotkeys.json")
+        try Data(#"{"version":1,"document":{"bindings":{"open-settings":{"keyCode":40,"modifiers":["hyper"]},"kept":{"keyCode":41,"modifiers":["command"]}}}}"#.utf8)
+            .write(to: file)
+        let loaded = await SettingsStore(paths: paths).load(HotkeyBindings.self)
+        #expect(loaded.bindings == [HotkeyID(rawValue: "kept"): KeyCombo(keyCode: 41, modifiers: .command)])
+        #expect(FileManager.default.fileExists(atPath: file.path), "the file wasn't moved")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: paths.settings.path).allSatisfy { !$0.contains("corrupt") })
+    }
+
+    @Test func theModifierNamesAreTheOnesTheFileFormatHas() {
+        // The list is part of the file format: changing it takes a new version of the document.
+        #expect(ModifierSet(names: ["control", "option", "shift", "command", "function"]) == [.control, .option, .shift, .command, .function])
+        #expect(ModifierSet(names: ["Command"]) == nil, "names are exact")
+        #expect(ModifierSet(names: []) == [])
+        #expect(ModifierSet.unknownNames(in: ["command", "hyper", "meta"]) == ["hyper", "meta"])
+        #expect(HotkeyBindings.currentVersion == 1)
     }
 
     @Test func actionIdsAreWrittenAsPlainStrings() throws {
@@ -94,8 +132,8 @@ struct HotkeyBindingsTests {
 
     // MARK: The actions
 
-    @Test func openMantelSettingsIsTheOnlyAction() {
-        #expect(HotkeyAction.all.map(\.id) == [.openSettings])
+    @Test func openMantelSettingsKeepsItsIdAndTitle() {
+        #expect(HotkeyAction.all.first?.id == .openSettings)
         #expect(HotkeyAction.openSettings.title == "Open Mantel settings")
         #expect(HotkeyAction.title(for: .openSettings) == "Open Mantel settings")
         #expect(HotkeyAction.title(for: HotkeyID(rawValue: "nothing")) == nil)

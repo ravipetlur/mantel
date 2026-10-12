@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import MKCommands
+import MKCore
 import MKTestSupport
 import Security
 import Testing
@@ -100,10 +101,9 @@ struct CodeSigningInspectorTests {
         #expect(requirement != nil)
     }
 
-    @Test func theAppsPathAndAPeersPathAreWrittenTheSameWay() throws {
-        // This process is both the app (whose "bundle" is the folder its program is in, as it is no app) and the peer
-        // that connects to it. Given the identifier the policy wants, the policy accepts it only if the two paths, one
-        // from `Bundle.main` and one from the code signing system, agree on where that is.
+    @Test func thePeerIsToldByAPathAndAHashAsThePolicyWritesThem() throws {
+        // This process is the peer. The inspector gives its program's path in the form `CanonicalPath` makes, and the hash of its
+        // code directory in lowercase hex: the two forms `PeerPolicy` compares with what the app holds for its tool.
         let connection = try connect()
         defer {
             close(connection.accepted)
@@ -111,16 +111,27 @@ struct CodeSigningInspectorTests {
         }
         let found = CodeSigningInspector().inspect(socket: connection.accepted)
         let real = try #require(found)
-        let own = OwnSigningReader.current()
-        let adHoc = OwnSigning(bundleIdentifier: own.bundleIdentifier, teamIdentifier: nil, bundlePath: own.bundlePath)
-        let asItsOwnTool = PeerInfo(pid: real.pid, signingIdentifier: "\(own.bundleIdentifier).cli", teamIdentifier: nil,
-                                    isValidSignature: real.isValidSignature, executablePath: real.executablePath)
-        #expect(PeerPolicy.decide(asItsOwnTool, own: adHoc) == .accept,
-                "the app is at \(own.bundlePath), and the peer at \(real.executablePath ?? "nil")")
+        let path = try #require(real.executablePath)
+        #expect(real.canonicalPath == CanonicalPath.of(URL(filePath: path)))
+        let hash = try #require(real.codeDirectoryHash)
+        #expect(hash.count >= 40 && hash.allSatisfy { $0.isHexDigit && !$0.isUppercase }, "a hex digest: \(hash)")
 
-        let elsewhere = OwnSigning(bundleIdentifier: own.bundleIdentifier, teamIdentifier: nil,
-                                   bundlePath: "/nonexistent/Mantel.app")
+        // An app that held this program as its tool accepts it as that tool, given the identifier the policy wants.
+        let own = OwnSigning(bundleIdentifier: "com.example.mantel", teamIdentifier: nil, bundlePath: "/nonexistent/Mantel.app",
+                             helperCanonicalPath: real.canonicalPath, helperCodeDirectoryHash: hash)
+        let asItsOwnTool = PeerInfo(pid: real.pid, signingIdentifier: "com.example.mantel.cli", teamIdentifier: nil,
+                                    isValidSignature: real.isValidSignature, executablePath: real.executablePath,
+                                    canonicalPath: real.canonicalPath, codeDirectoryHash: real.codeDirectoryHash)
+        #expect(PeerPolicy.decide(asItsOwnTool, own: own) == .accept,
+                "the app holds \(own.helperCanonicalPath), and the peer is at \(real.canonicalPath ?? "nil")")
+
+        // Another place for the tool, or another hash, isn't this program.
+        let elsewhere = OwnSigning(bundleIdentifier: "com.example.mantel", teamIdentifier: nil, bundlePath: "/nonexistent/Mantel.app",
+                                   helperCodeDirectoryHash: hash)
         #expect(PeerPolicy.decide(asItsOwnTool, own: elsewhere) != .accept)
+        let otherHash = OwnSigning(bundleIdentifier: "com.example.mantel", teamIdentifier: nil, bundlePath: "/nonexistent/Mantel.app",
+                                   helperCanonicalPath: real.canonicalPath, helperCodeDirectoryHash: "0123456789abcdef")
+        #expect(PeerPolicy.decide(asItsOwnTool, own: otherHash) != .accept)
     }
 
     @Test func aSocketThatIsNotConnectedHasNoPeer() throws {
@@ -142,6 +153,7 @@ struct CodeSigningInspectorTests {
         #expect(!own.bundleIdentifier.isEmpty)
         #expect(own.bundlePath.hasPrefix("/"))
         #expect(!own.bundlePath.hasSuffix("/"))
+        #expect(own.helperCanonicalPath == CanonicalPath.of(URL(filePath: own.bundlePath).appending(path: "Contents/Helpers/mantel")))
         #expect(own.teamIdentifier?.isEmpty != true, "a team, or none; never an empty one")
     }
 }

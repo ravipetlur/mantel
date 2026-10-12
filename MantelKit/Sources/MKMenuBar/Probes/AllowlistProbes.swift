@@ -4,41 +4,6 @@ import MKCommands
 import MKCore
 import Synchronization
 
-/// What the allowlist probes share.
-enum AllowlistSupport {
-    /// The bundle IDs to allow so that `hidden` are the only apps concealed: every running app's, but theirs, each once, in
-    /// the order the apps came, and `own` (Mantel's) whether it is running or not and whatever `hidden` says. (An allowlist
-    /// names the apps that stay; whatever isn't on it is concealed.)
-    static func allowedBundleIDs(hiding hidden: Set<String>, running: [ProbePlatform.RunningApp], own: String) -> [String] {
-        let hidden = hidden.subtracting([own])
-        var seen: Set<String> = []
-        var allowed: [String] = []
-        for app in running {
-            guard let bundleID = app.bundleID, !hidden.contains(bundleID), seen.insert(bundleID).inserted else { continue }
-            allowed.append(bundleID)
-        }
-        if seen.insert(own).inserted { allowed.append(own) }
-        return allowed
-    }
-
-    /// Every system item (0 to 255) unless the options name which.
-    static func systemItems(_ options: ProbeOptions) -> [Int] {
-        options.numbers("system-items") ?? Array(0...255)
-    }
-
-    /// Why a probe that hides `hidden` mustn't activate an allowlist, or nil: none of them is running. Such an allowlist hides
-    /// nothing of theirs, and for the whole hold every system item that isn't on it (the microphone and camera indicators, Now
-    /// Playing, Focus), which is a change to the person's menu bar for no measurement at all.
-    static func nothingToHide(_ hidden: [String], running: [ProbePlatform.RunningApp], fixture: String) -> String? {
-        let runningIDs = Set(running.compactMap(\.bundleID))
-        guard !hidden.contains(where: runningIDs.contains) else { return nil }
-        let names = hidden.joined(separator: ", ")
-        let only = hidden.allSatisfy { $0 == fixture }
-        return "Nothing to hide: \(names) \(hidden.count == 1 ? "isn't" : "aren't") running. "
-            + (only ? "Open MantelTestItem first." : hidden.count == 1 ? "Open it first." : "Open them first.")
-    }
-}
-
 /// `allowlist-info`: what the private framework looks like on this Mac. Only reads.
 enum AllowlistInfoProbe {
     static func run(_ context: ProbeContext, _ recorder: inout ProbeRecorder) async {
@@ -148,8 +113,10 @@ enum AllowlistActivateProbe {
                     : "No slot lost its frame within 2 s of activating, but some moved: macOS may keep a concealed item's old frame.")
             }
             try await context.clock.sleep(for: .seconds(hold))
-            let duringKeys = ProbeContext.framedKeys(await context.snapshot())
-            recorder.measure("concealedSlots", strings: beforeKeys.subtracting(duringKeys).sorted())
+            // The items that were on a bar and aren't while the allowlist is held, by their IDs: both snapshots have the apps' own lists.
+            let shownBefore = ProbeContext.shownItems(beforeSnapshot, ownBundleID: own)
+            let shownDuring = ProbeContext.shownItems(await context.snapshot(), ownBundleID: own)
+            recorder.measure("concealedSlots", strings: shownBefore.subtracting(shownDuring).sorted())
         } catch {
             cutShort = true
             recorder.note("The probe was cut short; the allowlist was released.")
@@ -181,28 +148,6 @@ enum AllowlistActivateProbe {
             recorder.note("The probe was cut short; the allowlist was released.")
             recorder.changeUndone()
         }
-    }
-}
-
-/// The allowlist assertion that is live, held where the tap's click callback can reach it: the callback lifts it at the moment a
-/// click is held. Both calls are safe from any thread, and the call into the allowlist is made outside the lock.
-final class LiftableAllowlist: Sendable {
-    private let live = Mutex<(any AllowlistAssertionHandle)?>(nil)
-
-    /// A new assertion is live.
-    func arm(_ assertion: any AllowlistAssertionHandle) {
-        live.withLock { $0 = assertion }
-    }
-
-    /// Invalidates the assertion that is live, if one is. True when there was one.
-    @discardableResult
-    func lift() -> Bool {
-        let taken = live.withLock { assertion -> (any AllowlistAssertionHandle)? in
-            defer { assertion = nil }
-            return assertion
-        }
-        taken?.invalidate()
-        return taken != nil
     }
 }
 
@@ -251,19 +196,23 @@ final class ClickLog: Sendable {
 }
 
 /// `click-replay`: conceals the test item, holds clicks on the clock, lifts the allowlist for each and replays the click, and
-/// records whether Notification Center opened.
+/// records whether Notification Center, which the clock opens, opened.
 ///
 /// While any allowlist is live the system ignores clicks on the clock and Notification Center. The tap holds a click and, in its
 /// own callback, before it schedules the replay, lifts the allowlist (invalidates it); the replay follows `delay` ms later.
-/// The probe watches for a second for a new Notification Center window, and activates the allowlist again. Ends after 30
-/// seconds or 5 clicks. Nothing is activated when the app to hide isn't running.
+/// The tap sits on the clock's slot on every display, one for each (a click on the clock of any of them is held). The probe
+/// then watches for the panel, which is a window of Notification Center that covers a display (`OpenedSystemUI.isOpen`, given the
+/// frames of the current layout's displays), for a second after the replay, reading the window list every 50 ms, and activates the allowlist
+/// again. Ends after 30 seconds or 5 clicks. Nothing is activated when the app to hide isn't running, and none when Notification
+/// Center is open when the tap is about to start (it would count for every click).
 ///
 /// Each click is recorded with `delayMs` (the configured delay), `clickAt`, `liftedAt` and `replayedAt` (milliseconds after the
 /// probe started), `liftToReplayMs` (how long the system had between the lift and the click coming back) and `opened`. A click
 /// that came while the allowlist was already lifted (a second click during the watch) has no lift, no `liftToReplayMs` and no
 /// `opened`; neither has one that came in the instant between an activation returning and the probe holding it.
 enum ClickReplayProbe {
-    static let notificationCenter = "com.apple.notificationcenterui"
+    /// How often the window list is read while a replay is watched.
+    static let watchInterval: Duration = .milliseconds(50)
 
     static func run(_ context: ProbeContext, _ recorder: inout ProbeRecorder) async {
         let options = context.options
@@ -295,10 +244,12 @@ enum ClickReplayProbe {
         let delay = options.int("delay", default: 100, range: 20...400)
         recorder.measure("delayMs", delay)
         let before = await context.snapshot()
-        guard let clockFrame = clockFrame(in: before) else {
+        let clockFrames = clockFrames(in: before)
+        guard !clockFrames.isEmpty else {
             recorder.fail("No slot of the clock with a frame was found in the menu bar, so there is nothing to click. Run the inventory probe to see what is there.")
             return
         }
+        recorder.measure("clockSlots", clockFrames.count)
 
         let allowed = AllowlistSupport.allowedBundleIDs(hiding: [app], running: context.platform.runningApps(), own: own)
         let allowlist = LiftableAllowlist()
@@ -313,7 +264,7 @@ enum ClickReplayProbe {
         // The tap's thread: the lift is the first thing done about a click, and the replay isn't scheduled until it has returned.
         let log = ClickLog()
         let clock = context.clock
-        let tap = context.platform.makeClickTap([clockFrame], .milliseconds(delay), .seconds(30), { point in
+        let tap = context.platform.makeClickTap(clockFrames, .milliseconds(delay), .seconds(30), { point in
             let clickAt = clock.now()
             let liftedAt = allowlist.lift() ? clock.now() : nil
             log.clicked(point, at: clickAt, liftedAt: liftedAt)
@@ -324,8 +275,10 @@ enum ClickReplayProbe {
         var clicks: [JSONValue] = []
         var cutShort = false
         do {
-            // The windows Notification Center has while nobody is clicking: what a new one is told from.
-            var baseline = context.platform.windows.onScreenWindows(ownedBy: notificationCenter)
+            // A panel that is open before the first click would count for every click.
+            if OpenedSystemUI.isOpen(context.platform.windowList.onScreenWindows(), displays: await displayFrames(context)) {
+                throw ProbeRefusal(message: "Notification Center is open. Close it, and run the probe again.")
+            }
             try tap.start()
             let deadline = context.clock.now().addingTimeInterval(30)
             while clicks.count < 5, context.clock.now() < deadline {
@@ -338,15 +291,15 @@ enum ClickReplayProbe {
                     clicks.append(record(held, delay: delay, opened: nil, since: context.startedAt))
                     continue
                 }
-                let opened = try await watchForNewWindow(context, baseline: baseline)
-                // The replay came `delay` ms after the click, well inside the second that was watched.
+                let opened = try await watchForPanel(context, log: log, index: index, delay: delay)
                 clicks.append(record(log.click(at: index), delay: delay, opened: opened, since: context.startedAt))
                 allowlist.arm(try await context.platform.allowlist.activate(systemItems: systemItems, bundleIDs: allowed))
-                baseline = context.platform.windows.onScreenWindows(ownedBy: notificationCenter)
             }
         } catch is CancellationError {
             cutShort = true
             recorder.note("The probe was cut short; the tap and the allowlist were released.")
+        } catch let refusal as ProbeRefusal {
+            recorder.fail(refusal.message)
         } catch let error as ClickReplayError {
             recorder.fail(error.localizedDescription)
         } catch {
@@ -392,23 +345,43 @@ enum ClickReplayProbe {
                         "opened": opened.map(JSONValue.bool) ?? .null])
     }
 
-    /// The clock's slot with a frame, taken from the first display that has one.
-    private static func clockFrame(in snapshot: MenuBarSnapshot) -> CGRect? {
-        for slot in snapshot.allSlots {
-            if let identifier = slot.identifier, identifier.lowercased().hasSuffix("clock"), let frame = slot.frame, !frame.isEmpty {
-                return frame
+    /// The clock's slots that have a frame, one for each display that has one (each of MenuBarAgent's windows is a display's), left to
+    /// right; two displays' clocks never share a frame.
+    static func clockFrames(in snapshot: MenuBarSnapshot) -> [CGRect] {
+        var frames: [CGRect] = []
+        for window in snapshot.agentWindows {
+            for slot in window.slots {
+                if let identifier = slot.identifier, identifier.lowercased().hasSuffix("clock"), let frame = slot.frame, !frame.isEmpty,
+                   !frames.contains(frame) {
+                    frames.append(frame)
+                }
             }
         }
-        return nil
+        return frames
     }
 
-    /// Whether a window that wasn't there opens, within a second: polled every 25 ms.
-    private static func watchForNewWindow(_ context: ProbeContext, baseline: Set<Int>) async throws -> Bool {
-        let started = context.clock.now()
+    /// The frames of the displays of the current layout, as CoreGraphics says them (the layout keeps AppKit's): the window list's bounds
+    /// are in those points.
+    private static func displayFrames(_ context: ProbeContext) async -> [CGRect] {
+        let layout = await context.layoutProvider()
+        return layout.displays.map { layout.cgRect(fromAppKit: $0.frame) }
+    }
+
+    /// Whether the panel opens: the window list is read every 50 ms from the click until it has been replayed, and then for a second
+    /// more, and the click opened it if `OpenedSystemUI.isOpen` holds at any read after the replay. (A read before the replay
+    /// can't be the click's: the panel was closed when the probe began.)
+    private static func watchForPanel(_ context: ProbeContext, log: ClickLog, index: Int, delay: Int) async throws -> Bool {
+        var watchEnds: Date?
+        let displays = await displayFrames(context)
+        // If the replay never reports, the watch is given the delay and the second after it from the click.
+        let fallback = log.click(at: index).clickAt.addingTimeInterval(Double(delay) / 1000 + 1)
         while true {
-            if !context.platform.windows.onScreenWindows(ownedBy: notificationCenter).subtracting(baseline).isEmpty { return true }
-            if context.clock.now().timeIntervalSince(started) >= 1 { return false }
-            try await context.clock.sleep(for: .milliseconds(25))
+            if let replayed = log.click(at: index).replayedAt {
+                if watchEnds == nil { watchEnds = replayed.addingTimeInterval(1) }
+                if OpenedSystemUI.isOpen(context.platform.windowList.onScreenWindows(), displays: displays) { return true }
+            }
+            if context.clock.now() >= (watchEnds ?? fallback) { return false }
+            try await context.clock.sleep(for: watchInterval)
         }
     }
 }

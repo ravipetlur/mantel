@@ -58,6 +58,54 @@ struct InstallLocationTests {
         #expect(verdict("/Users/x/Downloads/../../../Applications/Mantel.app") == .applications)
     }
 
+    // MARK: Links
+
+    @Test func aFolderThatIsALinkToApplicationsIsApplications() throws {
+        let folder = TemporaryFolder.shortForSockets()
+        // Nothing else reads the folder after the files are made: held until the test is over, the files are there to be used.
+        defer { withExtendedLifetime(folder) {} }
+        let link = folder.url.appending(path: "Apps", directoryHint: .notDirectory)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(filePath: "/Applications", directoryHint: .isDirectory))
+        let bundle = link.appending(path: "Mantel.app", directoryHint: .isDirectory)
+        #expect(InstallLocation.verdict(for: bundle, home: home) == .applications)
+    }
+
+    @Test func aBundleThatIsALinkIsJudgedByWhereItLeads() throws {
+        // `~/Applications/Mantel.app` that is only a link to a build folder isn't the user's Applications copy.
+        let folder = TemporaryFolder.shortForSockets()
+        // Nothing else reads the folder after the files are made: held until the test is over, the files are there to be used.
+        defer { withExtendedLifetime(folder) {} }
+        let home = folder.url.appending(path: "home", directoryHint: .isDirectory)
+        let build = folder.url.appending(path: "build/Mantel.app", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
+        let applications = home.appending(path: "Applications", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
+        let link = applications.appending(path: "Mantel.app", directoryHint: .notDirectory)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: build)
+
+        let verdict = InstallLocation.verdict(for: link, home: home)
+        #expect(verdict == .elsewhere(CanonicalPath.of(build.deletingLastPathComponent())))
+        // The same bundle, reached either way.
+        #expect(InstallLocation.isSameBundle(link, build))
+    }
+
+    @Test func aUsersApplicationsThatIsALinkIsStillTheirApplications() throws {
+        let folder = TemporaryFolder.shortForSockets()
+        // Nothing else reads the folder after the files are made: held until the test is over, the files are there to be used.
+        defer { withExtendedLifetime(folder) {} }
+        let home = folder.url.appending(path: "home", directoryHint: .isDirectory)
+        let real = folder.url.appending(path: "elsewhere/Apps", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: home.appending(path: "Applications", directoryHint: .notDirectory),
+                                                   withDestinationURL: real)
+        // Reached through the link or by where it leads, it is the same folder.
+        #expect(InstallLocation.verdict(for: home.appending(path: "Applications/Mantel.app", directoryHint: .isDirectory), home: home)
+                == .userApplications)
+        #expect(InstallLocation.verdict(for: real.appending(path: "Mantel.app", directoryHint: .isDirectory), home: home)
+                == .userApplications)
+    }
+
     // MARK: The same bundle
 
     @Test func aBundleIsTheSameThroughALinkAndWithOrWithoutATrailingSlash() throws {
@@ -74,6 +122,8 @@ struct InstallLocationTests {
 
     @Test func twoBundlesAreNotTheSame() throws {
         let folder = TemporaryFolder(prefix: "mantel-install")
+        // Nothing else reads the folder after the files are made: held until the test is over, the files are there to be used.
+        defer { withExtendedLifetime(folder) {} }
         let one = folder.url.appending(path: "One/Mantel.app", directoryHint: .isDirectory)
         let two = folder.url.appending(path: "Two/Mantel.app", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: one, withIntermediateDirectories: true)

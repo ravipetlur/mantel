@@ -2,7 +2,7 @@ import Foundation
 
 /// The steps of onboarding, in the order they are shown.
 public enum OnboardingStep: String, Sendable, CaseIterable {
-    case welcome, accessibility, location, done
+    case welcome, accessibility, location, dots, done
 }
 
 /// What decides which steps onboarding has to show.
@@ -16,8 +16,8 @@ public struct OnboardingInputs: Sendable, Equatable {
     }
 }
 
-/// Which steps onboarding shows. A step whose condition is already met is skipped; the welcome and the last step always
-/// show.
+/// Which steps onboarding shows. A step whose condition is already met is skipped; the welcome, the dots and the last step
+/// always show.
 public enum OnboardingFlow {
     public static func steps(for inputs: OnboardingInputs) -> [OnboardingStep] {
         OnboardingStep.allCases.filter { isNeeded($0, for: inputs) }
@@ -31,7 +31,7 @@ public enum OnboardingFlow {
 
     private static func isNeeded(_ step: OnboardingStep, for inputs: OnboardingInputs) -> Bool {
         switch step {
-        case .welcome, .done: true
+        case .welcome, .dots, .done: true
         case .accessibility: !inputs.accessibilityGranted
         // Only `/Applications` itself does: that is where the hiding method works from.
         case .location: inputs.install != .applications
@@ -53,11 +53,12 @@ public enum OnboardingCopy {
         case .welcome: "Welcome to Mantel"
         case .accessibility: "Allow Accessibility"
         case .location: "Move Mantel to Applications"
+        case .dots: "The dots"
         case .done: "You're set"
         }
     }
 
-    /// One or two sentences.
+    /// A few short sentences, short enough for the window that never resizes (`OnboardingCopyTests` holds the limit).
     public static func text(for step: OnboardingStep, inputs: OnboardingInputs) -> String {
         switch step {
         case .welcome:
@@ -70,8 +71,11 @@ public enum OnboardingCopy {
             return inputs.install == .translocated
                 ? "Drag Mantel into Applications in Finder, then quit this copy and open Mantel from Applications."
                 : "macOS only lets Mantel hide icons when it runs from the Applications folder."
+        case .dots:
+            return "• shows the icons in Hidden. •• shows the ones in Always Hidden, and appears once you put something there. "
+                + "Right-click either dot for Mantel's menu."
         case .done:
-            return "Mantel's icon is the dot in your menu bar. "
+            return "Mantel is ready in your menu bar. "
                 + "If another menu bar organizer is running, quit it: two at once get confused."
         }
     }
@@ -82,6 +86,7 @@ public enum OnboardingCopy {
         case .welcome: "Continue"
         case .accessibility: "Open System Settings"
         case .location: inputs.install == .translocated ? "Quit Mantel" : "Move to Applications"
+        case .dots: "Continue"
         case .done: "Done"
         }
     }

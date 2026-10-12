@@ -54,7 +54,7 @@ public enum ProbeSummary {
 }
 
 /// What "Copy diagnostics" puts on the pasteboard, and what `mantel diagnostics` answers: the checks and the last report of
-/// each probe, with the home folder written as `~`.
+/// each probe, with the home folder written as `~` and the names that were read from the menu bar left out.
 public enum DiagnosticsText {
     /// `text` with the home folder as `~`. A longer name that only starts like the home folder (`/Users/me2`) is left alone.
     public static func redact(_ text: String, home: String) -> String {
@@ -73,11 +73,52 @@ public enum DiagnosticsText {
         }
     }
 
-    public static func render(checks: [DiagnosticsCheck], probes: [ProbeName: ProbeReport], home: String,
+    /// The keys under which a probe report holds names that were read from the menu bar: what an item calls itself can be a
+    /// network's name, a battery level or a person's own.
+    static let nameKeys: Set<String> = ["titles", "descriptions", "newDescriptions", "names", "labels"]
+
+    /// `value` with what is under `titles`, `descriptions`, `newDescriptions`, `names` and `labels`, wherever it is, replaced by how
+    /// many there were: "‹3 names›". Everything else stays, bundle IDs and Apple's own `com.apple.*` identifiers included: they
+    /// say which apps and which parts of macOS, and nothing of the person.
+    public static func redactNames(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .object(let members):
+            return .object(members.reduce(into: [:]) { result, member in
+                result[member.key] = nameKeys.contains(member.key) ? countOfNames(in: member.value) : redactNames(member.value)
+            })
+        case .array(let values):
+            return .array(values.map(redactNames))
+        case .null, .bool, .number, .string:
+            return value
+        }
+    }
+
+    /// "‹N names›" for a list of names, a text (one name) or an object (one name for each member), and "‹1 name›" for one; what
+    /// holds none is left as it is.
+    private static func countOfNames(in value: JSONValue) -> JSONValue {
+        switch value {
+        case .array(let names): .string(count(names.count))
+        case .object(let names): .string(count(names.count))
+        case .string: .string(count(1))
+        case .null, .bool, .number: value
+        }
+    }
+
+    private static func count(_ names: Int) -> String {
+        names == 1 ? "‹1 name›" : "‹\(names) names›"
+    }
+
+    /// The report as text: the checks, then each block (a title and its lines), then the last report of each probe.
+    public static func render(checks: [DiagnosticsCheck], blocks: [DiagnosticsBlock] = [], probes: [ProbeName: ProbeReport], home: String,
                               timeZone: TimeZone = .current) -> String {
         var lines = ["Mantel diagnostics", "", "Checks"]
         for check in checks {
             lines.append("\(check.title): \(check.status.word). \(check.detail)")
+        }
+        for block in blocks {
+            lines.append("")
+            lines.append(block.title)
+            lines.append(contentsOf: block.lines)
         }
         lines.append("")
         lines.append("Last probe reports")
@@ -88,20 +129,28 @@ public enum DiagnosticsText {
         for report in reports {
             lines.append("")
             lines.append(ProbeSummary.line(for: report, timeZone: timeZone))
-            if let data = try? JSONCoding.encoder().encode(report), let json = String(data: data, encoding: .utf8) {
+            if let data = try? JSONCoding.encoder().encode(redactNames(report.json)), let json = String(data: data, encoding: .utf8) {
                 lines.append(json)
             }
         }
         return redact(lines.joined(separator: "\n") + "\n", home: home)
     }
 
-    /// The same, as JSON: `{"checks": [{title, status, detail}], "probes": {"<probe name>": <its report>}}`.
-    public static func json(checks: [DiagnosticsCheck], probes: [ProbeName: ProbeReport], home: String) -> JSONValue {
+    /// The same, as JSON: `{"checks": [{title, status, detail}], "sections": [{title, lines}], "probes": {"<probe name>": <its report>}}`.
+    /// There is no `sections` when there are no blocks. Each report has its names left out (`redactNames`).
+    public static func json(checks: [DiagnosticsCheck], blocks: [DiagnosticsBlock] = [], probes: [ProbeName: ProbeReport],
+                            home: String) -> JSONValue {
         let checkValues = checks.map { check -> JSONValue in
             .object(["title": .string(check.title), "status": .string(check.status.rawValue), "detail": .string(check.detail)])
         }
         var probeValues: [String: JSONValue] = [:]
-        for (name, report) in probes { probeValues[name.rawValue] = report.json }
-        return redact(.object(["checks": .array(checkValues), "probes": .object(probeValues)]), home: home)
+        for (name, report) in probes { probeValues[name.rawValue] = redactNames(report.json) }
+        var members: [String: JSONValue] = ["checks": .array(checkValues), "probes": .object(probeValues)]
+        if !blocks.isEmpty {
+            members["sections"] = .array(blocks.map { block in
+                .object(["title": .string(block.title), "lines": .array(block.lines.map(JSONValue.string))])
+            })
+        }
+        return redact(.object(members), home: home)
     }
 }

@@ -34,8 +34,14 @@ public struct DisplayLayout: Codable, Sendable, Equatable {
     /// it, and an edge two displays share belongs to just one of them whatever order they are listed in. A point on
     /// the right or bottom edge of the whole arrangement, where no display takes over, still finds the display it is
     /// the edge of. A point in the empty space between displays, or past them, is nil.
+    ///
+    /// When more than one display has a claim on the point (a corner two displays meet at, where neither's half-open area has
+    /// it, or displays that overlap), the one that comes first by where it is on the screen has it: the leftmost, then the lowest,
+    /// then by its UUID. The answer never depends on the order the displays are listed in.
     public func display(containing appKitPoint: CGPoint) -> DisplayInfo? {
-        displays.first { $0.owns(appKitPoint) } ?? displays.first { $0.frame.hasOnItsBoundary(appKitPoint) }
+        let owners = displays.filter { $0.owns(appKitPoint) }
+        let claimants = owners.isEmpty ? displays.filter { $0.frame.hasOnItsBoundary(appKitPoint) } : owners
+        return claimants.min(by: DisplayInfo.comesFirstOnScreen)
     }
 
     public func display(uuid: String) -> DisplayInfo? {
@@ -67,25 +73,15 @@ public struct DisplayLayout: Codable, Sendable, Equatable {
     public func cgRect(fromAppKit r: CGRect) -> CGRect {
         CGRect(x: r.minX, y: axis - r.maxY, width: r.width, height: r.height)
     }
-
-    // MARK: Menu bar
-
-    /// The menu bar's height on `display`: what the frame has above the visible frame. 0 when the display reports no
-    /// menu bar, which is the case for a display that has none drawn on it and when the menu bar is set to hide.
-    public func menuBarHeight(of display: DisplayInfo) -> CGFloat {
-        max(0, display.frame.maxY - display.visibleFrame.maxY)
-    }
-
-    /// The menu bar's rectangle on `display`, in AppKit global points; `.zero` when the display reports none
-    /// (`visibleFrame.maxY == frame.maxY`).
-    public func menuBarStrip(of display: DisplayInfo) -> CGRect {
-        let height = menuBarHeight(of: display)
-        guard height > 0 else { return .zero }
-        return CGRect(x: display.frame.minX, y: display.visibleFrame.maxY, width: display.frame.width, height: height)
-    }
 }
 
 extension DisplayInfo {
+    /// The order that settles a point two displays have a claim on: by the left edge, then the bottom edge, then the UUID, which no
+    /// two displays share.
+    fileprivate static func comesFirstOnScreen(_ one: DisplayInfo, _ other: DisplayInfo) -> Bool {
+        (one.frame.minX, one.frame.minY, one.uuid) < (other.frame.minX, other.frame.minY, other.uuid)
+    }
+
     /// Whether the point is on this display, treating the frame as the half-open area CoreGraphics gives a display
     /// (`minX <= x < maxX`, and top row in, bottom row out), flipped into AppKit's y: `minY < y <= maxY`.
     fileprivate func owns(_ point: CGPoint) -> Bool {

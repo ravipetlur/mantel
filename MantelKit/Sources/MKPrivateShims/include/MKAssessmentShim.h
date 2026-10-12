@@ -31,12 +31,16 @@ FOUNDATION_EXPORT NSErrorDomain const MKAssessmentShimErrorDomain;
 /// Returns the assertion object, which the caller must hold until `invalidate:`; nil, with `error`, when `inspect` found a
 /// problem (nothing is called then) or the objects couldn't be made.
 ///
+/// The assertion is returned retained (`NS_RETURNS_RETAINED`): the caller owns it, and no autorelease pool is involved in handing it
+/// over.
+///
 /// `completion` is called when macOS has finished activating, with nil or the error it gave. **It may be called on any
-/// thread.** It is not called when this returns nil.
+/// thread**, so it is `NS_SWIFT_SENDABLE`. It is not called when this returns nil, and it isn't optional: macOS is always given
+/// a block. `error` may be NULL.
 + (nullable id)activateAllowingSystemItems:(NSArray<NSNumber *> *)items
                                  bundleIDs:(NSArray<NSString *> *)bundleIDs
                                 completion:(void (^ NS_SWIFT_SENDABLE)(NSError * _Nullable error))completion
-                                     error:(NSError **)error;
+                                     error:(NSError * _Nullable * _Nullable)error NS_RETURNS_RETAINED;
 
 /// Ends an assertion that `activateAllowingSystemItems:…` returned. Something that isn't one is ignored.
 + (void)invalidate:(id)assertion;

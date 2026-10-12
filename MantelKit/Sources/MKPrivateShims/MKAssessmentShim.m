@@ -134,7 +134,7 @@ static const void *kConfigurationKey = &kConfigurationKey;
 + (nullable id)activateAllowingSystemItems:(NSArray<NSNumber *> *)items
                                  bundleIDs:(NSArray<NSString *> *)bundleIDs
                                 completion:(void (^ NS_SWIFT_SENDABLE)(NSError * _Nullable))completion
-                                     error:(NSError **)error {
+                                     error:(NSError * _Nullable * _Nullable)error NS_RETURNS_RETAINED {
     // Before any private method is called, and with nothing called at all if one doesn't match.
     MKAssessmentReport *report = [self inspect];
     if (report.problem != nil) {

@@ -19,26 +19,41 @@ public enum SocketError: Error, Equatable {
 ///   about it. A client that isn't one of Mantel's own tools gets one reply, `rejected`, and is closed; the handler never
 ///   hears of it. The socket file is also made private to the person (mode 0600).
 /// - **What a client may say.** One JSON request per line (`RequestEnvelope`), up to 1 MiB. A line that can't be read, or
-///   is too long, gets a `badRequest` reply, and the connection stays open.
+///   is too long, gets a `badRequest` reply, and the connection stays open. A client that has more than 32 lines waiting
+///   to be answered is told "Too many requests at once" (`badRequest`) after the answers it was owed, and is closed.
 /// - **Replies.** A connection is served one request at a time, so its replies come in the order of its requests;
-///   different connections are served at once. `handler` is called for every request, and `stop()` doesn't wait for it.
+///   different connections are served at once. `handler` is called for every request, and `stop()` doesn't wait for it. A
+///   client that doesn't read a reply within a second is closed, and the wait is not on the server's queue.
+/// - **Running out of descriptors.** When `accept` fails because the process (or the system) has no more files to give
+///   (`EMFILE`, `ENFILE`), the listener is suspended for a second, so that it doesn't spin on the connection that is still
+///   waiting. That is logged once for as long as it lasts.
 /// - **The socket file.** While a server runs it holds an exclusive lock (`flock`) on a file beside the socket, named like
 ///   it with `.lock` after. That lock, and not a connection to the socket, is how a running Mantel is told from a leftover:
 ///   a connection to a socket whose queue is full, or that is bound but not yet listening, is refused just like one to a
 ///   socket nobody listens on (on macOS even when its owner is alive), so it can't say. A server that can't take the lock
 ///   throws `.inUse` and touches nothing. One that has it knows that any file at the path was left by a run that has
 ///   ended, and replaces it. The lock goes when the server stops, or when the process ends however it ends; the lock
-///   file itself is left where it is, as removing it would let two servers hold different files.
+///   file itself is left where it is, as removing it would let two servers hold different files. (An `flock` belongs to the open
+///   file, not to the descriptor: a child process that another thread is spawning when the server stops has a copy of the
+///   descriptor until it runs its program, which closes it, as the lock file is opened close-on-exec. So for a few
+///   milliseconds after `stop()` a lock can still look held. A new server in the same process finds `.inUse` for that long;
+///   another process, which is what the lock is for, just finds the holder gone a moment later.)
 ///
-/// The server never logs a request beyond its command's name.
+/// The server never logs a request beyond its command's name. It says nothing when it finds the lock held: that is not a
+/// fault of this server, and the app that was refused says what it did about it.
 public final class ControlSocketServer: Sendable {
     public typealias Handler = @Sendable (MantelCommand, PeerInfo) async -> CommandResult
 
     private static let backlog: Int32 = 8
     private static let category = "control"
 
+    /// How the listener accepts a connection: `accept(2)` on the listening descriptor, which returns the client's descriptor,
+    /// or -1 with `errno` set. A test gives its own to make it fail.
+    typealias Accept = @Sendable (_ listener: Int32) -> Int32
+
     private struct Running {
         let listener: any DispatchSourceRead
+        let gate: ListenerGate
         /// Left when the listener's descriptor has been closed.
         let listenerClosed: DispatchGroup
         let file: FileIdentity
@@ -51,13 +66,34 @@ public final class ControlSocketServer: Sendable {
     private let inspector: any PeerInspecting
     private let own: OwnSigning
     private let handler: Handler
+    private let accept: Accept
+    private let pauseOnExhaustion: Duration
+    private let warn: @Sendable (String) -> Void
     private let queue = DispatchQueue(label: "\(Log.subsystem).control-socket")
     private let running = Mutex<Running?>(nil)
+    private let replacedLeftover = Mutex(false)
 
-    public init(path: URL, inspector: any PeerInspecting, own: OwnSigning, handler: @escaping Handler) {
+    /// Whether the last start found a file at the socket's path, left by a run that ended, and replaced it. The app starts the
+    /// server before its log has a file, so it says so there itself: it is what a crash leaves behind.
+    public var replacedLeftoverSocket: Bool {
+        replacedLeftover.withLock { $0 }
+    }
+
+    public convenience init(path: URL, inspector: any PeerInspecting, own: OwnSigning, handler: @escaping Handler) {
+        self.init(path: path, inspector: inspector, own: own, accept: { Darwin.accept($0, nil, nil) },
+                  pauseOnExhaustion: .seconds(1), warn: { Log.warning(Self.category, $0) }, handler: handler)
+    }
+
+    /// With the way a connection is accepted, how long the listener rests when there are no descriptors left, and where the
+    /// warning about that goes given, so that a test can make `accept` fail and see what is said.
+    init(path: URL, inspector: any PeerInspecting, own: OwnSigning, accept: @escaping Accept, pauseOnExhaustion: Duration,
+         warn: @escaping @Sendable (String) -> Void, handler: @escaping Handler) {
         self.path = path
         self.inspector = inspector
         self.own = own
+        self.accept = accept
+        self.pauseOnExhaustion = pauseOnExhaustion
+        self.warn = warn
         self.handler = handler
     }
 
@@ -90,6 +126,8 @@ public final class ControlSocketServer: Sendable {
         }
         guard let stopped else { return }
         stopped.listener.cancel()
+        // A suspended source doesn't finish being cancelled until it is resumed.
+        stopped.gate.shutDown()
         for connection in stopped.connections.values { connection.close() }
         if waiting { stopped.listenerClosed.wait() }
         // Only the file this server made, and only while the lock is still held.
@@ -107,10 +145,9 @@ public final class ControlSocketServer: Sendable {
         let lock = try takeLock()
         // The lock is ours until `stop()`, so a file at the path was left by a run that has ended, whatever it is.
         var existing = stat()
-        if lstat(pathString, &existing) == 0 {
-            Log.info(Self.category, "replacing a control socket that was left behind")
-            unlink(pathString)
-        }
+        let leftBehind = lstat(pathString, &existing) == 0
+        replacedLeftover.withLock { $0 = leftBehind }
+        if leftBehind { unlink(pathString) }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -144,16 +181,17 @@ public final class ControlSocketServer: Sendable {
         }
 
         let listener = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        let gate = ListenerGate(source: listener)
         let listenerClosed = DispatchGroup()
         listenerClosed.enter()
-        listener.setEventHandler { [weak self] in self?.acceptPending(on: fd) }
+        listener.setEventHandler { [weak self] in self?.acceptPending(on: fd, gate: gate) }
         listener.setCancelHandler {
             close(fd)
             listenerClosed.leave()
         }
         listener.resume()
         Log.info(Self.category, "listening on the control socket")
-        return Running(listener: listener, listenerClosed: listenerClosed, file: file, lock: lock)
+        return Running(listener: listener, gate: gate, listenerClosed: listenerClosed, file: file, lock: lock)
     }
 
     /// Takes the exclusive lock on the lock file beside the socket, making the file if it isn't there. The lock is held
@@ -165,10 +203,8 @@ public final class ControlSocketServer: Sendable {
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             let code = errno
             close(fd)
-            if code == EWOULDBLOCK {
-                Log.warning(Self.category, "another Mantel is using the control socket")
-                throw .inUse
-            }
+            // Said nothing: the one that is refused knows, and says what it does about it.
+            if code == EWOULDBLOCK { throw .inUse }
             throw .bindFailed(code)
         }
         return fd
@@ -176,11 +212,19 @@ public final class ControlSocketServer: Sendable {
 
     // MARK: Clients
 
-    private func acceptPending(on listener: Int32) {
+    private func acceptPending(on listener: Int32, gate: ListenerGate) {
         // A few at a time: the source asks again if more are waiting, and other work gets its turn.
         for _ in 0..<8 {
-            let client = accept(listener, nil, nil)
-            guard client >= 0 else { return }
+            let client = accept(listener)
+            guard client >= 0 else {
+                let code = errno
+                // No descriptor to give it: the connection stays waiting, and the source would call again at once, for ever.
+                if code == EMFILE || code == ENFILE, gate.pause(for: pauseOnExhaustion, on: queue) == .pausedFirstOfEpisode {
+                    warn("too many open files; pausing new connections for a second")
+                }
+                return
+            }
+            gate.accepted()
             admit(client)
         }
     }
@@ -196,8 +240,11 @@ public final class ControlSocketServer: Sendable {
         switch vet(inspector.inspect(socket: fd)) {
         case .failure(let refusal):
             Log.warning(Self.category, "refused a client (pid \(refusal.pid)): \(refusal.reason)")
-            _ = connection.send(ReplyEnvelope(id: nil, result: .failure(code: .rejected, message: refusal.reason)))
-            connection.close()
+            // The reply is written off this queue: a client that doesn't read must not hold the others up.
+            Task {
+                _ = await connection.send(ReplyEnvelope(id: nil, result: .failure(code: .rejected, message: refusal.reason)))
+                connection.close()
+            }
             return
         case .success(let accepted):
             peer = accepted
@@ -232,6 +279,7 @@ public final class ControlSocketServer: Sendable {
 
     /// Answers a connection's requests one at a time, until the client has said all it will, or the connection is closed.
     private func serve(_ connection: ControlConnection, peer: PeerInfo) async {
+        var delivered = true
         for await line in connection.inbound {
             let reply: ReplyEnvelope
             switch line {
@@ -240,7 +288,14 @@ public final class ControlSocketServer: Sendable {
             case .line(let data):
                 reply = await answer(data, from: peer)
             }
-            guard connection.send(reply) else { break }
+            guard await connection.send(reply) else {
+                delivered = false
+                break
+            }
+        }
+        // It ended because the client said more than could wait: it has what it asked for, and now is told why that is all.
+        if delivered, connection.hasOverflowed {
+            _ = await connection.send(ReplyEnvelope(id: nil, result: .failure(code: .badRequest, message: "Too many requests at once")))
         }
         connection.close()
         running.withLock { _ = $0?.connections.removeValue(forKey: connection.id) }
@@ -278,5 +333,78 @@ private struct FileIdentity: Sendable {
     func matches(_ path: String) -> Bool {
         var info = stat()
         return lstat(path, &info) == 0 && info.st_dev == device && info.st_ino == inode
+    }
+}
+
+/// Lets the listening source rest for a while: a source that is suspended isn't called, and the connections that are waiting
+/// stay in the queue the system keeps for them.
+///
+/// Whoever suspends it is the one to resume it, once: the timer that was set, or `shutDown`, which a source that is being
+/// cancelled needs (a cancelled source that is suspended never finishes). The calls to the source are made inside the lock that
+/// guards the flag, so that a resume can never come between the flag being set and the suspend that goes with it: a source
+/// resumed while it isn't suspended brings the process down.
+final class ListenerGate: Sendable {
+    enum Pause: Equatable {
+        /// Already resting, or shut down: nothing was done.
+        case alreadyResting
+        /// Now resting. It was a fresh episode: the first failure since a connection was last accepted.
+        case pausedFirstOfEpisode
+        /// Now resting again, in an episode that was already told of.
+        case paused
+    }
+
+    private struct State {
+        var isSuspended = false
+        var isShutDown = false
+        /// Whether the episode of failures that is going on has been told of.
+        var toldOfEpisode = false
+    }
+
+    private let suspendSource: @Sendable () -> Void
+    private let resumeSource: @Sendable () -> Void
+    private let state = Mutex(State())
+
+    init(source: any DispatchSourceRead) {
+        suspendSource = { source.suspend() }
+        resumeSource = { source.resume() }
+    }
+
+    /// What a test gives to see the order of the calls.
+    init(suspend: @escaping @Sendable () -> Void, resume: @escaping @Sendable () -> Void) {
+        suspendSource = suspend
+        resumeSource = resume
+    }
+
+    /// Suspends the source, and resumes it after `duration` on `queue`.
+    func pause(for duration: Duration, on queue: DispatchQueue) -> Pause {
+        let outcome = state.withLock { [suspendSource] state -> Pause in
+            guard !state.isShutDown, !state.isSuspended else { return .alreadyResting }
+            state.isSuspended = true
+            suspendSource()
+            defer { state.toldOfEpisode = true }
+            return state.toldOfEpisode ? .paused : .pausedFirstOfEpisode
+        }
+        guard outcome != .alreadyResting else { return outcome }
+        let seconds = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        queue.asyncAfter(deadline: .now() + seconds) { [self] in resume() }
+        return outcome
+    }
+
+    /// A connection was accepted: whatever went wrong before is over, and the next failure is a new episode.
+    func accepted() {
+        state.withLock { $0.toldOfEpisode = false }
+    }
+
+    func shutDown() {
+        state.withLock { $0.isShutDown = true }
+        resume()
+    }
+
+    private func resume() {
+        state.withLock { [resumeSource] state in
+            guard state.isSuspended else { return }
+            state.isSuspended = false
+            resumeSource()
+        }
     }
 }

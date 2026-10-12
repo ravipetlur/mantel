@@ -19,13 +19,19 @@ final class SettingsModel {
     }
 }
 
-/// The Settings window. It isn't a document window, so closing it leaves the app's activation policy alone. Closing it
-/// also ends what its panes were doing (their polling): the content is built again when it is shown.
+/// The Settings window. While it is open Mantel is an ordinary app, with a Dock icon and a place in ⌘-Tab, and it comes to the front
+/// through `ActivationPolicyOwner`; closing it (the last window to close) makes Mantel a menu bar app again. Closing it also ends what
+/// its panes were doing (their polling): the content is built again when it is shown.
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
     private let content: DroppableContent
+    private let activation: ActivationPolicyOwner
+    /// Told when the window is shown and when it is put away: the menu bar is read more often while it is open.
+    private let visibilityChanged: (Bool) -> Void
 
     init(coordinator: AppCoordinator) {
+        activation = coordinator.activation
+        visibilityChanged = { [weak coordinator] in coordinator?.setSettingsOpen($0) }
         let model = SettingsModel(selection: coordinator.lastSettingsPane,
                                   didSelect: { [weak coordinator] in coordinator?.rememberSettingsPane($0) })
         self.model = model
@@ -47,16 +53,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    /// Shows the window on `pane`, or on the pane it was on, and brings the app forward.
+    /// Shows the window on `pane`, or on the pane it was on, and brings it to the front: Mantel becomes an ordinary app, and then (after
+    /// the menu the request may have come from has finished) becomes active and has the window key (`WindowShowing`).
     func show(pane: SettingsPane?) {
         content.restore()
         if let pane { model.select(pane) }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        if let window { activation.show(window, as: .settings) }
+        visibilityChanged(true)
     }
 
     func windowWillClose(_ notification: Notification) {
         content.drop()
+        visibilityChanged(false)
+        activation.windowClosed(.settings)
     }
 }

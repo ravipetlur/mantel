@@ -38,6 +38,22 @@ public struct AgentWindow: Codable, Sendable, Equatable {
     }
 }
 
+/// What one of MenuBarAgent's windows says of itself, read from its own attributes (never from the slots in it): which of its
+/// windows is the active Space's is not told by anything that is known yet, so what the windows differ in is recorded.
+public struct AgentWindowDetail: Sendable, Equatable {
+    public let frame: CGRect
+    /// The values of `AXRole`, `AXSubrole`, `AXMain`, `AXFocused` and `AXIdentifier` where the window has them, and of every other
+    /// attribute that holds a true or false.
+    public let attributes: [String: JSONValue]
+    public let slotCount: Int
+
+    public init(frame: CGRect, attributes: [String: JSONValue], slotCount: Int) {
+        self.frame = frame
+        self.attributes = attributes
+        self.slotCount = slotCount
+    }
+}
+
 /// One status item of an app, as the app's own extras menu bar lists it.
 public struct ExtraItem: Codable, Sendable, Equatable {
     public let index: Int
@@ -61,15 +77,35 @@ public struct AppExtras: Codable, Sendable, Equatable {
     public let bundleID: String?
     public let name: String?
     public let items: [ExtraItem]
-    /// The app didn't answer in time; it isn't asked again for a while.
+    /// The app didn't answer in time; it isn't asked again for a while. Set too when `AppExtrasReader.itemTimeoutsForAppTimeout`
+    /// of the reads of its items timed out in one read.
     public let timedOut: Bool
+    /// How many reads of an item's own attributes (its frame, identifier, title or description) timed out in this read. The item
+    /// has no value for what was being read; the count says that this wasn't because the app has none.
+    public let itemTimeouts: Int
 
-    public init(pid: pid_t, bundleID: String?, name: String?, items: [ExtraItem], timedOut: Bool) {
+    public init(pid: pid_t, bundleID: String?, name: String?, items: [ExtraItem], timedOut: Bool, itemTimeouts: Int = 0) {
         self.pid = pid
         self.bundleID = bundleID
         self.name = name
         self.items = items
         self.timedOut = timedOut
+        self.itemTimeouts = itemTimeouts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case pid, bundleID, name, items, timedOut, itemTimeouts
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        pid = try container.decode(pid_t.self, forKey: .pid)
+        bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        items = try container.decode([ExtraItem].self, forKey: .items)
+        timedOut = try container.decode(Bool.self, forKey: .timedOut)
+        // A snapshot saved before the count was kept has none.
+        itemTimeouts = try container.decodeIfPresent(Int.self, forKey: .itemTimeouts) ?? 0
     }
 }
 
@@ -83,19 +119,24 @@ public struct MenuBarSnapshot: Codable, Sendable, Equatable {
     public let rawAgentTree: JSONValue?
     /// What kept the read from being whole, in words: Accessibility isn't granted, MenuBarAgent isn't running.
     public let problems: [String]
+    /// The frames of the front app's menus when the snapshot was taken, in CoreGraphics global points (a probe that is asked for the whole
+    /// menu bar records them): without them a later replay can't tell which icons are under the menus (`BarRegion`). Empty when they
+    /// weren't read. They are frames and nothing else: no name of the app or of a menu.
+    public let frontMenuFrames: [CGRect]
 
     public init(capturedAt: Date, layout: DisplayLayout, agentWindows: [AgentWindow], apps: [AppExtras],
-                rawAgentTree: JSONValue?, problems: [String] = []) {
+                rawAgentTree: JSONValue?, problems: [String] = [], frontMenuFrames: [CGRect] = []) {
         self.capturedAt = capturedAt
         self.layout = layout
         self.agentWindows = agentWindows
         self.apps = apps
         self.rawAgentTree = rawAgentTree
         self.problems = problems
+        self.frontMenuFrames = frontMenuFrames
     }
 
     private enum CodingKeys: String, CodingKey {
-        case capturedAt, layout, agentWindows, apps, rawAgentTree, problems
+        case capturedAt, layout, agentWindows, apps, rawAgentTree, problems, frontMenuFrames
     }
 
     public init(from decoder: any Decoder) throws {
@@ -106,6 +147,13 @@ public struct MenuBarSnapshot: Codable, Sendable, Equatable {
         apps = try container.decode([AppExtras].self, forKey: .apps)
         rawAgentTree = try container.decodeIfPresent(JSONValue.self, forKey: .rawAgentTree)
         problems = try container.decodeIfPresent([String].self, forKey: .problems) ?? []
+        frontMenuFrames = try container.decodeIfPresent([CGRect].self, forKey: .frontMenuFrames) ?? []
+    }
+
+    /// The snapshot with the front app's menus recorded.
+    public func withFrontMenuFrames(_ frames: [CGRect]) -> MenuBarSnapshot {
+        MenuBarSnapshot(capturedAt: capturedAt, layout: layout, agentWindows: agentWindows, apps: apps, rawAgentTree: rawAgentTree,
+                        problems: problems, frontMenuFrames: frames)
     }
 }
 

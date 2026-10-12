@@ -99,7 +99,7 @@ struct ProbeRunnerTests {
     }
 
     @Test(arguments: ProbeName.allCases.filter { !ProbeRunner.changesState($0) })
-    func aProbeThatOnlyReadsRunsFromAnyCopy(name: ProbeName) async throws {
+    func aProbeThatOnlyReadsIsNotRefusedForTheCopyItRunsFrom(name: ProbeName) async throws {
         let harness = try harnessRunFromAnotherCopy()
         let report = await harness.run(name, ["phase": "before"])
         #expect(report.name == name)
@@ -107,26 +107,97 @@ struct ProbeRunnerTests {
     }
 
     @Test(arguments: ProbeRunner.stateChangingProbes)
-    func aProbeThatChangesStateRunsFromTheInstalledCopy(name: ProbeName) async throws {
+    func aProbeThatChangesStateIsNotRefusedForTheCopyItRunsFrom(name: ProbeName) async throws {
         let harness = try ProbeHarness.make(clicks: [CGPoint(x: 3320, y: 10)])
         let report = await harness.run(name)
         #expect(!report.errors.contains { $0.hasPrefix("Run this probe from the copy in /Applications.") })
+        #expect(!report.errors.contains(ProbeRunner.platformTestOffMessage))
     }
 
-    @Test func theFourProbesThatChangeStateAreTheOnesTheRunnerRefusesFromAnotherCopy() {
-        #expect(Set(ProbeRunner.stateChangingProbes) == [.allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay])
+    @Test func theProbesThatChangeStateAreTheSixTheRunnerGates() {
+        #expect(Set(ProbeRunner.stateChangingProbes)
+                == [.allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay, .revealLatency, .approvalsFlip])
     }
 
-    @Test func onlyTheCopyDirectlyInApplicationsIsTheInstalledCopy() {
-        let home = URL(filePath: "/Users/someone", directoryHint: .isDirectory)
-        func isInstalled(_ path: String) -> Bool {
-            ProbePlatform.isInstalledCopy(at: URL(filePath: path, directoryHint: .isDirectory), home: home)
+    // MARK: Enable platform test
+
+    @Test(arguments: ProbeRunner.stateChangingProbes)
+    func stateChangingProbeRefusedWhenSwitchOff(name: ProbeName) async throws {
+        let harness = try ProbeHarness.make(clicks: [CGPoint(x: 3320, y: 10)], platformTestEnabled: false)
+        let approvals = try await harness.installFile(.controlCenterApprovals, ["trackedApplications": [ProbeHarness.fixtureID: true]])
+        let layout = try await harness.installFile(.menuBarLayout, [LayoutKeys.trailingPositions: ["status:\(ProbeHarness.fixtureID)::x": 1]])
+        let approvalsBefore = try Data(contentsOf: approvals)
+        let layoutBefore = try Data(contentsOf: layout)
+
+        let report = await harness.run(name, ["flag-path": "k:allowed"])
+
+        #expect(report.errors == ["Turn on “Enable platform test” in Settings › Diagnostics first."])
+        #expect(report.restored)
+        #expect(report.measurements.isEmpty)
+        #expect(harness.allowlist.calls.isEmpty, "nothing was activated")
+        #expect(harness.taps.made.isEmpty, "no tap was made")
+        #expect(try Data(contentsOf: approvals) == approvalsBefore, "no file was written")
+        #expect(try Data(contentsOf: layout) == layoutBefore)
+        #expect(await harness.journal.records().isEmpty)
+        #expect(harness.probeFiles().isEmpty, "a refusal isn't a report that is kept")
+        #expect(await harness.runner.isChangingMenuBar == false, "and it didn't take the one-at-a-time place")
+    }
+
+    @Test(arguments: ProbeName.allCases.filter { !ProbeRunner.changesState($0) })
+    func readingProbeRunsWhenSwitchOff(name: ProbeName) async throws {
+        let harness = try ProbeHarness.make(platformTestEnabled: false)
+        let report = await harness.run(name, ["phase": "before"])
+        #expect(report.name == name)
+        #expect(!report.errors.contains(ProbeRunner.platformTestOffMessage))
+    }
+
+    @Test func theSwitchIsAskedEachTimeAProbeIsRunAndTurningItOnNeedsNoNewRunner() async throws {
+        let harness = try ProbeHarness.make(platformTestEnabled: false)
+        let refused = await harness.run(.allowlistActivate)
+        #expect(refused.errors == [ProbeRunner.platformTestOffMessage])
+
+        harness.platformTest.set(true)
+        let allowed = await harness.run(.allowlistActivate)
+        #expect(allowed.errors.isEmpty)
+        #expect(harness.allowlist.calls.count == 1)
+
+        harness.platformTest.set(false)
+        let again = await harness.run(.allowlistActivate)
+        #expect(again.errors == [ProbeRunner.platformTestOffMessage])
+    }
+
+    @Test func aStateChangingProbeIsRefusedWhileAResetIsUnderWay() async throws {
+        // The reset puts back the journal and restarts the menu bar's process: both would happen in the middle of what the probe measures.
+        let harness = try ProbeHarness.make()
+        harness.resetUnderWay.set(true)
+
+        for name in ProbeRunner.stateChangingProbes {
+            let refused = await harness.run(name, ["flag-path": "k:allowed"])
+            #expect(refused.errors == [ProbeRunner.resetUnderWayMessage], "\(name.rawValue)")
+            #expect(refused.restored)
         }
-        #expect(isInstalled("/Applications/Mantel.app"))
-        #expect(!isInstalled("/Users/someone/Applications/Mantel.app"), "the person's own Applications is not where macOS honours the allowlist")
-        #expect(!isInstalled("/Applications/Utilities/Mantel.app"))
-        #expect(!isInstalled("/Users/someone/dev/Mantel/build/Debug/Mantel.app"))
-        #expect(!isInstalled("/private/var/folders/xx/AppTranslocation/ABC/d/Mantel.app"))
+        #expect(ProbeRunner.resetUnderWayMessage == "A reset is already under way.")
+        #expect(harness.allowlist.calls.isEmpty, "nothing was activated")
+        #expect(harness.taps.made.isEmpty, "no tap was made")
+        #expect(await harness.journal.records().isEmpty)
+        #expect(await harness.runner.isChangingMenuBar == false, "and none of them took the one-at-a-time place")
+
+        // Probes that only read go on, and once the reset is over a state-changing one runs.
+        let reading = await harness.run(.overflow)
+        #expect(!reading.errors.contains(ProbeRunner.resetUnderWayMessage))
+        harness.resetUnderWay.set(false)
+        let allowed = await harness.run(.allowlistActivate)
+        #expect(allowed.errors.isEmpty)
+    }
+
+    @Test func aCopyThatIsNotInApplicationsIsToldSoBeforeTheSwitch() async throws {
+        // Turning the switch on can't help it, so the reason that can't be fixed from Settings comes first.
+        let harness = try ProbeHarness.make(platformTestEnabled: false) { platform in
+            platform.isInstalledCopy = false
+            platform.copyPath = Self.elsewhere
+        }
+        let report = await harness.run(.allowlistActivate)
+        #expect(report.errors == ["Run this probe from the copy in /Applications. This copy is at \(Self.elsewhere)."])
     }
 
     @Test func aSecondStateChangingProbeIsRefusedWhileOneRuns() async throws {
@@ -150,6 +221,28 @@ struct ProbeRunnerTests {
         // Once it is done, the next one runs.
         let third = await harness.run(.allowlistActivate)
         #expect(third.errors.isEmpty)
+    }
+
+    @Test func theRunnerSaysWhetherAProbeIsChangingTheMenuBarRightNow() async throws {
+        let harness = try ProbeHarness.make()
+        #expect(await harness.runner.isChangingMenuBar == false)
+        let gate = Gate()
+        harness.allowlist.holdActivations(until: gate)
+
+        let first = Task { await harness.run(.allowlistActivate) }
+        await harness.allowlist.entered.wait()
+        #expect(await harness.runner.isChangingMenuBar, "while the probe holds its change")
+        // One that only reads doesn't change anything.
+        _ = await harness.run(.overflow)
+        #expect(await harness.runner.isChangingMenuBar)
+
+        gate.open()
+        _ = await first.value
+        #expect(await harness.runner.isChangingMenuBar == false, "and not after it has put it back")
+
+        // A probe that was refused never changed anything.
+        _ = await harness.run(.allowlistActivate, ["apps": "com.apple.Safari"])
+        #expect(await harness.runner.isChangingMenuBar == false)
     }
 
     @Test func aProbeThatOnlyReadsRunsWhileAStateChangingOneDoes() async throws {
@@ -206,12 +299,13 @@ struct ProbeRunnerTests {
     }
 
     @Test func everyProbeTheCommandLineKnowsHasAnImplementation() async throws {
-        // The thirteen names run without a crash and say who they are; the system is all fakes.
+        // Every name runs without a crash and says who it is; the system is all fakes. A report is kept for each that ran (a refusal
+        // isn't one: a probe given nothing it needs says so in its errors, and is still a report).
         let harness = try ProbeHarness.make()
         for name in ProbeName.allCases {
             let report = await harness.run(name, ["phase": "before"])
             #expect(report.name == name)
         }
-        #expect(harness.probeFiles().count >= 13)
+        #expect(harness.probeFiles().count >= ProbeName.allCases.count)
     }
 }

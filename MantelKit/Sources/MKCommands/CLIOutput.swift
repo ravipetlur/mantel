@@ -25,6 +25,13 @@ public enum CLIOutput {
     /// `mantel help`.
     public static let help = CLIOutcome(stdout: CLIParser.usage, stderr: "", exitCode: 0)
 
+    /// The person was asked (`CLIInvocation.confirmation`) and didn't say yes: nothing was sent.
+    public static let declined = CLIOutcome(stdout: "", stderr: "mantel: Not reset.", exitCode: 1)
+
+    /// A question has to be asked and there is nobody to ask (the input isn't a terminal): nothing was sent. This is the wrong
+    /// arguments for where the tool is run, so it exits like them.
+    public static let needsAnswerBeforehand = CLIOutcome(stdout: "", stderr: "mantel: Add --yes to reset without being asked.", exitCode: 2)
+
     /// An answer from Mantel. With `json`, the result as the app sent it, on one line; otherwise a text is printed as it
     /// is (`mantel ping` says `pong`), nothing is printed for nothing, and any other value as indented JSON.
     public static func outcome(for result: CommandResult, json: Bool) -> CLIOutcome {

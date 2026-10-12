@@ -17,6 +17,29 @@ private struct BlockingRestorer: JournalRestoring {
     }
 }
 
+/// What a journal file holds.
+private struct JournalOnDisk: Decodable {
+    var records: [JournalRecord]
+}
+
+/// A codec for a value that is kept as the bytes of an XML property list.
+private struct XMLBlobCodec: PlistBlobCodec {
+    func value(at path: PlistKeyPath, in blob: Data) throws -> PlistValue? {
+        try decode(blob).value(at: path)
+    }
+
+    func setting(_ value: PlistValue?, at path: PlistKeyPath, in blob: Data) throws -> Data {
+        let updated = try decode(blob).setting(value, at: path)
+        return try PropertyListSerialization.data(fromPropertyList: updated.propertyList, format: .xml, options: 0)
+    }
+
+    private func decode(_ blob: Data) throws -> PlistValue {
+        let object = try PropertyListSerialization.propertyList(from: blob, format: nil)
+        guard let value = PlistValue(propertyList: object) else { throw PlistAccessError.notADictionary }
+        return value
+    }
+}
+
 /// Every test makes its own folder with the files it needs, writes only there, and the folder goes away with the test.
 /// Nothing here touches a real preferences file: `cfPreferences` is given the temporary file's path as its domain.
 @Suite("Plist file access", .timeLimit(.minutes(1)))
@@ -24,6 +47,8 @@ struct PlistFileAccessTests {
     /// Held by the suite, and so for the whole test.
     let folder = TemporaryFolder(prefix: "mantel-plist")
     let clock = FakeClock()
+    /// For the tests that wait for `cfprefsd` and the file to agree: its sleeps return at once, having moved the time on.
+    let stepping = SteppingClock()
 
     private var journalFile: URL { folder.url.appending(path: "journal.json") }
     private var plist: URL { folder.url.appending(path: "sample.plist") }
@@ -289,7 +314,7 @@ struct PlistFileAccessTests {
         #expect(result["b"] as? String == "x")
     }
 
-    @Test func undoPutsBackOneKeyAndTakesItsRecordOut() async throws {
+    @Test func undoOfAWholeKeyPutsBackThatKeyAndTakesItsRecordOut() async throws {
         try writePlist(["a": 1, "b": 2])
         let journal = makeJournal()
         let access = makeAccess(journal)
@@ -406,19 +431,22 @@ struct PlistFileAccessTests {
         // The grant is saved a moment after it is made; saved now, it is in this test's folder.
         await settings.flush()
         let journal = makeJournal()
-        let access = PlistFileAccess(journal: journal, paths: paths, grants: grants)
+        // Both strategies on the files themselves: a group container's path is never given to the real preferences service here.
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: grants, io: .filesOnly, clock: clock)
 
-        try await access.write(.dictionary(["com.example.app": .bool(false)]), key: "trackedApplications", in: file, strategy: .atomicFile)
+        try await access.write(.dictionary(["com.example.app": .bool(false)]), key: "trackedApplications", in: file, strategy: .cfPreferences)
+        #expect(try onDisk(file)["trackedApplications"] as? [String: Bool] == ["com.example.app": false])
         let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: grants))
         #expect(failures.isEmpty)
         #expect(try onDisk(file)["trackedApplications"] as? [String: Bool] == ["com.example.app": true])
 
         // The file is gone: the grant says so (the plain way would have made a new file).
         let entry = JournalEntry.plistKey(filePath: file.resolvingSymlinksInPath().path, key: "trackedApplications",
-                                          original: nil, strategy: .atomicFile)
+                                          original: nil, strategy: .cfPreferences)
         try FileManager.default.removeItem(at: file)
-        await #expect(throws: FileGrantError.stale) {
-            try await PlistJournalRestorer(access: PlistFileAccess(journal: journal, paths: paths), grants: grants).restore(entry)
+        await #expect(throws: FileGrantError.stale(fileName: "group.com.apple.controlcenter.plist")) {
+            try await PlistJournalRestorer(access: PlistFileAccess(journal: journal, paths: paths, io: .filesOnly, clock: clock), grants: grants)
+                .restore(entry)
         }
     }
 
@@ -429,5 +457,728 @@ struct PlistFileAccessTests {
         let access = PlistFileAccess(journal: journal, paths: paths, grants: grants)
         try await access.write(.integer(2), key: "alpha", in: plist, strategy: .atomicFile)
         #expect(try onDisk()["alpha"] as? Int == 2)
+    }
+
+    // MARK: Places inside a key
+
+    private func tableOnDisk(_ url: URL? = nil) throws -> [String: Int] {
+        try #require(onDisk(url)["table"] as? [String: Int])
+    }
+
+    private func backupNames() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: paths.backups.path)) ?? []).sorted()
+    }
+
+    private func tableEntry(_ name: String, original: PlistValue?, strategy: PlistWriteStrategy = .cfPreferences) -> JournalEntry {
+        .plistPath(filePath: resolved(plist), key: "table", path: [.key(name)], original: original, strategy: strategy, codec: .none)
+    }
+
+    private func steppingAccess(_ journal: Journal, service: ScriptedService) -> PlistFileAccess {
+        PlistFileAccess(journal: journal, paths: paths, grants: nil, io: service.io, clock: stepping)
+    }
+
+    @Test func pathWriteJournalsEachPathThenWritesOnce() async throws {
+        try writePlist(["table": ["a": 1, "b": 2, "c": 3], "keep": "me"])
+        let journal = makeJournal()
+        let service = ScriptedService(.followsTheFile)
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: service.io, clock: clock)
+        // What the journal's file holds at the moment of the write: the records are on disk before the change is made.
+        let journalFile = journalFile
+        let atTheWrite = Mutex<[JournalEntry]>([])
+        service.onWrite {
+            let records = (try? Data(contentsOf: journalFile)).flatMap { try? JSONCoding.decoder().decode(JournalOnDisk.self, from: $0) }
+            atTheWrite.withLock { $0 = records?.records.map(\.entry) ?? [] }
+        }
+
+        let edits = [PathEdit(path: [.key("a")], value: .integer(10)), PathEdit(path: [.key("b")], value: nil),
+                     PathEdit(path: [.key("d")], value: .integer(4))]
+        try await access.write(edits, key: "table", in: plist, strategy: .cfPreferences)
+
+        let expected = [tableEntry("a", original: .integer(1)), tableEntry("b", original: .integer(2)), tableEntry("d", original: nil)]
+        #expect(atTheWrite.withLock { $0 } == expected, "each path was journaled, with its original, before the key was written")
+        #expect(service.writeCount == 1, "and the key was written once, for all three")
+        #expect(await journal.records().map(\.entry) == expected)
+        #expect(await journal.records().map(\.lastWritten) == [.value(.integer(10)), .removed, .value(.integer(4))] as [WrittenValue?],
+                "what was written is noted for each")
+        #expect(try tableOnDisk() == ["a": 10, "c": 3, "d": 4])
+        #expect(try onDisk()["keep"] as? String == "me")
+        #expect(backupNames().count == 1, "the file was copied once, before the write")
+    }
+
+    @Test func pathWriteRoundTripsThroughThePreferencesService() async throws {
+        try writePlist(["table": ["a": 1, "b": 2], "keep": "me"])
+        let journal = makeJournal()
+        let access = makeAccess(journal)
+
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+        #expect(try access.readTopLevel(plist)["table"] == .dictionary(["a": .integer(10), "b": .integer(2)]))
+        #expect(try await access.value(at: [.key("a")], key: "table", in: plist) == .integer(10))
+        #expect(try await access.value(at: [.key("nothing")], key: "table", in: plist) == nil)
+
+        // A second write to the same place, as the next change after a first: it isn't refused, and the original is still the first.
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(11))], key: "table", in: plist)
+        #expect(await journal.records().map(\.entry) == [tableEntry("a", original: .integer(1))])
+
+        try await access.undo(path: [.key("a")], key: "table", in: plist)
+        #expect(try tableOnDisk() == ["a": 1, "b": 2])
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func undoPutsBackOnlyThatPath() async throws {
+        try writePlist(["table": ["a": 1, "b": 2, "c": 3]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10)), PathEdit(path: [.key("b")], value: .integer(20))],
+                               key: "table", in: plist)
+        // Meanwhile macOS changes a place of its own in the same table.
+        try PlistIO.writeFile(.dictionary(["a": .integer(10), "b": .integer(20), "c": .integer(33)]), key: "table", to: plist)
+
+        try await access.undo(path: [.key("a")], key: "table", in: plist)
+
+        #expect(try tableOnDisk() == ["a": 1, "b": 20, "c": 33], "a is back; b is still Mantel's, and c is macOS's")
+        #expect(await journal.records().map(\.key) == ["plist:\(resolved(plist))#table/k:b"], "only a's record is gone")
+        // A place that isn't recorded is nothing to put back.
+        try await access.undo(path: [.key("a")], key: "table", in: plist)
+        #expect(try tableOnDisk() == ["a": 1, "b": 20, "c": 33])
+    }
+
+    @Test func replayOfPathEntriesLeavesWhatOthersChangedAlone() async throws {
+        try writePlist(["table": ["a": 1, "b": 2, "c": 3]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10)), PathEdit(path: [.key("b")], value: nil)],
+                               key: "table", in: plist)
+        try PlistIO.writeFile(.dictionary(["a": .integer(10), "c": .integer(33), "d": .integer(4)]), key: "table", to: plist)
+
+        // As after a crash: a new journal on the same file.
+        let restarted = Journal(file: journalFile, clock: clock)
+        let restorer = PlistJournalRestorer(access: PlistFileAccess(journal: restarted, paths: paths, grants: nil,
+                                                                    io: ScriptedService(.followsTheFile).io, clock: clock),
+                                            grants: try makeGrants())
+        let failures = await restarted.replay(using: restorer)
+
+        #expect(failures.isEmpty)
+        #expect(try tableOnDisk() == ["a": 1, "b": 2, "c": 33, "d": 4], "a and b are back; c and d, which were never Mantel's, stay")
+        #expect(await restarted.records().isEmpty)
+    }
+
+    @Test func aPathThatCantBeTakenIsFoundBeforeAnythingIsChanged() async throws {
+        try writePlist(["table": ["a": 1]])
+        let before = try Data(contentsOf: plist)
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+
+        await #expect(throws: PlistAccessError.path(.notAContainer(step: 1))) {
+            try await access.write([PathEdit(path: [.key("a"), .key("deeper")], value: .integer(1))], key: "table", in: plist)
+        }
+        await #expect(throws: PlistAccessError.path(.noMatch(step: 0)), "an empty path has no place to put a value") {
+            try await access.write([PathEdit(path: [], value: .integer(1))], key: "table", in: plist)
+        }
+        #expect(await journal.records().isEmpty, "nothing was journaled for a change that can't be made")
+        #expect(backupNames().isEmpty)
+        #expect(try Data(contentsOf: plist) == before)
+
+        // No edits, nothing to do.
+        try await access.write([], key: "table", in: plist)
+        #expect(try Data(contentsOf: plist) == before)
+    }
+
+    @Test func aPathWriteTheJournalCantRecordChangesNothing() async throws {
+        try writePlist(["table": ["a": 1, "b": 2]])
+        let journal = makeJournal()
+        // Something already recorded, which stays. The journal's folder can't be written to, so the next record can't be made.
+        try await journal.record(tableEntry("a", original: .integer(1)))
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let before = try Data(contentsOf: plist)
+        let state = journalFile.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: state.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path) }
+
+        await #expect(throws: (any Error).self) {
+            try await access.write([PathEdit(path: [.key("a")], value: .integer(9)), PathEdit(path: [.key("b")], value: .integer(9))],
+                                   key: "table", in: plist)
+        }
+        #expect(await journal.records().map(\.entry) == [tableEntry("a", original: .integer(1))])
+        #expect(try Data(contentsOf: plist) == before, "nothing was changed")
+    }
+
+    // MARK: The two files macOS keeps for the menu bar
+
+    @Test func atomicFileIsRefusedForGrantedAppleFile() async throws {
+        let settings = try makeSettings()
+        let grants = try makeGrants(settings: settings)
+        let file = try await grantedApprovals(grants)
+        await settings.flush()
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: grants, io: .filesOnly, clock: clock)
+        let before = try Data(contentsOf: file)
+
+        let refusal = PlistAccessError.atomicFileRefused(file: "group.com.apple.controlcenter.plist")
+        await #expect(throws: refusal) {
+            try await access.write([PathEdit(path: [.key("com.example.app")], value: .bool(false))], key: "trackedApplications",
+                                   in: file, strategy: .atomicFile)
+        }
+        await #expect(throws: refusal, "a whole key can't be replaced that way either") {
+            try await access.write(.dictionary([:]), key: "trackedApplications", in: file, strategy: .atomicFile)
+        }
+        #expect(refusal.errorDescription
+            == "macOS doesn't let apps replace group.com.apple.controlcenter.plist, so Mantel only changes it through macOS's preferences service.")
+        #expect(try Data(contentsOf: file) == before)
+        #expect(await journal.records().isEmpty, "refused before the journal, and before the backup")
+        #expect(backupNames().isEmpty)
+
+        // Through the preferences service it is allowed, and any other file may still be replaced.
+        try await access.write([PathEdit(path: [.key("com.example.app")], value: .bool(false))], key: "trackedApplications", in: file)
+        #expect(try onDisk(file)["trackedApplications"] as? [String: Bool] == ["com.example.app": false])
+        try writePlist(["alpha": 1])
+        try await access.write(.integer(2), key: "alpha", in: plist, strategy: .atomicFile)
+        #expect(try onDisk()["alpha"] as? Int == 2)
+    }
+
+    @Test func legacyAtomicEntryRestoresThroughPreferences() async throws {
+        // An earlier version journaled an atomic write of the approvals file. macOS refused it, so the preferences service is the
+        // only way back.
+        let settings = try makeSettings()
+        let grants = try makeGrants(settings: settings)
+        let file = try await grantedApprovals(grants)
+        await settings.flush()
+        let strategies = Mutex<[PlistWriteStrategy]>([])
+        var io = PlistIO.filesOnly
+        let write = io.write
+        io.write = { value, key, url, strategy in
+            strategies.withLock { $0.append(strategy) }
+            try write(value, key, url, strategy)
+        }
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: grants, io: io, clock: clock)
+        try await journal.record(.plistKey(filePath: resolved(file), key: "trackedApplications",
+                                           original: .dictionary(["com.example.app": .bool(true)]), strategy: .atomicFile))
+        try writePlist(["trackedApplications": ["com.example.app": false]], to: file)
+
+        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: grants))
+
+        #expect(failures.isEmpty)
+        #expect(strategies.withLock { $0 } == [.cfPreferences], "not through the file")
+        #expect(try onDisk(file)["trackedApplications"] as? [String: Bool] == ["com.example.app": true])
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func legacyAtomicEntryOfAnotherFileStaysAtomic() async throws {
+        try writePlist(["alpha": 5])
+        let strategies = Mutex<[PlistWriteStrategy]>([])
+        var io = PlistIO.filesOnly
+        let write = io.write
+        io.write = { value, key, url, strategy in
+            strategies.withLock { $0.append(strategy) }
+            try write(value, key, url, strategy)
+        }
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: try makeGrants(), io: io, clock: clock)
+        try await journal.record(.plistKey(filePath: resolved(plist), key: "alpha", original: .integer(1), strategy: .atomicFile))
+
+        #expect(await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants())).isEmpty)
+        #expect(strategies.withLock { $0 } == [.atomicFile])
+        #expect(try onDisk()["alpha"] as? Int == 1)
+    }
+
+    // MARK: cfprefsd and the file disagree
+
+    @Test func pendingFlushOfOwnWriteDoesNotRefuse() async throws {
+        try writePlist(["table": ["a": 1]])
+        let journal = Journal(file: journalFile, clock: stepping)
+        let first = tableEntry("a", original: .integer(1))
+        try await journal.record(first)
+        try await journal.noteWritten(.value(.integer(9)), forKey: Journal.key(for: first))
+        // cfprefsd holds Mantel's last write (a = 9), which has not reached the file (a = 1) yet, and says so every time it is asked.
+        let service = ScriptedService(.saysUntilWritten(.dictionary(["a": .integer(9)])))
+        let access = steppingAccess(journal, service: service)
+        let started = stepping.now()
+
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+
+        #expect(service.writeCount == 1)
+        #expect(stepping.now().timeIntervalSince(started) >= 2, "it waited the 2 s out, on the injected clock, before deciding")
+        #expect(try tableOnDisk() == ["a": 10])
+        let records = await journal.records()
+        #expect(records.map(\.entry) == [first], "the first original is still the one that counts")
+        #expect(records.first?.lastWritten == .value(.integer(10)))
+    }
+
+    @Test(arguments: [nil, WrittenValue.value(.integer(7)), .removed] as [WrittenValue?])
+    func persistentDisagreementRefusesBeforeBackup(lastWritten: WrittenValue?) async throws {
+        try writePlist(["table": ["a": 1]])
+        let before = try Data(contentsOf: plist)
+        let journal = Journal(file: journalFile, clock: stepping)
+        let first = tableEntry("a", original: .integer(1))
+        var recordsBefore: [JournalRecord] = []
+        if let lastWritten {
+            try await journal.record(first)
+            try await journal.noteWritten(lastWritten, forKey: Journal.key(for: first))
+            recordsBefore = await journal.records()
+        }
+        // cfprefsd says a = 5: not what the file says, and not what Mantel last wrote either.
+        let service = ScriptedService(.says(.dictionary(["a": .integer(5)])))
+        let access = steppingAccess(journal, service: service)
+        let started = stepping.now()
+
+        await #expect(throws: PlistAccessError.disagree(key: "table")) {
+            try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+        }
+
+        #expect(stepping.now().timeIntervalSince(started) >= 2, "it gave them 2 s on the injected clock, and not a moment of real time")
+        #expect(service.readCount >= 20)
+        #expect(service.writeCount == 0)
+        #expect(backupNames().isEmpty, "refused before the backup")
+        #expect(await journal.records() == recordsBefore, "and before the journal")
+        #expect(try Data(contentsOf: plist) == before)
+    }
+
+    @Test func aFlushThatLandsWhilePollingEndsTheWaitEarly() async throws {
+        try writePlist(["table": ["a": 1]])
+        let journal = Journal(file: journalFile, clock: stepping)
+        // cfprefsd disagrees for three looks and then the file catches up.
+        let service = ScriptedService(.saysForReads(3, .dictionary(["a": .integer(9)])))
+        let access = steppingAccess(journal, service: service)
+        let started = stepping.now()
+
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+
+        let waited = stepping.now().timeIntervalSince(started)
+        #expect(abs(waited - 0.3) < 0.001, "three waits of 100 ms, then it went on: \(waited)")
+        #expect(try tableOnDisk() == ["a": 10])
+        #expect(await journal.records().map(\.entry) == [tableEntry("a", original: .integer(1))], "the original is what both agreed on")
+    }
+
+    @Test func aWriteWhereTheyAgreeDoesNotWait() async throws {
+        try writePlist(["table": ["a": 1, "b": 2]])
+        let access = steppingAccess(makeJournal(), service: ScriptedService(.followsTheFile))
+        let started = stepping.now()
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+        #expect(stepping.now() == started, "no wait at all")
+    }
+
+    // MARK: Containers the write made
+
+    @Test func undoRemovesContainersTheWriteCreated() async throws {
+        // The table isn't in the file: writing a place in it makes it, and putting the place back leaves no table at all.
+        try writePlist(["keep": "me"])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(1))], key: "table", in: plist)
+        #expect(try tableOnDisk() == ["a": 1])
+        #expect(await journal.records().first?.createdContainers == 1, "the journal knows the write made the table")
+
+        try await access.undo(path: [.key("a")], key: "table", in: plist)
+        #expect(try onDisk()["table"] == nil, "the table is gone, not left as {}")
+        #expect(try onDisk()["keep"] as? String == "me")
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func undoRemovesOnlyTheLevelsTheWriteMade() async throws {
+        // The table is there; the write makes one more level inside it.
+        try writePlist(["table": ["b": 2]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let place: PlistKeyPath = [.key("x"), .key("y")]
+        try await access.write([PathEdit(path: place, value: .integer(1))], key: "table", in: plist)
+        #expect(await journal.records().first?.createdContainers == 1, "x was made; the table was there")
+
+        try await access.undo(path: place, key: "table", in: plist)
+        #expect(try tableOnDisk() == ["b": 2])
+        #expect(try onDisk()["table"] as? [String: Any] != nil, "the table stays: it was there before")
+    }
+
+    @Test func undoLeavesACreatedContainerSomeoneElseAddedTo() async throws {
+        try writePlist(["keep": "me"])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(1))], key: "table", in: plist)
+        // macOS puts a place of its own in the table Mantel made.
+        try PlistIO.writeFile(.dictionary(["a": .integer(1), "c": .integer(3)]), key: "table", to: plist)
+
+        try await access.undo(path: [.key("a")], key: "table", in: plist)
+        #expect(try tableOnDisk() == ["c": 3], "it isn't empty, so it is theirs now")
+    }
+
+    @Test func aTableThatWasThereEmptyStaysEmpty() async throws {
+        try writePlist(["table": [String: Int]()])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(1))], key: "table", in: plist)
+        #expect(await journal.records().first?.createdContainers == nil, "the write made no container")
+
+        try await access.undo(path: [.key("a")], key: "table", in: plist)
+        #expect(try tableOnDisk() == [:], "as it was")
+    }
+
+    @Test func aReplayRemovesWhatTheWriteCreatedToo() async throws {
+        try writePlist(["keep": "me"])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(1)), PathEdit(path: [.key("b")], value: .integer(2))],
+                               key: "table", in: plist)
+
+        // As after a crash: a new journal on the same file.
+        let restarted = Journal(file: journalFile, clock: clock)
+        let restorer = PlistJournalRestorer(access: PlistFileAccess(journal: restarted, paths: paths, grants: nil,
+                                                                    io: ScriptedService(.followsTheFile).io, clock: clock),
+                                            grants: try makeGrants())
+        let failures = await restarted.replay(using: restorer)
+
+        #expect(failures.isEmpty)
+        #expect(try onDisk()["table"] == nil, "both places are back to nothing, and the table with them")
+        #expect(try onDisk()["keep"] as? String == "me")
+        #expect(await restarted.records().isEmpty)
+    }
+
+    @Test func containersInsideABlobAreRemovedToo() async throws {
+        let codec = PlistBlobCodecID(rawValue: "xml")
+        let inner = try PropertyListSerialization.data(fromPropertyList: ["other": 1], format: .xml, options: 0)
+        try writePlist(["blob": inner])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, codecs: [codec: XMLBlobCodec()],
+                                     io: ScriptedService(.followsTheFile).io, clock: clock)
+        let place: PlistKeyPath = [.key("apps"), .key("x")]
+        try await access.write([PathEdit(path: place, value: .integer(5))], key: "blob", in: plist, codec: codec)
+        #expect(await journal.records().first?.createdContainers == 1)
+
+        try await access.undo(path: place, key: "blob", in: plist)
+        #expect(try await access.value(at: [.key("apps")], key: "blob", in: plist, codec: codec) == nil)
+        #expect(try await access.value(at: [.key("other")], key: "blob", in: plist, codec: codec) == .integer(1))
+    }
+
+    // MARK: Files that can't be read
+
+    @Test(.disabled(if: getuid() == 0, "root can read any file"))
+    func permissionDeniedIsNotAbsent() throws {
+        try writePlist(["alpha": 1])
+        let absent = folder.url.appending(path: "absent.plist")
+        #expect(try PlistIO.readFile(absent, key: "alpha") == nil, "a file that isn't there has no keys")
+
+        func isUnreadable(_ body: () throws -> Void) -> Bool {
+            do {
+                try body()
+                return false
+            } catch PlistAccessError.unreadable {
+                return true
+            } catch {
+                return false
+            }
+        }
+        // The file is there, and Mantel isn't allowed to read it.
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: plist.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plist.path) }
+        #expect(isUnreadable { _ = try PlistIO.readFile(plist, key: "alpha") }, "read as absent, a write would make a new file over it")
+        #expect(isUnreadable { try PlistIO.writeFile(.integer(2), key: "alpha", to: plist) })
+
+        // The folder it is in can't be looked into: the file can't even be found, which is not the same as not being there.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plist.path)
+        let inner = folder.url.appending(path: "closed", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        let hidden = inner.appending(path: "sample.plist")
+        try writePlist(["alpha": 1], to: hidden)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: inner.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: inner.path) }
+        #expect(isUnreadable { _ = try PlistIO.readFile(hidden, key: "alpha") })
+        #expect(isUnreadable { try PlistIO.writeFile(.integer(2), key: "alpha", to: hidden) })
+    }
+
+    // MARK: Lists
+
+    private func appsEntry(_ app: String, flag: Bool) -> [String: Any] { ["bundle": app, "allowed": flag] }
+
+    private func allowed(_ app: String) throws -> Bool? {
+        let apps = try #require(onDisk()["apps"] as? [[String: Any]])
+        return apps.first { $0["bundle"] as? String == app }?["allowed"] as? Bool
+    }
+
+    @Test func matchingEntryGoneCountsAsRestored() async throws {
+        try writePlist(["apps": [appsEntry("com.example.one", flag: true), appsEntry("com.example.two", flag: true)]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let one: PlistKeyPath = [.matching(key: "bundle", value: "com.example.one"), .key("allowed")]
+        try await access.write([PathEdit(path: one, value: .bool(false))], key: "apps", in: plist)
+        #expect(try allowed("com.example.one") == false)
+
+        // The app's entry is gone meanwhile.
+        try writePlist(["apps": [appsEntry("com.example.two", flag: true)]])
+        let before = try Data(contentsOf: plist)
+        try await access.undo(path: one, key: "apps", in: plist)
+
+        #expect(try Data(contentsOf: plist) == before, "nothing was put back, and nothing was made up")
+        #expect(await journal.records().isEmpty, "and the record is gone: there is nothing left to restore")
+
+        // Through a replay it is the same.
+        try writePlist(["apps": [appsEntry("com.example.one", flag: true)]])
+        try await access.write([PathEdit(path: one, value: .bool(false))], key: "apps", in: plist)
+        try writePlist(["apps": [appsEntry("com.example.two", flag: true)]])
+        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
+        #expect(failures.isEmpty)
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func vanishedListCountsAsEntryGone() async throws {
+        let one: PlistKeyPath = [.matching(key: "bundle", value: "com.example.one"), .key("allowed")]
+        try writePlist(["apps": [appsEntry("com.example.one", flag: true)], "keep": "me"])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: one, value: .bool(false))], key: "apps", in: plist)
+
+        // The whole list is gone meanwhile, not just the app's entry in it.
+        try PlistIO.writeFile(nil, key: "apps", to: plist)
+        let before = try Data(contentsOf: plist)
+        try await access.undo(path: one, key: "apps", in: plist)
+
+        #expect(try Data(contentsOf: plist) == before, "nothing was put back, and no list was made up to put it in")
+        #expect(await journal.records().isEmpty, "and the record is gone: its entry is gone, so there is nothing left to restore")
+
+        // Through a replay it is the same, and it says so in the log's words rather than as a failure.
+        try writePlist(["apps": [appsEntry("com.example.one", flag: true)]])
+        try await access.write([PathEdit(path: one, value: .bool(false))], key: "apps", in: plist)
+        try PlistIO.writeFile(nil, key: "apps", to: plist)
+        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
+        #expect(failures.isEmpty)
+        #expect(await journal.records().isEmpty)
+
+        // A write into a list that isn't there is refused, as for any entry that isn't in it.
+        await #expect(throws: PlistAccessError.path(.noMatch(step: 0))) {
+            try await access.write([PathEdit(path: one, value: .bool(false))], key: "apps", in: plist)
+        }
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func vanishedBlobCountsAsEntryGoneToo() async throws {
+        let codec = PlistBlobCodecID(rawValue: "xml")
+        let inner = try PropertyListSerialization.data(fromPropertyList: ["apps": [appsEntry("com.example.one", flag: true)]],
+                                                       format: .xml, options: 0)
+        try writePlist(["blob": inner, "keep": "me"])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, codecs: [codec: XMLBlobCodec()],
+                                     io: ScriptedService(.followsTheFile).io, clock: clock)
+        let one: PlistKeyPath = [.key("apps"), .matching(key: "bundle", value: "com.example.one"), .key("allowed")]
+        try await access.write([PathEdit(path: one, value: .bool(false))], key: "blob", in: plist, codec: codec)
+
+        // The whole value is gone, so there is no blob to read the list from.
+        try PlistIO.writeFile(nil, key: "blob", to: plist)
+        let before = try Data(contentsOf: plist)
+        try await access.undo(path: one, key: "blob", in: plist)
+
+        #expect(try Data(contentsOf: plist) == before)
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func aMatchingStepFindsTheAppWhereverItIsNow() async throws {
+        try writePlist(["apps": [appsEntry("com.example.one", flag: true), appsEntry("com.example.two", flag: true)]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let one: PlistKeyPath = [.matching(key: "bundle", value: "com.example.one"), .key("allowed")]
+        try await access.write([PathEdit(path: one, value: .bool(false))], key: "apps", in: plist)
+
+        // macOS puts another app's entry in front of it, and turns that one off.
+        try writePlist(["apps": [appsEntry("com.example.new", flag: false), appsEntry("com.example.one", flag: false),
+                                 appsEntry("com.example.two", flag: true)]])
+        try await access.undo(path: one, key: "apps", in: plist)
+
+        #expect(try allowed("com.example.one") == true, "the app Mantel changed is put back")
+        #expect(try allowed("com.example.new") == false, "the one that took its place in the list is left as it is")
+        #expect(try allowed("com.example.two") == true)
+    }
+
+    // MARK: Entries that name their app some levels down
+
+    /// An entry of a list the way macOS keeps its approvals: whether the app is allowed, and where it says it is.
+    private func approval(_ app: String, allowed: Bool) -> [String: Any] {
+        ["isAllowed": allowed, "menuItemLocations": [["bundle": ["_0": app]]]]
+    }
+
+    private func isAllowed(_ app: String, in list: [[String: Any]]) -> Bool? {
+        list.first { entry in
+            ((entry["menuItemLocations"] as? [[String: Any]])?.contains { ($0["bundle"] as? [String: Any])?["_0"] as? String == app }) == true
+        }?["isAllowed"] as? Bool
+    }
+
+    private func approvalsOnDisk() throws -> [[String: Any]] {
+        try #require(onDisk()["list"] as? [[String: Any]])
+    }
+
+    private func theWay(to app: String) -> PlistKeyPath {
+        [.matchingPath(path: [.key("menuItemLocations"), .anyElement, .key("bundle"), .key("_0")], value: app), .key("isAllowed")]
+    }
+
+    @Test func pathWriteAndUndoThroughMatchingPathOnReorderedList() async throws {
+        try writePlist(["list": [approval("com.example.one", allowed: true), approval("com.example.two", allowed: true),
+                                 approval("com.example.three", allowed: true)]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let two = theWay(to: "com.example.two")
+
+        try await access.write([PathEdit(path: two, value: .bool(false))], key: "list", in: plist)
+        #expect(try isAllowed("com.example.two", in: approvalsOnDisk()) == false)
+        #expect(await journal.records().map(\.entry) == [
+            .plistPath(filePath: resolved(plist), key: "list", path: two, original: .bool(true), strategy: .cfPreferences, codec: .none),
+        ])
+
+        // macOS writes the whole list again, in another order, and turns another app's entry off while it is at it.
+        try writePlist(["list": [approval("com.example.three", allowed: false), approval("com.example.two", allowed: false),
+                                 approval("com.example.new", allowed: true), approval("com.example.one", allowed: true)]])
+        try await access.undo(path: two, key: "list", in: plist)
+
+        let list = try approvalsOnDisk()
+        #expect(isAllowed("com.example.two", in: list) == true, "the entry Mantel changed is put back, wherever it is now")
+        #expect(isAllowed("com.example.three", in: list) == false, "what macOS changed meanwhile is left as it is")
+        #expect(isAllowed("com.example.one", in: list) == true)
+        #expect(isAllowed("com.example.new", in: list) == true)
+        #expect(list.count == 4, "nothing was added or taken out")
+        #expect(list.map { ($0["menuItemLocations"] as? [[String: Any]])?.count } == [1, 1, 1, 1])
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func vanishedEntryCountsAsGone() async throws {
+        try writePlist(["list": [approval("com.example.one", allowed: true), approval("com.example.two", allowed: true)]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let two = theWay(to: "com.example.two")
+        try await access.write([PathEdit(path: two, value: .bool(false))], key: "list", in: plist)
+
+        // The app's entry is gone meanwhile.
+        try writePlist(["list": [approval("com.example.one", allowed: true)]])
+        let before = try Data(contentsOf: plist)
+        try await access.undo(path: two, key: "list", in: plist)
+
+        #expect(try Data(contentsOf: plist) == before, "nothing was put back, and nothing was made up")
+        #expect(await journal.records().isEmpty, "and the record is gone: there is nothing left to restore")
+
+        // Through a replay it is the same, also when the whole list is gone.
+        for gone in [[approval("com.example.one", allowed: true)], [[String: Any]]()] {
+            try writePlist(["list": [approval("com.example.two", allowed: true)]])
+            try await access.write([PathEdit(path: two, value: .bool(false))], key: "list", in: plist)
+            try writePlist(["list": gone])
+            let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
+            #expect(failures.isEmpty)
+            #expect(await journal.records().isEmpty)
+        }
+    }
+
+    @Test func twoEntriesForOneAppAreRefusedAndTheRecordStays() async throws {
+        try writePlist(["list": [approval("com.example.one", allowed: true), approval("com.example.two", allowed: true)]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let two = theWay(to: "com.example.two")
+
+        // A write into a list that already has two entries for the app is refused before anything is journaled.
+        try writePlist(["list": [approval("com.example.two", allowed: true), approval("com.example.two", allowed: true)]])
+        await #expect(throws: PlistAccessError.path(.ambiguousMatch(step: 0))) {
+            try await access.write([PathEdit(path: two, value: .bool(false))], key: "list", in: plist)
+        }
+        #expect(await journal.records().isEmpty)
+
+        // One that comes between a write and its undo is not put back over: which of the two was Mantel's isn't known.
+        try writePlist(["list": [approval("com.example.one", allowed: true), approval("com.example.two", allowed: true)]])
+        try await access.write([PathEdit(path: two, value: .bool(false))], key: "list", in: plist)
+        try writePlist(["list": [approval("com.example.two", allowed: false), approval("com.example.two", allowed: true)]])
+        let before = try Data(contentsOf: plist)
+        await #expect(throws: PlistAccessError.path(.ambiguousMatch(step: 0))) { try await access.undo(path: two, key: "list", in: plist) }
+        #expect(try Data(contentsOf: plist) == before)
+        #expect(await journal.records().count == 1, "the entry stays, for the next try")
+    }
+
+    // MARK: Old records, with the real restorer
+
+    private let eightDays = Duration.seconds(8 * 24 * 60 * 60)
+
+    @Test func aStaleEntryThatSomeoneChangedIsDroppedNotRestored() async throws {
+        try writePlist(["table": ["a": 1]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+        // Weeks later the person has set it to something else themselves.
+        try PlistIO.writeFile(.dictionary(["a": .integer(99)]), key: "table", to: plist)
+        clock.advance(by: eightDays)
+
+        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
+
+        #expect(failures.isEmpty)
+        #expect(try tableOnDisk() == ["a": 99], "their change is not undone")
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func aStaleEntryThatStillHoldsIsRestored() async throws {
+        try writePlist(["table": ["a": 1]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+        clock.advance(by: eightDays)
+
+        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
+
+        #expect(failures.isEmpty)
+        #expect(try tableOnDisk() == ["a": 1])
+    }
+
+    @Test func aStaleEntryOfAWholeKeyIsRestoredAsBefore() async throws {
+        // A whole-key record doesn't know what was written, so nothing about it is doubted.
+        try writePlist(["alpha": 1])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write(.integer(5), key: "alpha", in: plist, strategy: .atomicFile)
+        try PlistIO.writeFile(.integer(77), key: "alpha", to: plist)
+        clock.advance(by: eightDays)
+
+        #expect(await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants())).isEmpty)
+        #expect(try onDisk()["alpha"] as? Int == 1)
+    }
+
+    // MARK: Codecs
+
+    @Test func aCodecEditsAPlaceInsideABlob() async throws {
+        let inner = try PropertyListSerialization.data(fromPropertyList: ["apps": ["x": 1, "y": 2]], format: .xml, options: 0)
+        try writePlist(["blob": inner, "keep": "me"])
+        let codec = PlistBlobCodecID(rawValue: "xml")
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, codecs: [codec: XMLBlobCodec()],
+                                     io: ScriptedService(.followsTheFile).io, clock: clock)
+        let place: PlistKeyPath = [.key("apps"), .key("x")]
+
+        try await access.write([PathEdit(path: place, value: .integer(5))], key: "blob", in: plist, codec: codec)
+
+        #expect(try await access.value(at: place, key: "blob", in: plist, codec: codec) == .integer(5))
+        #expect(try await access.value(at: [.key("apps"), .key("y")], key: "blob", in: plist, codec: codec) == .integer(2))
+        #expect(await journal.records().map(\.entry) == [
+            .plistPath(filePath: resolved(plist), key: "blob", path: place, original: .integer(1), strategy: .cfPreferences, codec: codec),
+        ])
+
+        try await access.undo(path: place, key: "blob", in: plist)
+        #expect(try await access.value(at: place, key: "blob", in: plist, codec: codec) == .integer(1))
+        #expect(try onDisk()["keep"] as? String == "me")
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func aCodecThatIsNotRegisteredWritesNothingAndTheEntryStays() async throws {
+        let inner = try PropertyListSerialization.data(fromPropertyList: ["x": 1], format: .xml, options: 0)
+        try writePlist(["blob": inner])
+        let before = try Data(contentsOf: plist)
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        let unknown = PlistBlobCodecID(rawValue: "nope")
+
+        await #expect(throws: PlistAccessError.codecMissing("nope")) {
+            try await access.write([PathEdit(path: [.key("x")], value: .integer(2))], key: "blob", in: plist, codec: unknown)
+        }
+        await #expect(throws: PlistAccessError.codecMissing("nope")) {
+            try await access.value(at: [.key("x")], key: "blob", in: plist, codec: unknown)
+        }
+        #expect(await journal.records().isEmpty)
+        #expect(backupNames().isEmpty)
+        #expect(try Data(contentsOf: plist) == before)
+
+        // An entry a newer build made, for a codec this one doesn't have: it can't be put back, and stays.
+        let entry = JournalEntry.plistPath(filePath: resolved(plist), key: "blob", path: [.key("x")], original: .integer(1),
+                                           strategy: .cfPreferences, codec: unknown)
+        try await journal.record(entry)
+        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
+        #expect(failures.map(\.key) == [Journal.key(for: entry)])
+        #expect(failures.first?.message == PlistAccessError.codecMissing("nope").errorDescription)
+        #expect(await journal.records().map(\.entry) == [entry])
+        #expect(try Data(contentsOf: plist) == before)
     }
 }

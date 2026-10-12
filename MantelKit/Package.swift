@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "MKCore", targets: ["MKCore"]),
         .library(name: "MKCommands", targets: ["MKCommands"]),
+        .library(name: "MKLayout", targets: ["MKLayout"]),
         .library(name: "MKMenuBar", targets: ["MKMenuBar"]),
     ],
     // No `dependencies:`: Mantel uses no third-party code.
@@ -17,16 +18,23 @@ let package = Package(
         // What the app and the `mantel` command-line tool say to each other: the commands, their JSON lines, the
         // command-line grammar, and the control socket with the check of who is on the other end of it.
         .target(name: "MKCommands", dependencies: ["MKCore"]),
+        // The pure logic of which icons are shown and which are hidden: the sections apps are sorted into and their profile file,
+        // the visibility plan and how it is built, the lists of what can't be changed, automatic overflow, room estimates and swaps,
+        // and the state machine that decides what a reveal shows, with the driver that keeps its timers. It reads no Accessibility
+        // and draws nothing.
+        .target(name: "MKLayout", dependencies: ["MKCore"]),
         // The one Objective-C target: it loads macOS's private MenuBarClientCore, checks the methods it is about to call
         // (their type encodings) and only then calls them. It depends on nothing.
         .target(name: "MKPrivateShims", publicHeadersPath: "include"),
-        // The platform layer: reading the menu bar through Accessibility, plist files and their journal, the strip
-        // capture, the click-replay tap, and the probes that exercise each of them.
-        .target(name: "MKMenuBar", dependencies: ["MKCore", "MKCommands", "MKPrivateShims"]),
+        // The platform layer: reading the menu bar through Accessibility into an inventory of items, plist files and their
+        // journal, the strip capture, the click-replay tap, the three ways of hiding icons and the controller that keeps one in
+        // charge, the session that turns events into plans for it, and the probes that exercise each of them.
+        .target(name: "MKMenuBar", dependencies: ["MKCore", "MKCommands", "MKLayout", "MKPrivateShims"]),
         // What every test target shares: throwaway folders.
         .target(name: "MKTestSupport", dependencies: ["MKCore"], path: "Tests/MKTestSupport"),
         .testTarget(name: "MKCoreTests", dependencies: ["MKCore", "MKTestSupport"]),
         .testTarget(name: "MKCommandsTests", dependencies: ["MKCommands", "MKCore", "MKTestSupport"]),
-        .testTarget(name: "MKMenuBarTests", dependencies: ["MKMenuBar", "MKCore", "MKCommands", "MKTestSupport"]),
+        .testTarget(name: "MKLayoutTests", dependencies: ["MKLayout", "MKCore", "MKTestSupport"]),
+        .testTarget(name: "MKMenuBarTests", dependencies: ["MKMenuBar", "MKCore", "MKCommands", "MKLayout", "MKTestSupport"]),
     ]
 )

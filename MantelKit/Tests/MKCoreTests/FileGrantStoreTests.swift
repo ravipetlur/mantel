@@ -103,11 +103,25 @@ struct FileGrantErrorTests {
         #expect(error.errorDescription == "That's not the file Mantel needs. Choose com.apple.MenuBar.plist in the folder that opened.")
     }
 
+    @Test func theStaleMessageNamesTheFileAndWhereToChooseItAgain() {
+        #expect(FileGrantError.stale(fileName: "com.apple.MenuBar.plist").errorDescription
+                == "Mantel lost access to com.apple.MenuBar.plist. Choose it again in Settings › Permissions.")
+        #expect(FileGrantError.stale(fileName: "group.com.apple.controlcenter.plist").errorDescription
+                == "Mantel lost access to group.com.apple.controlcenter.plist. Choose it again in Settings › Permissions.")
+    }
+
+    @Test func theFileNamesAreTheOnesThePanelAsksFor() {
+        #expect(FileGrantKind.menuBarLayout.fileName == "com.apple.MenuBar.plist")
+        #expect(FileGrantKind.controlCenterApprovals.fileName == "group.com.apple.controlcenter.plist")
+        for kind in FileGrantKind.allCases {
+            #expect(ExpectedFile.expected(kind, home: URL(filePath: "/Users/x")).fileName == kind.fileName)
+        }
+    }
+
     @Test func theOtherMessagesSayWhatToDo() {
         let failed = FileGrantError.bookmarkFailed("The file doesn't exist.").errorDescription
         #expect(failed?.contains("The file doesn't exist.") == true)
         #expect(failed?.hasSuffix("Choose it again.") == true)
-        #expect(FileGrantError.stale.errorDescription?.hasSuffix("Choose it again.") == true)
     }
 }
 
@@ -345,6 +359,53 @@ struct FileGrantStoreTests {
         #expect(Set(reloaded.grants.map(\.bookmark)) == Set(granted.map(\.bookmark)))
     }
 
+    @Test func overlappingGrantsBothSurvive() async throws {
+        let layout = try plant(menuBarLayoutPath)
+        let approvals = try plant(approvalsPath)
+        let home = home
+
+        // The store is handed each document in turn, and the first one is held: the store takes a long time over it.
+        let handedOver = Mutex<[[FileGrantKind]]>([])
+        let finished = Mutex(0)
+        let firstHandedOver = Gate()
+        let release = Gate()
+        let settings = SettingsStore(paths: paths, clock: clock)
+        let grants = FileGrantStore(store: settings, bookmarkOptions: [], clock: clock, makeBookmark: FileGrantStore.systemBookmark,
+                                    saveDocument: { store, document in
+            let isFirst = handedOver.withLock { handedOver -> Bool in
+                handedOver.append(document.grants.map(\.kind))
+                return handedOver.count == 1
+            }
+            if isFirst {
+                firstHandedOver.open()
+                await release.wait()
+            }
+            await store.save(document)
+            finished.withLock { $0 += 1 }
+        })
+
+        let one = Task { try await grants.grant(.menuBarLayout, chosen: layout, home: home) }
+        await firstHandedOver.wait()
+        let two = Task { try await grants.grant(.controlCenterApprovals, chosen: approvals, home: home) }
+        // Time for the second grant to reach the store, if nothing makes it wait for the first. It does wait: it can only be
+        // handed over after the first has been, so this runs out its time (a real 0.3 s, for a negative that has to be seen; a
+        // store that didn't chain its saves hands the second over within a millisecond or two).
+        let deadline = ContinuousClock.now + .milliseconds(300)
+        while finished.withLock({ $0 }) == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        release.open()
+        _ = try await one.value
+        _ = try await two.value
+        await settings.flush()
+
+        #expect(handedOver.withLock { $0 } == [[.menuBarLayout], [.menuBarLayout, .controlCenterApprovals]],
+                "in the order of the changes: the second document has both grants")
+        let reloaded = await makeStores().settings.load(GrantsDocument.self)
+        #expect(Set(reloaded.grants.map(\.kind)) == [.menuBarLayout, .controlCenterApprovals], "both are there at the next launch")
+        #expect(reloaded.grants.count == 2)
+    }
+
     @Test func concurrentFirstUsesReadTheDocumentOnce() async throws {
         // A grant made and saved earlier, for the callers to find.
         let file = try plant()
@@ -438,7 +499,7 @@ struct FileGrantStoreTests {
             failure = error as? FileGrantError
         }
 
-        #expect(failure == .stale)
+        #expect(failure == .stale(fileName: "com.apple.MenuBar.plist"))
         #expect(ran.withLock { $0 } == false)
     }
 
@@ -452,7 +513,7 @@ struct FileGrantStoreTests {
         await stores.grants.revoke(.menuBarLayout)
 
         #expect(await stores.grants.grant(for: .menuBarLayout) == nil)
-        #expect(await accessFailure(.menuBarLayout, in: stores.grants) == .stale)
+        #expect(await accessFailure(.menuBarLayout, in: stores.grants) == .stale(fileName: "com.apple.MenuBar.plist"))
         #expect(await stores.grants.grant(for: .controlCenterApprovals) == kept, "the other grant stays")
         #expect(fileManager.fileExists(atPath: layout.path), "the file itself is left alone")
         await stores.settings.flush()
@@ -484,7 +545,7 @@ struct FileGrantStoreTests {
             failure = error as? FileGrantError
         }
 
-        #expect(failure == .stale)
+        #expect(failure == .stale(fileName: "com.apple.MenuBar.plist"))
         #expect(ran.withLock { $0 } == false, "nothing runs on a file that isn't there")
         #expect(await stores.grants.grant(for: .menuBarLayout) == nil, "a stale grant is revoked")
         await stores.settings.flush()
@@ -508,7 +569,7 @@ struct FileGrantStoreTests {
             failure = error as? FileGrantError
         }
 
-        #expect(failure == .stale)
+        #expect(failure == .stale(fileName: "com.apple.MenuBar.plist"))
         #expect(ran.withLock { $0 } == false, "nothing runs on the file it moved to")
         #expect(await stores.grants.grant(for: .menuBarLayout) == nil)
     }

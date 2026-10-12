@@ -8,6 +8,9 @@
 ///
 /// It is written to the settings files as the names of its members (`["control","command"]`), in the order the glyphs are
 /// drawn, so that a file doesn't depend on how the bits are laid out here.
+///
+/// **The list of names is part of the file format** (`hotkeys.json`): `control`, `option`, `shift`, `command` and `function`.
+/// Adding a name, or renaming or removing one, changes what a file may say, so it bumps `HotkeyBindings.currentVersion`.
 public struct ModifierSet: OptionSet, Codable, Hashable, Sendable {
     public let rawValue: UInt8
 
@@ -76,6 +79,23 @@ public struct ModifierSet: OptionSet, Codable, Hashable, Sendable {
     /// ⌃⌥⇧⌘ for the modifiers in the set, in that order. Fn isn't shown: it isn't part of what is registered.
     var glyphs: String {
         Self.entries.filter { $0.carbon != nil && contains($0.modifier) }.map(\.glyph).joined()
+    }
+
+    // MARK: Names
+
+    /// The set the names stand for, or nil when any of them isn't one of the names this version knows.
+    public init?(names: [String]) {
+        var set: ModifierSet = []
+        for name in names {
+            guard let entry = Self.entries.first(where: { $0.name == name }) else { return nil }
+            set.insert(entry.modifier)
+        }
+        self = set
+    }
+
+    /// The names in `names` that this version doesn't know, in the order they came.
+    public static func unknownNames(in names: [String]) -> [String] {
+        names.filter { name in !entries.contains { $0.name == name } }
     }
 
     // MARK: Codable

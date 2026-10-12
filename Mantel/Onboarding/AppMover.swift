@@ -37,7 +37,7 @@ enum AppMover {
         if fileManager.fileExists(atPath: destination.path) {
             let alert = NSAlert()
             alert.messageText = "Replace the Mantel in Applications?"
-            alert.informativeText = "The copy there goes to the Trash."
+            alert.informativeText = "Another copy of Mantel is already there. Replacing it moves that copy to the Trash."
             alert.addButton(withTitle: "Replace")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return false }

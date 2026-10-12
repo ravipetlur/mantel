@@ -1,8 +1,9 @@
 import Foundation
 
-/// A folder of a test's own: made when it's created, deleted with everything in it when it's released. Hold it for as
-/// long as the test uses the folder, as a test suite's stored property or through `withExtendedLifetime`. (A local that
-/// is only read from once may be released straight after that read.)
+/// A folder of a test's own: made when it's created, and deleted with everything in it when the object is deinitialized. A test
+/// keeps a reference to it for as long as it uses the folder, as a test suite's stored property or through
+/// `withExtendedLifetime`. (A local that is only read from once may be released straight after that read, and the folder is
+/// deleted with it.)
 public final class TemporaryFolder: Sendable {
     public let url: URL
 

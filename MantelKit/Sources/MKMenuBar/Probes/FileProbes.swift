@@ -3,39 +3,29 @@ import Foundation
 import MKCommands
 import MKCore
 
-/// The two protected files the file probes work on, through their grants.
-enum GrantedFile {
-    /// Where the granted file is, from the grant; nil when none was made.
+/// What the probes add to the granted files: the same calls with the probe's own parts, the check that a write reached the file,
+/// and the spelling of a strategy.
+extension GrantedFile {
     static func url(of kind: FileGrantKind, in context: ProbeContext) async -> URL? {
-        await context.grants.grant(for: kind).map { URL(filePath: $0.path) }
+        await url(of: kind, in: context.grants)
     }
 
-    /// What to tell the person when there is no grant.
-    static func missing(_ kind: FileGrantKind) -> String {
-        switch kind {
-        case .controlCenterApprovals:
-            "Mantel has no access to the \"Allow in the Menu Bar\" file yet. Choose it in Settings › Permissions, then run this probe again."
-        case .menuBarLayout:
-            "Mantel has no access to the menu bar layout file yet. Choose it in Settings › Permissions, then run this probe again."
-        }
-    }
-
-    /// The top-level keys of the file, read through its grant.
     static func readTopLevel(_ kind: FileGrantKind, in context: ProbeContext) async throws -> [String: PlistValue] {
-        let plist = context.plist
-        return try await context.grants.withAccess(kind) { url in try plist.readTopLevel(url) }
+        try await readTopLevel(kind, grants: context.grants, plist: context.plist)
     }
 
-    /// How long after `start` the file on disk holds `value` under `key`, polled every 20 ms for a second; nil when it never
-    /// does in that time. `cfprefsd`, which a `cfPreferences` write goes through, keeps what it is told in its cache and writes
-    /// the file in its own time, and may not write it at all (a domain it won't write for the caller); so a write that
-    /// `PlistFileAccess` has checked through the cache is not yet known to be in the file.
-    static func fileHolds(_ value: PlistValue, forKey key: String, of kind: FileGrantKind, since start: Date,
+    /// How long after `start` the file on disk holds `value` under `key` (or, with a `path`, at that place inside `key`), polled
+    /// every 20 ms for a second; nil when it never does in that time. `cfprefsd`, which a `cfPreferences` write goes through,
+    /// keeps what it is told in its cache and writes the file in its own time, and may not write it at all (a domain it won't
+    /// write for the caller); so a write that `PlistFileAccess` has checked through the cache is not yet known to be in the file.
+    static func fileHolds(_ value: PlistValue, forKey key: String, at path: PlistKeyPath = [], of kind: FileGrantKind, since start: Date,
                           in context: ProbeContext) async throws -> Double? {
         let deadline = start.addingTimeInterval(1)
         while true {
             try Task.checkCancellation()
-            if let top = try? await readTopLevel(kind, in: context), top[key] == value { return context.milliseconds(since: start) }
+            if let top = try? await readTopLevel(kind, in: context), top[key]?.value(at: path) == value {
+                return context.milliseconds(since: start)
+            }
             if context.clock.now() >= deadline { return nil }
             try await context.clock.sleep(for: .milliseconds(20))
         }
@@ -210,6 +200,9 @@ enum LayoutReadProbe {
 
 /// `layout-move`: changes an item's distance in the layout table, sees whether the menu bar re-sorts, and puts it back.
 /// `key` defaults to the test item's first item; `distance` to 60 more than it has now.
+///
+/// Only that one entry is written, as a place inside the table (`PlistFileAccess.write(_ edits:…)`), and only that one entry is
+/// put back: the other items' distances, which macOS may change while the probe runs, are left as they are.
 enum LayoutMoveProbe {
     static func run(_ context: ProbeContext, _ recorder: inout ProbeRecorder) async {
         let options = context.options
@@ -228,7 +221,7 @@ enum LayoutMoveProbe {
             recorder.fail("The layout file couldn't be read: \(error.localizedDescription)")
             return
         }
-        guard case .dictionary(var positions)? = top[LayoutKeys.trailingPositions] else {
+        guard case .dictionary(let positions)? = top[LayoutKeys.trailingPositions] else {
             recorder.fail("The layout file has no \(LayoutKeys.trailingPositions) table, so there is nothing to move. Run layout-read.")
             return
         }
@@ -256,7 +249,8 @@ enum LayoutMoveProbe {
         } else {
             distance = current + 60
         }
-        positions[key] = distance == distance.rounded() ? .integer(Int(distance)) : .real(distance)
+        let moved: PlistValue = distance == distance.rounded() ? .integer(Int(distance)) : .real(distance)
+        let place: PlistKeyPath = [.key(key)]
         recorder.measure("strategy", strategy.rawValue)
         recorder.measure("key", key)
         recorder.measure("distance", distance)
@@ -265,9 +259,10 @@ enum LayoutMoveProbe {
         let started = context.clock.now()
         recorder.changeBegan()
         do {
-            try await context.plist.write(.dictionary(positions), key: LayoutKeys.trailingPositions, in: url, strategy: strategy)
+            try await context.plist.write([PathEdit(path: place, value: moved)], key: LayoutKeys.trailingPositions, in: url,
+                                          strategy: strategy)
             GrantedFile.recordFileCheck(
-                try await GrantedFile.fileHolds(.dictionary(positions), forKey: LayoutKeys.trailingPositions, of: .menuBarLayout,
+                try await GrantedFile.fileHolds(moved, forKey: LayoutKeys.trailingPositions, at: place, of: .menuBarLayout,
                                                 since: started, in: context), &recorder)
             let outcome = try await context.poll(every: 50, upTo: 3000, from: started, until: { ProbeContext.framedOrder($0) != beforeOrder })
             recorder.measure(poll: "writeToResort", outcome.trace)
@@ -287,7 +282,7 @@ enum LayoutMoveProbe {
 
         // Put back, whatever happened above. A change that didn't get as far as the journal has nothing to put back.
         do {
-            try await context.plist.undo(key: LayoutKeys.trailingPositions, in: url)
+            try await context.plist.undo(path: place, key: LayoutKeys.trailingPositions, in: url)
             recorder.changeUndone()
         } catch {
             recorder.undoFailed("The table couldn't be put back: \(error.localizedDescription) Mantel puts it back when it next starts.")

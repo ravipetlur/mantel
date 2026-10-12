@@ -13,7 +13,12 @@ public struct ProbeOptions: Sendable, Equatable {
 
     /// `--allow-any`: the probe may touch apps other than the test item. Only the word `true` or `1` switches it on.
     public var allowAny: Bool {
-        guard let value = string("allow-any")?.lowercased() else { return false }
+        flag("allow-any")
+    }
+
+    /// An option that is a switch (`--save-baseline`): on when it is given, and its text is `true` or `1`.
+    public func flag(_ key: String) -> Bool {
+        guard let value = string(key)?.lowercased() else { return false }
         return value == "true" || value == "1"
     }
 

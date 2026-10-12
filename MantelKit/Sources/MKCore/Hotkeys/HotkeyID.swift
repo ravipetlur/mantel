@@ -9,6 +9,12 @@ public struct HotkeyID: RawRepresentable, Codable, Hashable, Sendable {
 
     /// Opens Mantel's Settings.
     public static let openSettings = HotkeyID(rawValue: "open-settings")
+    /// Reveals the Hidden icons.
+    public static let showHidden = HotkeyID(rawValue: "show-hidden")
+    /// Reveals the Hidden and the Always Hidden icons.
+    public static let showAll = HotkeyID(rawValue: "show-all")
+    /// Turns Focus Mode on or off.
+    public static let focusMode = HotkeyID(rawValue: "focus-mode")
 
     public init(from decoder: any Decoder) throws {
         rawValue = try decoder.singleValueContainer().decode(String.self)
@@ -49,9 +55,12 @@ public struct HotkeyAction: Sendable, Equatable, Identifiable {
     }
 
     public static let openSettings = HotkeyAction(id: .openSettings, title: "Open Mantel settings")
+    public static let showHidden = HotkeyAction(id: .showHidden, title: "Show hidden icons")
+    public static let showAll = HotkeyAction(id: .showAll, title: "Show all icons")
+    public static let focusMode = HotkeyAction(id: .focusMode, title: "Turn Focus Mode on or off")
 
     /// Every action that can be bound, in the order the pane lists them.
-    public static let all: [HotkeyAction] = [.openSettings]
+    public static let all: [HotkeyAction] = [.openSettings, .showHidden, .showAll, .focusMode]
 
     /// The title of the action with this id, or nil for an id this version doesn't know.
     public static func title(for id: HotkeyID) -> String? {

@@ -5,6 +5,12 @@ import Testing
 
 @testable import MKMenuBar
 
+private extension JSONValue {
+    var objectValue: [String: JSONValue]? {
+        if case .object(let members) = self { members } else { nil }
+    }
+}
+
 @Suite("Diagnostics formatting", .timeLimit(.minutes(1)))
 struct DiagnosticsFormattingTests {
     private let home = "/Users/someone"
@@ -56,6 +62,84 @@ struct DiagnosticsFormattingTests {
         #expect(DiagnosticsText.redact(value, home: home) == .object([
             "path": .string("~/x"), "list": .array([.string("~"), .number(3)]), "nested": .object(["deep": .string("see ~/y")]),
         ]))
+    }
+
+    // MARK: Names
+
+    @Test func namesAreRedactedToCounts() {
+        let value = JSONValue.object([
+            "titles": .array([.string("Home Wi-Fi"), .string("Battery 80%")]),
+            "descriptions": .array([.string("Sam's AirPods")]),
+            "newDescriptions": .array([]),
+            "names": .array([.string("a"), .string("b"), .string("c")]),
+            "labels": .array([.string("x"), .string("y")]),
+            "chevronPresent": .bool(true),
+            "count": .number(3),
+        ])
+        #expect(DiagnosticsText.redactNames(value) == .object([
+            "titles": .string("‹2 names›"), "descriptions": .string("‹1 name›"), "newDescriptions": .string("‹0 names›"),
+            "names": .string("‹3 names›"), "labels": .string("‹2 names›"),
+            "chevronPresent": .bool(true), "count": .number(3),
+        ]))
+    }
+
+    @Test func namesAreRedactedWhereverTheyAre() {
+        let value = JSONValue.object([
+            "measurements": .object(["descriptions": .array([.string("one"), .string("two")])]),
+            "displays": .array([.object(["labels": .array([.string("left")]), "scale": .number(2)])]),
+        ])
+        #expect(DiagnosticsText.redactNames(value) == .object([
+            "measurements": .object(["descriptions": .string("‹2 names›")]),
+            "displays": .array([.object(["labels": .string("‹1 name›"), "scale": .number(2)])]),
+        ]))
+        // What isn't a list of names, under a key that holds them, says nothing of the person and stays.
+        #expect(DiagnosticsText.redactNames(.object(["names": .null, "titles": .bool(false)]))
+                == .object(["names": .null, "titles": .bool(false)]))
+        #expect(DiagnosticsText.redactNames(.object(["names": .string("Home Wi-Fi")])) == .object(["names": .string("‹1 name›")]))
+    }
+
+    @Test func bundleIDsStay() {
+        let value = JSONValue.object([
+            "identifiers": .array([.string("com.apple.menuextra.wifi"), .string("com.example.app.item")]),
+            "newIdentifiers": .array([.string("com.apple.controlcenter.screen-recording")]),
+            "bundleID": .string("com.example.app"),
+            "overflowedItems": .array([.object(["bundleID": .string("com.apple.menuextra.battery"), "index": .number(0)])]),
+            "descriptions": .array([.string("Wi-Fi: Home Wi-Fi")]),
+        ])
+        let redacted = DiagnosticsText.redactNames(value)
+        guard case .object(let members) = redacted else {
+            Issue.record("an object")
+            return
+        }
+        #expect(members["identifiers"] == value.objectValue?["identifiers"])
+        #expect(members["newIdentifiers"] == value.objectValue?["newIdentifiers"])
+        #expect(members["bundleID"] == .string("com.example.app"))
+        #expect(members["overflowedItems"] == value.objectValue?["overflowedItems"])
+        #expect(members["descriptions"] == .string("‹1 name›"))
+    }
+
+    @Test func theReportAndTheJSONFormLeaveTheNamesOut() {
+        let shared = report(.screenShare, measurements: [
+            "phase": .string("during"),
+            "identifiers": .array([.string("com.apple.controlcenter.screen-recording")]),
+            "descriptions": .array([.string("Sam's AirPods, 80%")]),
+            "newDescriptions": .array([.string("Home Wi-Fi"), .string("Recording")]),
+        ])
+        let text = DiagnosticsText.render(checks: [], probes: [.screenShare: shared], home: home, timeZone: utc)
+        #expect(!text.contains("AirPods"))
+        #expect(!text.contains("Home Wi-Fi"))
+        #expect(text.contains("‹1 name›"))
+        #expect(text.contains("‹2 names›"))
+        #expect(text.contains("com.apple.controlcenter.screen-recording"))
+
+        let json = DiagnosticsText.json(checks: [], probes: [.screenShare: shared], home: home)
+        let encoded = String(decoding: (try? JSONEncoder().encode(json)) ?? Data(), as: UTF8.self)
+        #expect(!encoded.contains("AirPods"))
+        #expect(!encoded.contains("Home Wi-Fi"))
+        #expect(encoded.contains("‹2 names›"))
+        #expect(encoded.contains("com.apple.controlcenter.screen-recording"))
+        // The report on disk is as it was: only what is copied and answered is changed.
+        #expect(shared.strings("descriptions") == ["Sam's AirPods, 80%"])
     }
 
     // MARK: Summary
@@ -138,5 +222,98 @@ struct DiagnosticsFormattingTests {
             .object(["title": .string("Accessibility"), "status": .string("ok"), "detail": .string("Granted")]),
             .object(["title": .string("Layout file"), "status": .string("warning"), "detail": .string("Found at ~/Library/x.plist, not granted")]),
         ]))
+    }
+
+    // MARK: Reach and what hiding changes
+
+    private func inventory(reach: [AppReach] = [], items: [MenuBarItem] = [], problems: [InventoryProblem] = []) -> Inventory {
+        Inventory(capturedAt: Date(timeIntervalSince1970: 0), bars: [], items: items, chevrons: [:], reach: reach, problems: problems)
+    }
+
+    @Test func reachRowsSortedByNameWithTheirWords() {
+        let reach = [
+            AppReach(bundleID: "com.example.zulu", name: "Zulu", status: .skipped, readMs: 0),
+            AppReach(bundleID: "com.example.bravo", name: "bravo", status: .slow, readMs: 312.4),
+            AppReach(bundleID: "com.example.alpha", name: "Alpha", status: .fine, readMs: 12),
+            AppReach(bundleID: "com.example.mike", name: "Mike", status: .timedOut, readMs: 250),
+        ]
+        let rows = HidingDiagnostics.reachRows(inventory(reach: reach))
+        #expect(rows.map(\.name) == ["Alpha", "bravo", "Mike", "Zulu"])
+        #expect(rows.map(\.text) == ["Fine", "Slow (312 ms)", "Timed out; asked again in 30 seconds", "Skipped"])
+    }
+
+    @Test func anAppWithTwoProcessesHasOneRowAndItIsTheWorst() {
+        let reach = [AppReach(bundleID: "com.example.two", name: "Two", status: .fine, readMs: 5),
+                     AppReach(bundleID: "com.example.two", name: "Two", status: .timedOut, readMs: 250),
+                     AppReach(bundleID: "com.example.two", name: "Two", status: .slow, readMs: 140),
+                     AppReach(bundleID: "com.example.one", name: "One", status: .fine, readMs: 5)]
+        let rows = HidingDiagnostics.reachRows(inventory(reach: reach))
+        #expect(rows.map(\.bundleID) == ["com.example.one", "com.example.two"])
+        #expect(rows.last?.status == .timedOut)
+        #expect(Set(rows.map(\.id)).count == rows.count, "the rows have ids of their own")
+    }
+
+    @Test func reachRowsUseTheNamesThePaneKnowsThenTheReadsThenTheBundleID() {
+        let reach = [AppReach(bundleID: "com.example.a", name: "Read Name", status: .fine, readMs: 1),
+                     AppReach(bundleID: "com.example.b", name: nil, status: .fine, readMs: 1)]
+        let rows = HidingDiagnostics.reachRows(inventory(reach: reach), names: ["com.example.a": "Pane Name"])
+        #expect(rows.map(\.name) == ["com.example.b", "Pane Name"])
+        #expect(HidingDiagnostics.reachRows(nil).isEmpty)
+    }
+
+    @Test func reachRowsCopiedWithBundleIDsOnly() {
+        let reach = [AppReach(bundleID: "com.example.beta", name: "Sam's Private Tool", status: .fine, readMs: 5),
+                     AppReach(bundleID: "com.example.alpha", name: "Home Wi-Fi Helper", status: .slow, readMs: 140)]
+        // An item's label can hold the person's own words (a network's name, a battery level): it is not in the copy either.
+        let labelled = MenuBarItem(id: ItemID(bundleID: "com.example.alpha", key: .identifier("main")), ownerBundleID: "com.example.alpha",
+                                   appName: "Home Wi-Fi Helper", label: "Connected to Sam's Network", frames: [:], overflowedOn: [], isMantel: false)
+        let blocks = HidingDiagnostics.blocks(engine: nil, inventory: inventory(reach: reach, items: [labelled]))
+        let block = blocks.first { $0.title == "Accessibility reach" }
+        #expect(block?.lines == ["com.example.alpha: Slow (140 ms)", "com.example.beta: Fine"])
+
+        let text = DiagnosticsText.render(checks: [], blocks: blocks, probes: [:], home: home, timeZone: utc)
+        #expect(text.contains("com.example.alpha: Slow (140 ms)"))
+        for leak in ["Sam", "Home Wi-Fi", "Private Tool", "Connected to"] {
+            #expect(!text.contains(leak), "\(leak) isn't in the copy")
+        }
+        let json = DiagnosticsText.json(checks: [], blocks: blocks, probes: [:], home: home)
+        let encoded = String(decoding: (try? JSONEncoder().encode(json)) ?? Data(), as: UTF8.self)
+        #expect(encoded.contains("com.example.beta: Fine"))
+        for leak in ["Sam", "Home Wi-Fi", "Private Tool", "Connected to"] {
+            #expect(!encoded.contains(leak))
+        }
+    }
+
+    @Test func noReachSaysSo() {
+        let block = HidingDiagnostics.blocks(engine: nil, inventory: inventory()).first { $0.title == "Accessibility reach" }
+        #expect(block?.lines == ["No app has been asked yet."])
+    }
+
+    @Test func theBlocksAreInTheReportBetweenTheChecksAndTheProbes() {
+        let blocks = HidingDiagnostics.blocks(engine: nil, inventory: nil)
+        #expect(blocks.map(\.title) == ["Ways of hiding", "What hiding changes", "Accessibility reach"])
+        let text = DiagnosticsText.render(checks: checks, blocks: blocks, probes: [:], home: home, timeZone: utc)
+        let lastCheck = text.range(of: "Layout file")!.lowerBound
+        let ways = text.range(of: "Ways of hiding")!.lowerBound
+        let probes = text.range(of: "Last probe reports")!.lowerBound
+        #expect(lastCheck < ways && ways < probes)
+        #expect(text.contains(EngineNotes.sideEffects))
+        #expect(text.contains(EngineNotes.clockNote))
+        #expect(text.contains(EngineNotes.crashNote))
+    }
+
+    @Test func theJSONFormHasSectionsOnlyWhenThereAreBlocks() {
+        guard case .object(let without) = DiagnosticsText.json(checks: checks, probes: [:], home: home) else {
+            Issue.record("an object")
+            return
+        }
+        #expect(without["sections"] == nil)
+
+        let blocks = [DiagnosticsBlock(title: "Ways of hiding", lines: ["Allowlist: available"])]
+        guard case .object(let with) = DiagnosticsText.json(checks: checks, blocks: blocks, probes: [:], home: home) else {
+            Issue.record("an object")
+            return
+        }
+        #expect(with["sections"] == .array([.object(["title": .string("Ways of hiding"), "lines": .array([.string("Allowlist: available")])])]))
     }
 }

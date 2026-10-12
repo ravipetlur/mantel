@@ -60,3 +60,108 @@ struct HotkeyRecorderTests {
             == .record(KeyCombo(keyCode: KeyCode.leftArrow, modifiers: [.control, .function])))
     }
 }
+
+/// What the recorder says while it listens.
+@Suite("Recorder copy")
+struct RecorderCopyTests {
+    @Test func theAnnouncementNamesTheActionAndTheKeys() {
+        let text = RecorderCopy.announcement(for: "Show hidden icons")
+        #expect(text == "Recording a shortcut for Show hidden icons. Press the new shortcut, Delete to remove it, or Escape to cancel.")
+    }
+
+    @Test func aRecordingThatCouldntHearSaysSo() {
+        #expect(RecorderCopy.couldntComeToTheFront == "Mantel couldn't come to the front, so no shortcut was recorded.")
+        // It is no announcement of a recording: nothing is being recorded.
+        #expect(!RecorderCopy.couldntComeToTheFront.hasPrefix("Recording"))
+    }
+
+    @Test func everyActionGetsItsOwnAnnouncement() {
+        let announcements = Set(HotkeyAction.all.map { RecorderCopy.announcement(for: $0.title) })
+        #expect(announcements.count == HotkeyAction.all.count)
+        #expect(announcements.allSatisfy { $0.hasPrefix("Recording a shortcut for ") })
+    }
+}
+
+/// When the hotkeys are put aside for a recording.
+@Suite("Recording start")
+struct RecordingStartTests {
+    @Test func theHotkeysAreAsideAtOnceWhenMantelIsActive() {
+        var start = RecordingStart()
+        let whenItBegan = start.began(mantelIsActive: true)
+        #expect(whenItBegan == .putHotkeysAside)
+        #expect(start.hotkeysAreAside)
+        #expect(start.isRecording)
+    }
+
+    @Test func theHotkeysWaitForMantelToBeActive() {
+        var start = RecordingStart()
+        let whenItBegan = start.began(mantelIsActive: false)
+        #expect(whenItBegan == .nothing)
+        #expect(!start.hotkeysAreAside, "nothing is unregistered while the recording can't hear")
+        #expect(start.isRecording)
+        let whenMantelBecameActive = start.mantelBecameActive()
+        #expect(whenMantelBecameActive == .putHotkeysAside)
+        #expect(start.hotkeysAreAside)
+    }
+
+    @Test func aRecordingThatNeverGetsTheFocusGivesUpWithoutHavingTouchedTheHotkeys() {
+        var start = RecordingStart()
+        _ = start.began(mantelIsActive: false)
+        let afterTheWait = start.waitedLongEnough()
+        #expect(afterTheWait == .giveUp)
+        #expect(!start.isRecording)
+        #expect(!start.hotkeysAreAside)
+        // Ending it then has nothing to put back, and Mantel becoming active later starts nothing.
+        let hotkeysToPutBack = start.ended()
+        #expect(!hotkeysToPutBack)
+        let whenMantelBecameActiveLater = start.mantelBecameActive()
+        #expect(whenMantelBecameActiveLater == .nothing)
+        #expect(!start.hotkeysAreAside)
+    }
+
+    @Test func endingARecordingThatWasWaitingPutsNothingBack() {
+        var start = RecordingStart()
+        _ = start.began(mantelIsActive: false)
+        let hotkeysToPutBack = start.ended()
+        #expect(!hotkeysToPutBack)
+        #expect(!start.isRecording)
+        // A late "became active", or the timeout, after it ended is nothing.
+        let whenMantelBecameActiveLater = start.mantelBecameActive()
+        #expect(whenMantelBecameActiveLater == .nothing)
+        let whenTheWaitPassedLater = start.waitedLongEnough()
+        #expect(whenTheWaitPassedLater == .nothing)
+    }
+
+    @Test func endingARecordingThatListenedPutsTheHotkeysBack() {
+        var start = RecordingStart()
+        _ = start.began(mantelIsActive: true)
+        let hotkeysToPutBack = start.ended()
+        #expect(hotkeysToPutBack)
+        #expect(!start.isRecording)
+        #expect(!start.hotkeysAreAside)
+        // And only once.
+        let hotkeysToPutBackAgain = start.ended()
+        #expect(!hotkeysToPutBackAgain)
+    }
+
+    @Test func theTimeoutAfterTheRecordingBeganListeningIsNothing() {
+        var start = RecordingStart()
+        _ = start.began(mantelIsActive: false)
+        _ = start.mantelBecameActive()
+        let whenTheWaitPassed = start.waitedLongEnough()
+        #expect(whenTheWaitPassed == .nothing)
+        #expect(start.hotkeysAreAside, "it is listening: the timeout does not end it")
+    }
+
+    @Test func aSecondStartWhileRecordingIsNothing() {
+        var start = RecordingStart()
+        _ = start.began(mantelIsActive: false)
+        let whenItBeganAgain = start.began(mantelIsActive: true)
+        #expect(whenItBeganAgain == .nothing)
+        #expect(!start.hotkeysAreAside)
+    }
+
+    @Test func theWaitIsAboutASecond() {
+        #expect(RecordingStart.activationWait == .seconds(1))
+    }
+}

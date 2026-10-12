@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import MKCore
 import Synchronization
 
 /// Which mouse event it is, of the three the tap listens to.
@@ -86,6 +87,14 @@ struct ClickReplayLifecycle: Equatable {
     /// Whether the tap's thread goes on running its loop.
     var keepsRunLoopGoing: Bool {
         phase == .running
+    }
+
+    /// Whether the thread goes on after one slice of its loop returned `result`: while the tap runs, and not when the loop has nothing
+    /// to wait for (`.finished`: it returns at once, and run again it would return at once, for ever) or was stopped (`.stopped`).
+    /// A slice that ran out (`.timedOut`) or handled a source (`.handledSource`) is the ordinary end of one.
+    func keepsRunLoopGoing(after result: CFRunLoopRunResult) -> Bool {
+        guard keepsRunLoopGoing else { return false }
+        return result != .finished && result != .stopped
     }
 }
 
@@ -180,7 +189,7 @@ public final class ClickReplayTap: Sendable {
     private let lifetime: Duration
     private let onClick: @Sendable (CGPoint) -> Void
     private let onReplay: @Sendable (CGPoint) -> Void
-    private let queue = DispatchQueue(label: "dev.whittled.mantel.clickreplay", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "\(Log.subsystem).clickreplay", qos: .userInteractive)
     private let state: Mutex<State>
 
     /// - Parameters:
@@ -270,8 +279,10 @@ public final class ClickReplayTap: Sendable {
         if switchedOn {
             // In slices, asking each time whether the tap is still wanted: `CFRunLoopStop` from `stop()` ends a slice, and a
             // stop it couldn't deliver (the loop wasn't running yet) is seen at the end of the slice it fell in.
-            while state.withLock({ $0.lifecycle.keepsRunLoopGoing }) {
-                _ = CFRunLoopRunInMode(.defaultMode, Self.runLoopSlice, true)
+            // The first slice is run because the tap runs; after each, the result says whether to go on.
+            var result = CFRunLoopRunResult.timedOut
+            while state.withLock({ $0.lifecycle.keepsRunLoopGoing(after: result) }) {
+                result = CFRunLoopRunInMode(.defaultMode, Self.runLoopSlice, true)
             }
         }
         CFRunLoopRemoveSource(runLoop, source, .commonModes)

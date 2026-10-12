@@ -22,13 +22,44 @@ final class Switch: Sendable {
     func set(_ isOn: Bool) { flag.withLock { $0 = isOn } }
 }
 
-/// Which apps the fake allowlist is hiding at the moment. A slot of a hidden app has no frame.
+/// Which apps the fake allowlist is hiding at the moment. A slot of a hidden app has no frame. It remembers what it hid before the
+/// last change and when that was, so that something that lags behind the allowlist can show the old state for a while.
 final class HiddenApps: Sendable {
-    private let hidden = Mutex<Set<String>>([])
+    private struct State {
+        var current: Set<String> = []
+        var previous: Set<String> = []
+        var changedAt: Date?
+    }
 
-    var all: Set<String> { hidden.withLock { $0 } }
-    func set(_ apps: Set<String>) { hidden.withLock { $0 = apps } }
-    func contains(_ app: String) -> Bool { hidden.withLock { $0.contains(app) } }
+    private let state = Mutex(State())
+    private let now: @Sendable () -> Date
+
+    init(now: @escaping @Sendable () -> Date = { Date() }) {
+        self.now = now
+    }
+
+    var all: Set<String> { state.withLock { $0.current } }
+
+    func set(_ apps: Set<String>) {
+        state.withLock { state in
+            guard apps != state.current else { return }
+            state.previous = state.current
+            state.current = apps
+            state.changedAt = now()
+        }
+    }
+
+    func contains(_ app: String) -> Bool { state.withLock { $0.current.contains(app) } }
+
+    /// Whether the app is hidden as something that is `lag` behind the allowlist shows it at `time`: what it hid before the last
+    /// change until `lag` after the change, and what it hides now after.
+    func isHidden(_ app: String, at time: Date, lag: Duration) -> Bool {
+        state.withLock { state in
+            let seconds = Double(lag.components.seconds) + Double(lag.components.attoseconds) / 1e18
+            if let changedAt = state.changedAt, time < changedAt.addingTimeInterval(seconds) { return state.previous.contains(app) }
+            return state.current.contains(app)
+        }
+    }
 }
 
 /// An allowlist that hides what it is not told to allow, in the fake menu bar, and notes every call.
@@ -46,6 +77,8 @@ final class FakeAllowlist: AllowlistControlling {
         var inspection = FakeAllowlist.healthy
         /// The menu bar doesn't come back when an assertion is let go.
         var sticky = false
+        /// An activation that finds its task cancelled gives up, as the real one does.
+        var failWhenCancelled = false
     }
 
     static let healthy = AllowlistInspection(
@@ -78,6 +111,9 @@ final class FakeAllowlist: AllowlistControlling {
     func makeReleaseNotRestore() { state.withLock { $0.sticky = true } }
     func setInspection(_ inspection: AllowlistInspection) { state.withLock { $0.inspection = inspection } }
     func holdActivations(until gate: Gate?) { hold.withLock { $0 = gate } }
+    /// An activation made on a task that is cancelled (when it is made, or while it waits at the gate) throws `CancellationError`, as the
+    /// real one does.
+    func failWhenCancelled(_ on: Bool) { state.withLock { $0.failWhenCancelled = on } }
     func onActivated(_ body: (@Sendable () -> Void)?) { afterActivation.withLock { $0 = body } }
 
     func inspect() -> AllowlistInspection { state.withLock { $0.inspection } }
@@ -86,6 +122,7 @@ final class FakeAllowlist: AllowlistControlling {
         state.withLock { $0.calls.append(Call(systemItems: systemItems, bundleIDs: bundleIDs)) }
         entered.open()
         if let gate = hold.withLock({ $0 }) { await gate.wait() }
+        if state.withLock({ $0.failWhenCancelled }), Task.isCancelled { throw CancellationError() }
         if let failure = state.withLock({ $0.failure }) { throw failure }
         // What isn't allowed is hidden: the union with what an earlier assertion hid is not modelled (an assertion that is
         // replaced is invalidated by its caller).
@@ -120,10 +157,20 @@ final class FakeAllowlist: AllowlistControlling {
     }
 }
 
-/// A window list: Notification Center has a window on screen when `opens` says so.
-final class FakeWindows: WindowWatching {
+/// A window list: some windows that are always there (Notification Center's widgets, MenuBarAgent's windows and a status item's),
+/// and Notification Center's panel, which the clock opens: a window of its own at layer 21 that covers the main display, and is on
+/// screen when `opens` says so.
+final class FakeWindows: WindowListReading {
+    static let notificationCenter = "com.apple.notificationcenterui"
+    static let agent = "com.apple.MenuBarAgent"
+    /// What the panel is: one level above the ordinary windows, and the main display of the desk (CoreGraphics points).
+    static let panelLayer = 21
+    static let panelBounds = CGRect(x: 0, y: 0, width: 3360, height: 1890)
+
     private let opens: Mutex<@Sendable () -> Bool>
     private let reads = Mutex(0)
+    private let extra = Mutex<[WindowInfo]>([])
+    private let panel = Mutex(FakeWindows.panelBounds)
 
     /// By default nothing opens.
     init(opens: @escaping @Sendable () -> Bool = { false }) {
@@ -131,13 +178,28 @@ final class FakeWindows: WindowWatching {
     }
 
     func setOpens(_ opens: @escaping @Sendable () -> Bool) { self.opens.withLock { $0 = opens } }
+    /// Where the panel is when it is open (CoreGraphics points); the main display by default.
+    func setPanel(_ bounds: CGRect) { panel.withLock { $0 = bounds } }
+    /// More windows that are on screen, for a test that looks at the list.
+    func setExtra(_ windows: [WindowInfo]) { extra.withLock { $0 = windows } }
     var readCount: Int { reads.withLock { $0 } }
 
-    func onScreenWindows(ownedBy bundleID: String) -> Set<Int> {
+    func onScreenWindows() -> [WindowInfo] {
         reads.withLock { $0 += 1 }
-        guard bundleID == "com.apple.notificationcenterui" else { return [] }
-        // One window that is always there (the desktop widgets), and a second when the click works.
-        return opens.withLock { $0 }() ? [10, 11] : [10]
+        let bounds = CGRect(x: 0, y: 0, width: 3360, height: 31)
+        var windows = [
+            // What is on screen all the time: the widgets, and the menu bar's own windows.
+            WindowInfo(number: 10, ownerPID: 70, ownerBundleID: Self.notificationCenter, layer: 0, bounds: CGRect(x: 100, y: 100, width: 300, height: 400), alpha: 1),
+            WindowInfo(number: 20, ownerPID: ProbeHarness.agentPID, ownerBundleID: Self.agent, layer: WindowLevels.mainMenu, bounds: bounds, alpha: 1),
+            WindowInfo(number: 21, ownerPID: ProbeHarness.agentPID, ownerBundleID: Self.agent, layer: WindowLevels.statusBar, bounds: bounds, alpha: 1),
+            WindowInfo(number: 30, ownerPID: 300, ownerBundleID: ProbeHarness.fixtureID, layer: WindowLevels.statusBar, bounds: CGRect(x: 3100, y: 0, width: 40, height: 31), alpha: 1),
+        ]
+        // The panel: a window that has appeared, at its level, over the whole display.
+        if opens.withLock({ $0 })() {
+            windows.append(WindowInfo(number: 11, ownerPID: 70, ownerBundleID: Self.notificationCenter, layer: Self.panelLayer,
+                                      bounds: panel.withLock { $0 }, alpha: 1))
+        }
+        return windows + extra.withLock { $0 }
     }
 }
 
@@ -270,10 +332,10 @@ final class FakeCapture: StripCapturing {
     var displays: [String] { asked.withLock { $0 } }
     func fail(with error: StripCaptureError?) { failure.withLock { $0 = error } }
 
-    func capture(display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage {
+    func capture(bar: MenuBarGeometry, display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage {
         asked.withLock { $0.append(display.uuid) }
         if let error = failure.withLock({ $0 }) { throw error }
-        let geometry = try StripGeometry.of(display, in: layout)
+        let geometry = try StripGeometry.of(bar, display: display, layout: layout)
         let context = CGContext(data: nil, width: Int(geometry.pixelSize.width), height: Int(geometry.pixelSize.height),
                                 bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -325,6 +387,13 @@ struct ProbeHarness: Sendable {
     let screenRecording: Switch
     /// While on, the other app has quit: it isn't running and its slot is gone.
     let otherQuit: Switch
+    /// "Enable platform test": the probes that change the menu bar run only while it is on.
+    let platformTest: Switch
+    /// While on, a reset of the menu bar is under way: the probes that change the menu bar are refused.
+    let resetUnderWay: Switch
+    /// The test item's two items in its own extras menu bar, which are where they were while nothing hides it and are somewhere else
+    /// while something does.
+    let fixtureExtras: [Int]
 
     var approvalsURL: URL {
         home.appending(path: "Library/Group Containers/group.com.apple.controlcenter/Library/Preferences/group.com.apple.controlcenter.plist")
@@ -336,21 +405,30 @@ struct ProbeHarness: Sendable {
 
     var probesFolder: URL { paths.probes }
 
-    static let runningApps: [(pid: pid_t, bundleID: String?, name: String?)] = [
-        (agentPID, "com.apple.MenuBarAgent", "MenuBarAgent"),
-        (100, ownBundleID, "Mantel"),
-        (300, fixtureID, "MantelTestItem"),
-        (301, otherID, "Other"),
+    /// The screens of the desk: the main display, and the portrait one to its left.
+    static let screens: [ScreenFacts] = DisplayLayout.desk.displays.map { display in
+        ScreenFacts(uuid: display.uuid, frame: display.frame, safeAreaTop: 0, auxiliaryTopLeft: nil, auxiliaryTopRight: nil,
+                    isBuiltIn: display.isBuiltIn)
+    }
+
+    static let runningApps: [RunningApp] = [
+        .fake(agentPID, "com.apple.MenuBarAgent", "MenuBarAgent"),
+        .fake(100, ownBundleID, "Mantel"),
+        .fake(300, fixtureID, "MantelTestItem"),
+        .fake(301, otherID, "Other"),
     ]
 
     /// - Parameters:
     ///   - clock: `SteppingClock` unless the test has to say when a sleeper wakes.
     ///   - clicks: the clicks the fake tap sees, one at a time, each while the probe waits for one with the allowlist live. (With
     ///     any, the harness's clock is a `ClickDeliveryClock` over `clock`.)
+    ///   - extrasLag: how long the test item's own list of its items takes to follow the allowlist, both ways (it shows what it
+    ///     showed before the change until then).
     ///   - readCost: how much time each read of an Accessibility attribute takes, when the clock is a `SteppingClock`; so
     ///     that a read of the menu bar takes as long as the reads it is made of, and a test can say what a poll cost.
     static func make(clock givenClock: any Clock = SteppingClock(), clicks: [CGPoint] = [], readCost: Duration = .zero,
-                     io: PlistIO = .filesOnly, configure: (inout ProbePlatform) -> Void = { _ in }) throws -> ProbeHarness {
+                     io: PlistIO = .filesOnly, platformTestEnabled: Bool = true, extrasLag: Duration = .zero,
+                     configure: (inout ProbePlatform) -> Void = { _ in }) throws -> ProbeHarness {
         let clock: any Clock = clicks.isEmpty ? givenClock : ClickDeliveryClock(base: givenClock)
         let folder = TemporaryFolder(prefix: "mantel-probe")
         let paths = MantelPaths(root: folder.url.appending(path: "Mantel", directoryHint: .isDirectory),
@@ -363,7 +441,8 @@ struct ProbeHarness: Sendable {
         // write into its folder while it is being deleted, and leave it behind.
         let settings = SettingsStore(paths: paths, clock: SystemClock(), debounce: .seconds(3600))
         let grants = FileGrantStore(store: settings, bookmarkOptions: [], clock: clock)
-        let plist = PlistFileAccess(journal: journal, paths: paths, grants: grants, io: io, clock: clock)
+        // The codecs the app registers, so that a probe that names one finds it.
+        let plist = PlistFileAccess(journal: journal, paths: paths, grants: grants, codecs: PlistBlobCodecs.standard, io: io, clock: clock)
 
         // The menu bar: one window on the main display, slots left to right.
         let ax = FakeAX()
@@ -377,22 +456,27 @@ struct ProbeHarness: Sendable {
         ax.addSlot(in: window, identifier: "com.apple.menuextra.controlcenter", frame: CGRect(x: 3250, y: 0, width: 40, height: 31))
         let clockSlot = ax.addSlot(in: window, identifier: "com.apple.menuextra.clock", frame: CGRect(x: 3300, y: 0, width: 50, height: 31))
         ax.addApp(pid: 100, extras: [.init(title: "Mantel", frame: CGRect(x: 3000, y: 0, width: 30, height: 31))])
-        ax.addApp(pid: 300, extras: [.init(title: "one", frame: CGRect(x: 3100, y: 0, width: 40, height: 31)),
-                                     .init(title: "two", frame: CGRect(x: 3150, y: 0, width: 40, height: 31))])
+        let fixtureExtras = ax.addApp(pid: 300, extras: [.init(title: "one", frame: CGRect(x: 3100, y: 0, width: 40, height: 31)),
+                                                         .init(title: "two", frame: CGRect(x: 3150, y: 0, width: 40, height: 31))])
         ax.addApp(pid: 301, extras: [.init(title: "other", frame: CGRect(x: 3200, y: 0, width: 40, height: 31))])
 
         // A slot of a hidden app has no frame, nor has one of an app that has quit.
-        let hidden = HiddenApps()
+        let hidden = HiddenApps(now: { clock.now() })
         let otherQuit = Switch(false)
         let frozenOwners = owners
         let stepping = givenClock as? SteppingClock
+        let fixtureItems = Set(fixtureExtras)
         ax.setOverride { id, name in
             if readCost > .zero { stepping?.advance(by: readCost) }
+            // The test item's own list of its items puts them aside (as macOS does with a concealed item's) while it is hidden.
+            if name == AXName.position, fixtureItems.contains(id), hidden.isHidden(fixtureID, at: clock.now(), lag: extrasLag) {
+                return .success(.point(CGPoint(x: -1, y: 0)))
+            }
             guard name == AXName.position || name == AXName.size, let app = frozenOwners[id],
                   hidden.contains(app) || (app == otherID && otherQuit.isOn) else { return nil }
             return .failure(.noValue)
         }
-        let running: @Sendable () -> [(pid: pid_t, bundleID: String?, name: String?)] = {
+        let running: @Sendable () -> [RunningApp] = {
             otherQuit.isOn ? runningApps.filter { $0.bundleID != otherID } : runningApps
         }
 
@@ -403,13 +487,14 @@ struct ProbeHarness: Sendable {
         let screenRecording = Switch(true)
 
         var platform = ProbePlatform(
-            allowlist: allowlist, capture: capture, windows: windows,
+            allowlist: allowlist, capture: capture, windowList: windows,
             makeClickTap: { rects, delay, lifetime, onClick, onReplay in
                 taps.make(rects: rects, delay: delay, lifetime: lifetime, onClick: onClick, onReplay: onReplay)
             },
             runningApps: running,
             environment: { ["macOS": "27.0.1 (26A434)", "model": "Mac16,1", "mantelVersion": "0.1.0"] },
             statusBarThickness: { 31 },
+            screens: { ProbeHarness.screens },
             screenRecordingGranted: { screenRecording.isOn },
             ownBundleID: ownBundleID, isInstalledCopy: true, copyPath: "/Applications/Mantel.app")
         configure(&platform)
@@ -422,12 +507,16 @@ struct ProbeHarness: Sendable {
         }
 
         let reader = MenuBarReader(ax: ax, runningApps: running, clock: clock)
+        let platformTest = Switch(platformTestEnabled)
+        let resetUnderWay = Switch(false)
         let runner = ProbeRunner(paths: paths, reader: reader, plist: plist, grants: grants,
-                                 layoutProvider: { .desk }, clock: clock, platform: platform)
+                                 layoutProvider: { .desk }, clock: clock, platform: platform,
+                                 stateChangingAllowed: { platformTest.isOn }, resetUnderWay: { resetUnderWay.isOn })
         return ProbeHarness(folder: folder, paths: paths, home: home, journal: journal, settings: settings, grants: grants, plist: plist, ax: ax,
                             clock: clock, hidden: hidden, allowlist: allowlist, windows: windows, taps: taps, capture: capture,
                             runner: runner, slotOwners: owners, window: window, clockSlot: clockSlot, fixtureOneSlot: fixtureOneSlot,
-                            screenRecording: screenRecording, otherQuit: otherQuit)
+                            screenRecording: screenRecording, otherQuit: otherQuit, platformTest: platformTest,
+                            resetUnderWay: resetUnderWay, fixtureExtras: fixtureExtras)
     }
 
     // MARK: Files
