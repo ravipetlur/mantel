@@ -111,5 +111,8 @@ jobs:
             exit 1
           fi
 
+      # One test at a time: the hosted runner has three cores, so Swift's thread pool has three threads, and the tests whose fakes
+      # hold a thread (a slow MenuBarAgent, on purpose) starve the rest when they run together. Run in parallel there, the suite
+      # stalled for an hour; one at a time it takes a few minutes.
       - name: Test MantelKit
-        run: swift test --package-path MantelKit
+        run: swift test --package-path MantelKit --no-parallel
