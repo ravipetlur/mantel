@@ -147,11 +147,17 @@ struct MenuBarSessionDotsTests {
         rig.world.setHiddenProvider { [weather, notes, own] }
         await rig.session.start()
         let said = [DotsRoomLog.cantTell(kind: .builtIn, reason: .dotHasNoSlot)]
-        #expect(await rig.session.dotsLogLines == said)
+        #expect(await rig.session.dotsLogLines.isEmpty, "the reads of the launch say nothing of it: macOS may not have placed the dots yet")
         #expect(said == ["Mantel's dot has no place on the built-in display's bar (no slot on that bar is one of Mantel's)"])
         #expect(try #require(await rig.state).inventory.chevrons.isEmpty)
         var reads = SessionRig.readsAtStart
-        for _ in 0..<4 {
+        reads += 1
+        #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines.isEmpty, "the dots have had no place on a bar since the launch: not yet")
+        reads += 1
+        #expect(await pass(MenuBarSession.dotsPlacementWait, rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines == said, "the wait is over, and the next read says it")
+        for _ in 0..<3 {
             reads += 1
             #expect(await pass(.seconds(10), rig: rig, reads: reads))
         }
@@ -185,14 +191,23 @@ struct MenuBarSessionDotsTests {
         await rig.session.frontAppChanged(pid: pid, activeScreenWidth: 1728)
     }
 
-    @Test func theFrontAppsMenusMakeAnAppOutOfTheWayAndTheNextFrontAppsGiveItBack() async throws {
+    @Test(arguments: [false, true]) func theFrontAppsMenusMakeAnAppOutOfTheWayAndTheNextFrontAppsGiveItBack(unnamed: Bool) async throws {
         // The weather app says it is at x 1000, right of the notch (it ends at 956.5), where nothing is drawn. With no menus read, nothing
         // says it is out of the way; once the front app is known to have menus out to 1100, its icons are under them.
         let rig = SessionRig.withAllowlist(shape: .laptop, capacity: nil, sections: sections(shown: [weather, notes, vpn, sync]))
+        // With no names on the slots (as on macOS 27) the app's place is what its frame says. With names, a slot that names the item is the
+        // item's whatever place the app says it is at: it is on the bar, and no menus are over it.
+        rig.world.setNameless(unnamed)
         rig.world.setStaleApps([weather], from: 1000)
         await rig.session.start()
         #expect(await rig.session.sections.apps[weather] == leftAlone, "no menus have been read: nothing says it is in the way")
         try await bringToFront(notes, menusTo: 1100, in: rig)
+        guard unnamed else {
+            // Its slot names it, so it is where the slot is and the menus are not over it: the front app changes nothing.
+            #expect(await rig.session.frontAppMenuFrames().map(\.maxX) == [1100])
+            #expect(await rig.session.sections.apps[weather] == leftAlone)
+            return
+        }
         // The read that comes with the front app sees it, and the one it asks for confirms it.
         #expect(await pass(.seconds(10), rig: rig, reads: SessionRig.readsAtStart + 2))
         #expect(await rig.session.sections.apps[weather] == moved)
@@ -232,12 +247,13 @@ struct MenuBarSessionDotsTests {
         #expect(narrow.world.windowReads > 0)
     }
 
-    @Test func aHiddenAppsStalePlaceOnTheBarIsNeverJudged() async throws {
+    @Test(arguments: [false, true]) func aHiddenAppsStalePlaceOnTheBarIsNeverJudged(unnamed: Bool) async throws {
         // The weather app and the notes app are Hidden, and concealed by the allowlist, and they go on reporting the places they had on the
         // bar. The plan says they are concealed, and the session tells the scanner, so their places are no places: they are concealed, not
         // overflowed, and the apps that are drawn are as they were.
         let rig = SessionRig.withAllowlist(shape: .laptop, capacity: nil, undrawn: true, staleConcealed: true,
                                            sections: sections(shown: [vpn, sync], hidden: [weather, notes]))
+        rig.world.setNameless(unnamed)
         await rig.session.start()
         #expect(rig.world.concealed == [weather, notes])
         let inventory = try #require(await rig.state).inventory
@@ -250,13 +266,14 @@ struct MenuBarSessionDotsTests {
         #expect(await rig.session.dotsLogLines.isEmpty)
     }
 
-    @Test func aTrialIsNotFailedByAPlaceThatIsWhatItWasBeforeIt() async throws {
+    @Test(arguments: [false, true]) func aTrialIsNotFailedByAPlaceThatIsWhatItWasBeforeIt(unnamed: Bool) async throws {
         // The weather app is Hidden for want of room, and concealed; its icon says it is left of the notch, and goes on saying so (an app's
         // frames often don't change when it is hidden or shown). A minute on it is put on the bar to see whether it fits: it does, and the
         // place it says is the one it said before, which is no sign that it doesn't.
         var model = sections(shown: [vpn, sync])
         model.apps[weather] = AppPlacement(section: .hidden, isAuto: true)
         let rig = SessionRig.withAllowlist(shape: .laptop, capacity: nil, undrawn: true, sections: model)
+        rig.world.setNameless(unnamed)
         rig.world.setStaleApps([weather])
         await rig.session.start()
         let allowlist = try #require(rig.allowlist)
@@ -277,12 +294,13 @@ struct MenuBarSessionDotsTests {
         #expect(await rig.session.sections.apps[weather] == leftAlone)
     }
 
-    @Test func aTrialIsNotFailedByAPlaceThatMovedAFractionOfAPoint() async throws {
+    @Test(arguments: [false, true]) func aTrialIsNotFailedByAPlaceThatMovedAFractionOfAPoint(unnamed: Bool) async throws {
         // As the test before, but the place the app says after the trial began is half a point from the one it said before: that is the
         // same place, as far as what was kept of it goes, and the trial passes on the first read.
         var model = sections(shown: [vpn, sync])
         model.apps[weather] = AppPlacement(section: .hidden, isAuto: true)
         let rig = SessionRig.withAllowlist(shape: .laptop, capacity: nil, undrawn: true, sections: model)
+        rig.world.setNameless(unnamed)
         rig.world.setStaleApps([weather])
         await rig.session.start()
         let allowlist = try #require(rig.allowlist)
@@ -317,6 +335,59 @@ struct MenuBarSessionDotsTests {
             #expect(await pass(.seconds(10), rig: rig, reads: reads))
         }
         #expect(await rig.session.dotsLogLines == said, "the next read agrees, and it is said once")
+    }
+
+    @Test func launchReadDoesNotSayNoPlace() async throws {
+        // At launch macOS may not have placed Mantel's dots when the bar is first read, and a dot with no place is no finding yet: what the
+        // launch's reads (the one before anything is hidden and the one of the bar once it is collapsed) find of the dots isn't said. The
+        // next read, if it agrees, says it, and once.
+        let rig = rig(capacity: 3, undrawn: true)
+        rig.world.setHiddenProvider { [weather, notes, own] }
+
+        await rig.session.start()
+
+        #expect(await rig.session.dotsLogLines.isEmpty, "nothing was said at launch")
+        var reads = await rig.session.scansIngested
+        #expect(reads == SessionRig.readsAtStart, "both reads of the launch were taken")
+        let said = [DotsRoomLog.cantTell(kind: .builtIn, reason: .dotHasNoSlot)]
+        reads += 1
+        #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines.isEmpty, "the first read after it finds no dot on a bar either: macOS may still be placing them")
+        reads += 1
+        #expect(await pass(MenuBarSession.dotsPlacementWait, rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines == said, "said once the wait for the dots is over")
+        for _ in 0..<2 {
+            reads += 1
+            #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        }
+        #expect(await rig.session.dotsLogLines == said, "and not again")
+    }
+
+    @Test func aDotThatHasNoPlaceIsNotSaidUntilARealReadHasHadTheDotsOnABar() async throws {
+        // macOS places the dots some seconds after the launch: while no read has them on a bar, a dot with no place is no finding (it was
+        // said at every launch). Once a read has them, one that hasn't is said at once. Nothing else waits: the reads go on as ever.
+        let rig = rig(capacity: 3, undrawn: true)
+        rig.world.setHiddenProvider { [weather, notes, own] }
+        await rig.session.start()
+        var reads = await rig.session.scansIngested
+        for _ in 0..<2 {
+            reads += 1
+            #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        }
+        #expect(await rig.session.dotsLogLines.isEmpty, "twenty seconds on, the dots are not on the bar yet")
+
+        rig.world.setCapacity(nil)
+        rig.world.setHiddenProvider { [weather, notes] }
+        reads += 1
+        #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines.isEmpty, "the read that has the dots on the bar finds nothing to say")
+
+        rig.world.setCapacity(3)
+        rig.world.setHiddenProvider { [weather, notes, own] }
+        reads += 1
+        #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines == [DotsRoomLog.cantTell(kind: .builtIn, reason: .dotHasNoSlot)],
+                "thirty seconds on, before the wait is over: the dots were placed once, so one that has none now is said")
     }
 
     @Test func wideScreenPlanNeverMovesShownApps() async throws {
@@ -528,11 +599,17 @@ struct MenuBarSessionDotsTests {
         rig.world.setHiddenProvider { [weather, notes, own] }
         await rig.session.start()
         let said = [DotsRoomLog.cantTell(kind: .builtIn, reason: .ownIconsNotPlaced)]
-        #expect(await rig.session.dotsLogLines == said)
+        #expect(await rig.session.dotsLogLines.isEmpty, "not by the reads of the launch")
         #expect(said == ["the « menu is showing on the built-in display but Mantel can't tell what is in it (Mantel's own icons couldn't be placed on that bar)"])
 
         var reads = SessionRig.readsAtStart
-        for _ in 0..<5 {
+        reads += 1
+        #expect(await pass(.seconds(10), rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines.isEmpty, "nor by the next, while no read has had the dots on a bar")
+        reads += 1
+        #expect(await pass(MenuBarSession.dotsPlacementWait, rig: rig, reads: reads))
+        #expect(await rig.session.dotsLogLines == said)
+        for _ in 0..<4 {
             reads += 1
             #expect(await pass(.seconds(10), rig: rig, reads: reads))
         }

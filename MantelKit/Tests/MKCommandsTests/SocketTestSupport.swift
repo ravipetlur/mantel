@@ -101,7 +101,7 @@ extension ControlSocketServer {
     /// Starts the server once the lock is free: the same wait as `LockHolder.takeWhenFree`, for a server that starts right after
     /// another one that held the lock has stopped (or after a start that failed). Throws what `start()` throws, `.inUse` included if
     /// the lock is still held after `limit`.
-    func startWhenTheLockIsFree(within limit: Duration = .seconds(5)) async throws(SocketError) {
+    func startWhenTheLockIsFree(within limit: Duration = hungTestLimit) async throws(SocketError) {
         let deadline = ContinuousClock.now.advanced(by: limit)
         while true {
             do throws(SocketError) {

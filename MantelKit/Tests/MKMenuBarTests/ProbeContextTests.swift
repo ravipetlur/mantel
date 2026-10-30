@@ -73,6 +73,35 @@ struct ProbeContextTests {
         #expect(ProbeContext.framedKeys(swapped).contains("\(mainUUID)|weather.temp"))
     }
 
+    @Test func aNameThatRepeatsInAWindowNamesNoneOfItsSlots() async {
+        // Seen after a change of displays: the windows of the Spaces that aren't on screen give every slot of an app its first item's
+        // name, and only the one on screen names each slot its own. Whichever is listed first, the keys are the ones the names give.
+        let read = await snapshot(InventoryFixtures.desk(.init(windowsPerDisplay: 2)))
+        func labelled(_ window: AgentWindow) -> AgentWindow {
+            AgentWindow(frame: window.frame, slots: window.slots.map { slot in
+                guard let name = slot.identifier, ItemID.systemModule(ofIdentifier: name) == nil else { return slot }
+                return AgentSlot(frame: slot.frame, identifier: "weather.temp", role: slot.role, subrole: slot.subrole,
+                                 description: slot.description, ownerPID: slot.ownerPID, isOverflowChevron: slot.isOverflowChevron)
+            })
+        }
+        let windows = read.agentWindows
+        // The first window of each display labelled so, the other as it was.
+        let mixed = windows.enumerated().map { index, window in
+            windows[(index + 1)...].contains { $0.frame == window.frame } ? labelled(window) : window
+        }
+        #expect(mixed != windows, "some windows were labelled")
+        let later = MenuBarSnapshot(capturedAt: read.capturedAt, layout: read.layout, agentWindows: mixed, apps: read.apps, rawAgentTree: nil)
+        #expect(ProbeContext.framedKeys(later) == ProbeContext.framedKeys(read))
+        #expect(ProbeContext.framedKeys(later).contains("\(mainUUID)|weather.alerts"))
+
+        // With every window labelled so, no two slots share a key: the labelled ones are told by their width, as slots with no name are.
+        let labelledEverywhere = MenuBarSnapshot(capturedAt: read.capturedAt, layout: read.layout, agentWindows: windows.map(labelled),
+                                                 apps: read.apps, rawAgentTree: nil)
+        let keys = ProbeContext.framedKeys(labelledEverywhere)
+        #expect(keys.count == ProbeContext.framedKeys(read).count)
+        #expect(!keys.contains("\(mainUUID)|weather.temp"))
+    }
+
     @Test func slotsAreKeptApartByDisplay() async {
         // The same item is drawn on each display, and each display's has a key of its own.
         let read = await snapshot(InventoryFixtures.desk())

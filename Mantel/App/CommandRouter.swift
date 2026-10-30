@@ -16,6 +16,16 @@ protocol MenuBarCommanding: AnyObject {
     func reset() async -> ResetOutcome
     /// Which way of hiding icons is in use, and why.
     func engine() async -> JSONValue
+    /// The icons the menu bar has (one section's, or the groups', when asked), as objects of their ID, app, name, section, group and picture.
+    func icons(_ filter: IconListFilter?) async -> JSONValue
+    /// Shows one icon, or shows and clicks it. The words are resolved to one icon here; the answer is the click's outcome as soon as it is sent.
+    func icon(_ command: IconCommand, query: String, kind: ClickKind) async -> CommandResult
+    /// Opens or closes the second bar. Returns whether it is open now.
+    func bar(_ change: BarChange, all: Bool) async -> Bool
+    /// Takes the pictures of the icons again.
+    func recapture() async -> CommandResult
+    /// Puts the menu bar icons back in the order they had before Mantel changed it.
+    func restoreLayout() async -> CommandResult
 }
 
 /// Does what a command asks, inside the app. Commands come over the control socket from Mantel's own tools, which the
@@ -84,6 +94,21 @@ final class CommandRouter {
         case .engine:
             guard let menuBar = menuBar() else { return Self.starting }
             return .ok(await menuBar.engine())
+        case .icons(let filter):
+            guard let menuBar = menuBar() else { return Self.starting }
+            return .ok(await menuBar.icons(filter))
+        case .icon(let command, let query, let kind):
+            guard let menuBar = menuBar() else { return Self.starting }
+            return await menuBar.icon(command, query: query, kind: kind)
+        case .bar(let change, let all):
+            guard let menuBar = menuBar() else { return Self.starting }
+            return .ok(.string(CommandAnswers.bar(isOpen: await menuBar.bar(change, all: all))))
+        case .recapture:
+            guard let menuBar = menuBar() else { return Self.starting }
+            return await menuBar.recapture()
+        case .restoreLayout:
+            guard let menuBar = menuBar() else { return Self.starting }
+            return await menuBar.restoreLayout()
         }
     }
 

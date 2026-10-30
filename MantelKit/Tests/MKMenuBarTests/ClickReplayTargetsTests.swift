@@ -51,6 +51,15 @@ struct ClickReplayTargetsTests {
             #expect(rects.contains(frame), "the clock of each display is held")
             #expect(rects.contains { $0.contains(CGPoint(x: frame.midX, y: frame.midY)) })
         }
+
+        // And where they are, in numbers that don't come from the same code: a clock 80 points wide, 12 points in from the right edge of
+        // a bar that is 30 points high. The main display is 3360 points wide and starts at the origin; the portrait one is 1800 wide, and its
+        // bar is where CoreGraphics puts the top of a display whose top is 491 points above the main display's.
+        let mainClock = CGRect(x: 3268, y: 0, width: 80, height: 30)
+        let portraitClock = CGRect(x: -92, y: -491, width: 80, height: 30)
+        #expect(clock.frames[main] == mainClock)
+        #expect(clock.frames[portrait] == portraitClock)
+        #expect(rects == [portraitClock, mainClock], "in the order of the displays' IDs")
     }
 
     @Test func removedDisplayLeavesNoTarget() {

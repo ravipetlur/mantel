@@ -14,6 +14,12 @@ final class FakeAX: AXReading {
         /// Every read of an attribute of this node fails with this.
         var attributeError: AXReadError?
         var pressError: AXReadError?
+        /// The actions the element offers, by name (`AXShowMenu`); `AXPress` is pressed without being listed.
+        var actions: [String] = []
+        /// Every action performed on this node fails with this.
+        var performError: AXReadError?
+        /// Reading the list of actions the element offers fails with this.
+        var actionsError: AXReadError?
     }
 
     private struct State {
@@ -21,8 +27,17 @@ final class FakeAX: AXReading {
         var applicationRoots: [pid_t: Int] = [:]
         var attributeReads: [Int: Int] = [:]
         var presses: [Int] = []
+        var performed: [Performed] = []
         var nextID = 1
         var override: Override?
+        /// The app (by process ID) whose tree each node is in, for the nodes added through `addApp`, `addAgentWindow` and `addSlot`.
+        var owners: [Int: pid_t] = [:]
+    }
+
+    /// An action that was performed on a node.
+    struct Performed: Equatable, Sendable {
+        let id: Int
+        let action: String
     }
 
     /// Decides an attribute read in place of the tree: nil leaves it to the tree. For a test where what is on screen depends
@@ -30,7 +45,11 @@ final class FakeAX: AXReading {
     typealias Override = @Sendable (_ id: Int, _ name: String) -> Result<AXValueBox, AXReadError>?
 
     private let state = Mutex(State())
+    /// Whether each read (each `application(pid:)`) gives new elements for the same nodes: equal in what they are, not in which element
+    /// they are; and the number of the read. Apart from `state`, which `ref` is made in the middle of.
+    private let handles = Mutex((fresh: false, generation: 0))
     private static let pidBase = 1_000_000
+    private static let generationStride = 100_000
 
     // MARK: AXReading
 
@@ -59,6 +78,7 @@ final class FakeAX: AXReading {
 
     func application(pid: pid_t) -> AXElementRef {
         let id = state.withLock { state -> Int in
+            handles.withLock { if $0.fresh { $0.generation += 1 } }
             if let id = state.applicationRoots[pid] { return id }
             let id = state.nextID
             state.nextID += 1
@@ -86,16 +106,49 @@ final class FakeAX: AXReading {
         }
     }
 
+    func actionNames(of element: AXElementRef) throws(AXReadError) -> [String] {
+        let id = id(of: element)
+        let outcome = state.withLock { state -> (error: AXReadError?, actions: [String]) in (state.nodes[id]?.actionsError, state.nodes[id]?.actions ?? []) }
+        if let error = outcome.error { throw error }
+        return outcome.actions
+    }
+
+    func perform(_ action: String, on element: AXElementRef) throws(AXReadError) {
+        let id = id(of: element)
+        let error = state.withLock { state -> AXReadError? in
+            state.performed.append(Performed(id: id, action: action))
+            return state.nodes[id]?.performError
+        }
+        if let error { throw error }
+    }
+
+    /// The process whose tree the element is in, when it was added through `addApp`, `addAgentWindow` or `addSlot`.
+    func ownerPID(of element: AXElementRef) -> pid_t? {
+        let id = id(of: element)
+        return state.withLock { $0.owners[id] }
+    }
+
+    private func setOwner(_ pid: pid_t, of ids: [Int]) {
+        state.withLock { state in for id in ids { state.owners[id] = pid } }
+    }
+
     // MARK: Building a tree
 
+    /// The element for a node: the same one each time, unless `giveNewElementsAtEachRead` is on, when it is the one of the read's own.
     func ref(_ id: Int) -> AXElementRef {
-        AXElementRef(AXUIElementCreateApplication(pid_t(Self.pidBase + id)))
+        let generation = handles.withLock { $0.fresh ? $0.generation : 0 }
+        return AXElementRef(AXUIElementCreateApplication(pid_t(Self.pidBase + id + generation * Self.generationStride)))
     }
 
     func id(of element: AXElementRef) -> Int {
         var pid: pid_t = 0
         AXUIElementGetPid(element.element, &pid)
-        return Int(pid) - Self.pidBase
+        return (Int(pid) - Self.pidBase) % Self.generationStride
+    }
+
+    /// An app that makes new elements for its items at each read (what it lists at each read is not the element it listed before).
+    func giveNewElementsAtEachRead(_ on: Bool = true) {
+        handles.withLock { $0.fresh = on }
     }
 
     @discardableResult
@@ -119,6 +172,21 @@ final class FakeAX: AXReading {
         state.withLock { $0.nodes[id]?.attributes[name] = value }
     }
 
+    /// The element goes from its parent's list: the app has dropped the item.
+    func removeNode(_ id: Int) {
+        state.withLock { state in for key in state.nodes.keys { state.nodes[key]?.children.removeAll { $0 == id } } }
+    }
+
+    /// The two elements trade places in their parent's list: the app lists its items in another order.
+    func swapPlaces(of first: Int, and second: Int) {
+        state.withLock { state in
+            for key in state.nodes.keys {
+                guard let a = state.nodes[key]?.children.firstIndex(of: first), let b = state.nodes[key]?.children.firstIndex(of: second) else { continue }
+                state.nodes[key]?.children.swapAt(a, b)
+            }
+        }
+    }
+
     func setOverride(_ override: Override?) {
         state.withLock { $0.override = override }
     }
@@ -129,6 +197,23 @@ final class FakeAX: AXReading {
 
     func failPress(on id: Int, with error: AXReadError?) {
         state.withLock { $0.nodes[id]?.pressError = error }
+    }
+
+    func setActions(_ actions: [String], on id: Int) {
+        state.withLock { $0.nodes[id]?.actions = actions }
+    }
+
+    func failActions(on id: Int, with error: AXReadError?) {
+        state.withLock { $0.nodes[id]?.actionsError = error }
+    }
+
+    func failPerform(on id: Int, with error: AXReadError?) {
+        state.withLock { $0.nodes[id]?.performError = error }
+    }
+
+    /// The actions that were performed (not presses), in order.
+    var performedActions: [Performed] {
+        state.withLock { $0.performed }
     }
 
     func attributeReads(on id: Int) -> Int {
@@ -143,10 +228,12 @@ final class FakeAX: AXReading {
     @discardableResult
     func addAgentWindow(agent pid: pid_t, frame: CGRect) -> Int {
         let agentRoot = root(ofApp: pid)
+        defer { setOwner(pid, of: [agentRoot]) }
         let window = addNode(attributes: Self.frameAttributes(frame).merging([AXName.role: .string("AXWindow")]) { $1 }, under: agentRoot)
         let existing: [AXElementRef]
         if case .elements(let list)? = state.withLock({ $0.nodes[agentRoot]?.attributes[AXName.windows] }) { existing = list } else { existing = [] }
         setAttribute(AXName.windows, .elements(existing + [ref(window)]), on: agentRoot)
+        setOwner(pid, of: [window])
         return window
     }
 
@@ -160,9 +247,11 @@ final class FakeAX: AXReading {
         if let description { attributes[AXName.description] = .string(description) }
         if let frame { attributes.merge(Self.frameAttributes(frame)) { $1 } }
         let slot = addNode(attributes: attributes, under: window)
+        var below = [slot]
         if let childIdentifier {
-            addNode(attributes: [AXName.role: .string("AXGroup"), AXName.identifier: .string(childIdentifier)], under: slot)
+            below.append(addNode(attributes: [AXName.role: .string("AXGroup"), AXName.identifier: .string(childIdentifier)], under: slot))
         }
+        if let owner = state.withLock({ $0.owners[window] }) { setOwner(owner, of: below) }
         return slot
     }
 
@@ -189,6 +278,7 @@ final class FakeAX: AXReading {
             items.append(addNode(attributes: attributes, under: bar))
         }
         setAttribute(AXName.extrasMenuBar, .elements([ref(bar)]), on: root)
+        setOwner(pid, of: [root, bar] + items)
         return items
     }
 

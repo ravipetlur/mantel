@@ -262,7 +262,7 @@ struct HidingMethodRowsTests {
         #expect(NoRoomPolicy.allCases.map(AdvancedCopy.title(for:)) == [
             "Open the second bar", "Hide some shown icons to make room", "Hide the front app's menus",
         ])
-        #expect(AdvancedCopy.caption(for: .secondBar) == "The second bar isn't available yet. Until it is, macOS's « menu holds the icons that don't fit.")
+        #expect(AdvancedCopy.caption(for: .secondBar) == "Hidden icons that don't fit open in a bar of their own under the menu bar.")
         #expect(AdvancedCopy.caption(for: .swap) == "Mantel hides shown icons from the right until the revealed ones fit, and brings them back afterwards.")
         #expect(AdvancedCopy.caption(for: .hideAppMenus)
             == "Mantel briefly becomes the front app so its short menu leaves room. Its Dock icon shows for a moment.")

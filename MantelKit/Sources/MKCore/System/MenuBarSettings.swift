@@ -160,12 +160,13 @@ public struct HidingSettings: Codable, Sendable, Equatable {
     static let noLongerOfferedLine = "the saved hiding method is no longer offered; Mantel uses Automatic"
     private static let noLongerOfferedLogged = Mutex(false)
 
-    // A key missing from the file takes its default, so a file written before a key was added is still read. A method that isn't offered
-    // any more is read as Automatic.
+    // A key missing from the file takes its default, so a file written before a key was added is still read; so does a method or a choice
+    // for icons that don't fit that this version doesn't know (a file a newer Mantel saved), and the rest of the file is read as it is. A
+    // method that isn't offered any more is read as Automatic.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = HidingSettings()
-        var method = try container.decodeIfPresent(HidingMethodChoice.self, forKey: .method) ?? defaults.method
+        var method = container.decodeLeniently(HidingMethodChoice.self, forKey: .method) ?? defaults.method
         if !method.isOffered {
             method = .automatic
             let first = Self.noLongerOfferedLogged.withLock { logged in
@@ -177,7 +178,7 @@ public struct HidingSettings: Codable, Sendable, Equatable {
         self.init(method: method,
                   allowHidingClockAndControlCenter: try container.decodeIfPresent(Bool.self, forKey: .allowHidingClockAndControlCenter)
                       ?? defaults.allowHidingClockAndControlCenter,
-                  noRoomPolicy: try container.decodeIfPresent(NoRoomPolicy.self, forKey: .noRoomPolicy) ?? defaults.noRoomPolicy,
+                  noRoomPolicy: container.decodeLeniently(NoRoomPolicy.self, forKey: .noRoomPolicy) ?? defaults.noRoomPolicy,
                   automaticOverflow: try container.decodeIfPresent(Bool.self, forKey: .automaticOverflow) ?? defaults.automaticOverflow,
                   showEverythingOnWideScreens: try container.decodeIfPresent(Bool.self, forKey: .showEverythingOnWideScreens)
                       ?? defaults.showEverythingOnWideScreens,

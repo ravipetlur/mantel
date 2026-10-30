@@ -21,6 +21,7 @@ final class DiagnosticsModel {
     private(set) var isReplaying = false
     /// A refresh or a reset of the menu bar is under way (the buttons wait), and what the last one said.
     private(set) var menuBarBusy = false
+    private var isConfirmingReset = false
     private(set) var menuBarMessage: String?
     /// Whether the probes that change the menu bar can be run: the coordinator's switch, which the toggle sets. Off at every launch,
     /// and not kept.
@@ -43,7 +44,8 @@ final class DiagnosticsModel {
     /// Every row of Checks as the pane shows it: the ones read for the pane, and the ones the menu bar's state makes (a problem Refresh
     /// puts right says to try the button under the checks).
     var allRows: [DiagnosticsRow] {
-        DiagnosticsReport.merged(polled: rows, live: DiagnosticsReport.liveRows(state: menuBarState, forPane: true))
+        let names = (menuBarState?.unattachedApps ?? []).reduce(into: [String: String]()) { $0[$1] = identities.name(for: $1) }
+        return DiagnosticsReport.merged(polled: rows, live: DiagnosticsReport.liveRows(state: menuBarState, forPane: true, names: names))
     }
 
     /// The same rows as the copied report has them: the messages alone, as there is no button below.
@@ -126,7 +128,12 @@ final class DiagnosticsModel {
 
     /// "Reset menu bar…": asks first, then does what `mantel reset` does. (There is no menu item for it: it is here and on the command line.)
     func resetMenuBar() async {
-        guard !menuBarBusy, confirmReset() else { return }
+        guard !menuBarBusy, !isConfirmingReset else { return }
+        // The alert starts on the run loop's next turn, so a second click can come before it is up: it is refused, not queued behind it.
+        isConfirmingReset = true
+        let confirmed = await confirmReset()
+        isConfirmingReset = false
+        guard confirmed, !menuBarBusy else { return }
         menuBarBusy = true
         menuBarMessage = nil
         // A reset that couldn't start (the menu bar isn't made yet) changed nothing, so it is refused, not failed.
@@ -136,13 +143,13 @@ final class DiagnosticsModel {
         await refresh()
     }
 
-    private func confirmReset() -> Bool {
+    private func confirmReset() async -> Bool {
         let alert = NSAlert()
         alert.messageText = ResetCopy.alertTitle
         alert.informativeText = ResetCopy.alertText
         alert.addButton(withTitle: ResetCopy.confirmButton)
         alert.addButton(withTitle: ResetCopy.cancelButton)
-        return alert.runModal() == .alertFirstButtonReturn
+        return await ModalLoop.run(alert) == .alertFirstButtonReturn
     }
 
     func copy() async {
@@ -193,7 +200,7 @@ struct DiagnosticsPane: View {
                     Text(line).foregroundStyle(.secondary)
                 }
             }
-            Section("Accessibility reach") {
+            Section("How apps answer Mantel") {
                 let rows = model.reachRows
                 if rows.isEmpty {
                     Text(HidingDiagnostics.noReachText).foregroundStyle(.secondary)

@@ -38,6 +38,36 @@ private struct OtherSettings: SettingsDocument {
     var flag = false
 }
 
+/// `TestSettings` under a file name no other test uses. The log is the whole process's, and the other tests of this suite migrate
+/// `settings.json` at the same time: the tests that count the migration's lines count only the lines of this file.
+private struct MigratedOnceSettings: SettingsDocument {
+    static let fileName = "migrated-once.json"
+    static let currentVersion = 2
+
+    var name = "default"
+    var count = 0
+
+    init() {}
+
+    init(name: String, count: Int = 0) {
+        self.name = name
+        self.count = count
+    }
+
+    static func migrate(_ document: JSONValueTree, from version: Int) throws -> JSONValueTree {
+        guard version == 1 else { throw SettingsMigrationError.noMigration(file: fileName, from: version, to: currentVersion) }
+        var migrated = document
+        migrated["name"] = migrated.removeValue(forKey: "title")
+        return migrated
+    }
+}
+
+/// What a closure that runs while the log is captured loaded.
+private actor LoadedDocuments {
+    private(set) var all: [MigratedOnceSettings] = []
+    func add(_ document: MigratedOnceSettings) { all.append(document) }
+}
+
 @Suite("SettingsStore", .timeLimit(.minutes(1)))
 struct SettingsStoreTests {
     /// Held by the suite, and so for the whole test: the folder is deleted when the test is over.
@@ -65,6 +95,11 @@ struct SettingsStoreTests {
     private func file(_ name: String) -> URL { paths.settings.appending(path: name) }
 
     private func exists(_ url: URL) -> Bool { fileManager.fileExists(atPath: url.path) }
+
+    /// The copies of `name` that a migration made, in Backups.
+    private func backups(of name: String) -> [String] {
+        names(in: paths.backups).filter { $0.hasPrefix("\(name)-v") }
+    }
 
     /// Puts `contents` in the settings folder as `name`, as a file written by some other version of Mantel.
     @discardableResult
@@ -113,7 +148,7 @@ struct SettingsStoreTests {
         let backups = names(in: paths.backups)
         #expect(backups.count == 1)
         let backup = try #require(backups.first)
-        #expect(backup.wholeMatch(of: #/settings\.json-v1-\d{8}-\d{6}\.json/#) != nil, "named \(backup)")
+        #expect(backup.wholeMatch(of: #/settings\.json-v1-\d{8}-\d{6}Z\.json/#) != nil, "named \(backup)")
         #expect(try contents(of: paths.backups.appending(path: backup)) == Data(original.utf8))
         // The file itself is rewritten on the next save, not by loading.
         #expect(try contents(of: url) == Data(original.utf8))
@@ -126,6 +161,73 @@ struct SettingsStoreTests {
         #expect(names(in: paths.backups).count == 1, "saving makes no further backup")
     }
 
+    /// Two readers load the file before the migrated document is saved (the app's layout reader and the save that follows
+    /// its first change): the migration happens once, and the second load gets the migrated document, not the old file again.
+    @Test func aFileLoadedTwiceBeforeItsSaveIsMigratedOnce() async throws {
+        let original = #"{"version": 1, "document": {"title": "Old name", "count": 3}}"#
+        let url = try plant(original, as: MigratedOnceSettings.fileName)
+        let store = makeStore()
+
+        let loads = LoadedDocuments()
+        let lines = await LogCapture.lines {
+            await loads.add(await store.load(MigratedOnceSettings.self))
+            await loads.add(await store.load(MigratedOnceSettings.self))
+        }
+
+        let both = await loads.all
+        #expect(both == [MigratedOnceSettings(name: "Old name", count: 3), MigratedOnceSettings(name: "Old name", count: 3)],
+                "the second load sees the migrated document")
+        #expect(lines.filter { $0.contains("migrated-once.json was migrated from version") }.count == 1, "\(lines)")
+        #expect(backups(of: MigratedOnceSettings.fileName).count == 1, "one copy of the old file")
+        #expect(try contents(of: url) == Data(original.utf8), "the file is still rewritten by a save, not by a load")
+
+        // A save changes what a later load returns, and after the write the file itself is version 2.
+        await store.save(MigratedOnceSettings(name: "Changed", count: 4))
+        #expect(await store.load(MigratedOnceSettings.self) == MigratedOnceSettings(name: "Changed", count: 4))
+        await store.flush()
+        #expect(await store.load(MigratedOnceSettings.self) == MigratedOnceSettings(name: "Changed", count: 4))
+        let written = try JSONDecoder().decode(Envelope<MigratedOnceSettings>.self, from: contents(of: url))
+        #expect(written.version == 2)
+        #expect(backups(of: MigratedOnceSettings.fileName).count == 1)
+    }
+
+    /// The migrated document is kept only while the file is the one it came from: another old file put in its place before the save (a
+    /// copy from Backups put back), or a current one another writer saved, is read afresh.
+    @Test func aFileChangedOnDiskBeforeTheSaveIsReadAfresh() async throws {
+        let store = makeStore()
+        let loads = LoadedDocuments()
+        try plant(#"{"version": 1, "document": {"title": "First", "count": 1}}"#, as: MigratedOnceSettings.fileName)
+        var lines = await LogCapture.lines { await loads.add(await store.load(MigratedOnceSettings.self)) }
+        clock.advance(by: .seconds(2))
+        try plant(#"{"version": 1, "document": {"title": "Second", "count": 2}}"#, as: MigratedOnceSettings.fileName)
+        lines += await LogCapture.lines { await loads.add(await store.load(MigratedOnceSettings.self)) }
+        try plant(#"{"version": 2, "document": {"name": "Third", "count": 3}}"#, as: MigratedOnceSettings.fileName)
+        lines += await LogCapture.lines { await loads.add(await store.load(MigratedOnceSettings.self)) }
+
+        #expect(await loads.all == [MigratedOnceSettings(name: "First", count: 1), MigratedOnceSettings(name: "Second", count: 2),
+                                    MigratedOnceSettings(name: "Third", count: 3)])
+        #expect(lines.filter { $0.contains("migrated-once.json was migrated from version") }.count == 2, "\(lines)")
+        #expect(backups(of: MigratedOnceSettings.fileName).count == 2, "a copy of each old file")
+    }
+
+    /// A file whose copy couldn't be made is read-only and its error is told once, not at every load.
+    @Test func aFileWhoseBackupCantBeMadeIsToldAboutOnceWhenLoadedTwice() async throws {
+        try plant(#"{"version": 1, "document": {"title": "Old name", "count": 3}}"#, as: MigratedOnceSettings.fileName)
+        try fileManager.createDirectory(at: paths.backups, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: paths.backups.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: paths.backups.path) }
+        let store = makeStore()
+
+        let lines = await LogCapture.lines {
+            _ = await store.load(MigratedOnceSettings.self)
+            _ = await store.load(MigratedOnceSettings.self)
+        }
+        #expect(await store.load(MigratedOnceSettings.self) == MigratedOnceSettings(name: "Old name", count: 3))
+        #expect(await store.isReadOnly(MigratedOnceSettings.self))
+        #expect(lines.filter { $0.contains("migrated-once.json was migrated from version 1 but a copy of the old file couldn't be made") }.count == 1,
+                "\(lines)")
+    }
+
     @Test func anOlderVersionWithoutAMigrationIsSetAside() async throws {
         let original = #"{"version": 0, "document": {"flag": true}}"#
         let url = try plant(original, as: "other.json")
@@ -133,7 +235,7 @@ struct SettingsStoreTests {
         #expect(await store.load(OtherSettings.self) == OtherSettings())
         #expect(!exists(url))
         let setAside = try #require(names(in: paths.backups).first)
-        #expect(setAside.wholeMatch(of: #/corrupt-other-\d{8}-\d{6}\.json/#) != nil, "named \(setAside)")
+        #expect(setAside.wholeMatch(of: #/corrupt-other-\d{8}-\d{6}Z\.json/#) != nil, "named \(setAside)")
         #expect(try contents(of: paths.backups.appending(path: setAside)) == Data(original.utf8))
     }
 
@@ -164,7 +266,7 @@ struct SettingsStoreTests {
         #expect(await store.isReadOnly(TestSettings.self) == false, "the defaults can be saved over the empty place")
         #expect(!exists(url), "the corrupt file is moved, not left in the way")
         let setAside = try #require(names(in: paths.backups).first)
-        #expect(setAside.wholeMatch(of: #/corrupt-settings-\d{8}-\d{6}\.json/#) != nil, "named \(setAside)")
+        #expect(setAside.wholeMatch(of: #/corrupt-settings-\d{8}-\d{6}Z\.json/#) != nil, "named \(setAside)")
         #expect(try contents(of: paths.backups.appending(path: setAside)) == Data(json.utf8), "kept byte for byte")
     }
 
@@ -287,7 +389,9 @@ struct SettingsStoreTests {
         let url = try plant(original)
         let store = makeStore()
 
-        await store.save(TestSettings(name: "defaults"))
+        let lines = await LogCapture.lines { await store.save(TestSettings(name: "defaults")) }
+        #expect(lines.contains { $0.hasSuffix(" [WARN] [settings] settings.json wasn't read before this save, so it isn't saved") },
+                "the refusal is logged, with the name of the file and not its contents: \(lines)")
         #expect(clock.sleeperCount == 0, "nothing is waiting to be written")
         await store.flush()
 
@@ -296,7 +400,9 @@ struct SettingsStoreTests {
 
         // Once it has been read, saving works, and a document that hasn't been is still refused.
         _ = await store.load(TestSettings.self)
-        await store.save(OtherSettings(flag: true))
+        let otherLines = await LogCapture.lines { await store.save(OtherSettings(flag: true)) }
+        #expect(otherLines.contains { $0.hasSuffix(" [WARN] [settings] other.json wasn't read before this save, so it isn't saved") },
+                "and for the other document too: \(otherLines)")
         await store.save(TestSettings(name: "changed", count: 9))
         await store.flush()
         #expect(!exists(file("other.json")), "the other document was never loaded")
@@ -345,7 +451,7 @@ struct SettingsStoreTests {
         #expect(migrated.count == 5, "\(migrated)")
         #expect(migrated.first == oldMigrated[0], "the first copy ever is the person's original")
         #expect(migrated.contains(oldMigrated[5]) && migrated.contains(oldMigrated[3]) && !migrated.contains(oldMigrated[1]))
-        #expect(migrated.contains { $0.wholeMatch(of: #/settings\.json-v1-2023\d{4}-\d{6}\.json/#) != nil }, "the new copy is among them")
+        #expect(migrated.contains { $0.wholeMatch(of: #/settings\.json-v1-2023\d{4}-\d{6}Z\.json/#) != nil }, "the new copy is among them")
 
         // A file set aside as corrupt: the five newest.
         try plant("{ corrupt", as: "settings.json")
@@ -353,7 +459,7 @@ struct SettingsStoreTests {
         let corrupt = names(in: paths.backups).filter { $0.hasPrefix("corrupt-settings-") }
         #expect(corrupt.count == 5, "\(corrupt)")
         #expect(!corrupt.contains(oldCorrupt[0]) && !corrupt.contains(oldCorrupt[2]) && corrupt.contains(oldCorrupt[6]) && corrupt.contains(oldCorrupt[3]))
-        #expect(corrupt.contains { $0.wholeMatch(of: #/corrupt-settings-2023\d{4}-\d{6}\.json/#) != nil }, "the one just set aside is kept")
+        #expect(corrupt.contains { $0.wholeMatch(of: #/corrupt-settings-2023\d{4}-\d{6}Z\.json/#) != nil }, "the one just set aside is kept")
 
         // Nothing else in the folder was touched.
         let left = names(in: paths.backups)

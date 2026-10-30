@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import MKCore
 import Testing
 
@@ -113,6 +114,113 @@ struct EmptySpaceTests {
         #expect(classify(CGPoint(x: -380, y: -480), items: items + [onPortrait]) == .item)
         // Its bar hidden: not a bar.
         #expect(classify(CGPoint(x: -900, y: -480), shown: [main, laptop]) == .hiddenBar)
+    }
+
+    // MARK: Mantel's own items
+
+    private let group = OwnItems.itemID(GroupID(rawValue: "0000000a"))
+    private let spacer = OwnItems.itemID(SpacerID(rawValue: "00000001"))
+    /// A read gives Mantel's items the running app's bundle ID, not the layout's `mantel`.
+    private func read(_ layoutID: ItemID, frame: CGRect, bundleID: String = "com.example.mantel", kind: OwnItemKind) -> MenuBarItem {
+        MenuBarItem(id: ItemID(bundleID: bundleID, key: layoutID.key), ownerBundleID: bundleID, appName: nil, label: nil, frames: [main: frame],
+                    overflowedOn: [], isMantel: true, ownKind: kind)
+    }
+
+    /// A group's icon at 3060...3100 and a spacer at 3100...3112 on the main bar, beside the ordinary items: the slots of a read that has
+    /// them under the ID a read gives them.
+    private var ownItems: [EmptySpace.OwnSlot] {
+        EmptySpace.ownSlots(in: Inventory(
+            capturedAt: Date(timeIntervalSince1970: 0), bars: bars,
+            items: [read(group, frame: CGRect(x: 3060, y: 0, width: 40, height: 30), kind: .group),
+                    read(spacer, frame: CGRect(x: 3100, y: 0, width: 12, height: 30), kind: .spacer)],
+            chevrons: [:], reach: [], problems: [], unansweredApps: []))
+    }
+
+    private func classifyOwn(_ point: CGPoint, shown: Set<String>? = nil, items: [CGRect]? = nil) -> EmptySpace.Spot {
+        EmptySpace.classify(point, bars: bars, shownBars: shown ?? allShown, itemFrames: items ?? self.items, appMenuFrames: menus,
+                            ownItems: ownItems)
+    }
+
+    @Test func ownItemSpot() {
+        #expect(classifyOwn(CGPoint(x: 3070, y: 15)) == .ownItem(group))
+        #expect(classifyOwn(CGPoint(x: 3105, y: 15)) == .ownItem(spacer))
+        // An own item owns its left edge and not its right one, as an ordinary item does.
+        #expect(classifyOwn(CGPoint(x: 3060, y: 0)) == .ownItem(group))
+        #expect(classifyOwn(CGPoint(x: 3112, y: 15)) == .empty(displayUUID: main))
+        // Where an item's frame and an own item's overlap (the last read drew both), the own item is what the pointer is on.
+        #expect(classifyOwn(CGPoint(x: 3070, y: 15), items: items + [CGRect(x: 3060, y: 0, width: 40, height: 30)]) == .ownItem(group))
+        // Ordinary items are as they were.
+        #expect(classifyOwn(CGPoint(x: 3010, y: 15)) == .item)
+    }
+
+    @Test func ownItemIsNotEmptySpace() {
+        let spot = classifyOwn(CGPoint(x: 3070, y: 15))
+        #expect(spot != .empty(displayUUID: main))
+        #expect(EmptySpace.isInBar(spot), "the pointer is on the bar")
+        // A click on one reveals nothing, and neither does resting on it; moving off it into empty space enters it.
+        #expect(PointerReveal.clicked(at: spot) == nil)
+        #expect(PointerReveal.moved(from: .empty(displayUUID: main), to: spot) == [.pointerLeftEmptySpace])
+        #expect(PointerReveal.moved(from: spot, to: .empty(displayUUID: main)) == [.pointerEnteredEmptySpace])
+        // On a bar that isn't on screen it is the hidden bar, as any item is.
+        #expect(classifyOwn(CGPoint(x: 3070, y: 15), shown: [portrait, laptop]) == .hiddenBar)
+        // The classification without own items' frames is unchanged (the ordinary item's frame covers this point).
+        #expect(classify(CGPoint(x: 3070, y: 15)) == .item)
+        #expect(classify(CGPoint(x: 3105, y: 15)) == .empty(displayUUID: main))
+    }
+
+    @Test func ownSlotsLeaveOutWhatIsOutOfTheWayOrCantBeTold() {
+        func item(_ id: ItemID, kind: OwnItemKind, frames: [String: CGRect], overflowed: Set<String> = [], shares: Set<String> = []) -> MenuBarItem {
+            MenuBarItem(id: ItemID(bundleID: "com.example.mantel", key: id.key), ownerBundleID: "com.example.mantel", appName: nil, label: nil,
+                        frames: frames, overflowedOn: overflowed, isMantel: true, sharesFrameOn: shares, ownKind: kind)
+        }
+        let app = MenuBarItem(id: ItemID(bundleID: "com.example.app", key: .index(0)), ownerBundleID: "com.example.app", appName: nil,
+                              label: nil, frames: [main: CGRect(x: 10, y: 0, width: 20, height: 30)], overflowedOn: [], isMantel: false)
+        let inventory = Inventory(
+            capturedAt: Date(timeIntervalSince1970: 0), bars: bars,
+            items: [
+                app,
+                item(group, kind: .group, frames: [main: CGRect(x: 3060, y: 0, width: 40, height: 30)]),
+                item(spacer, kind: .spacer, frames: [main: CGRect(x: 3100, y: 0, width: 12, height: 30)], overflowed: [main]),
+                item(OwnItems.itemID(SpacerID(rawValue: "00000002")), kind: .spacer, frames: [main: CGRect(x: 3200, y: 0, width: 0, height: 30)]),
+                item(OwnItems.itemID(SpacerID(rawValue: "00000003")), kind: .spacer, frames: [main: CGRect(x: 3300, y: 0, width: 12, height: 30)],
+                     shares: [main]),
+            ], chevrons: [:], reach: [], problems: [], unansweredApps: [])
+        let slots = EmptySpace.ownSlots(in: inventory)
+        #expect(slots == [EmptySpace.OwnSlot(item: group, frame: CGRect(x: 3060, y: 0, width: 40, height: 30))],
+                "no app's, none in the « menu, none of no width, none that shares its frame with another")
+    }
+
+    @Test func ownSlotsNameTheItemAsTheLayoutDoes() {
+        // A read of Mantel's own group icon says `com.example.mantel::mantel.group.0000000a`; the layout says `mantel::…`.
+        let icon = read(group, frame: CGRect(x: 3060, y: 0, width: 40, height: 30), kind: .group)
+        #expect(icon.id.bundleID == "com.example.mantel")
+        #expect(OwnItems.layoutID(of: icon) == group)
+        #expect(OwnItems.groupID(of: OwnItems.layoutID(of: icon)!) == GroupID(rawValue: "0000000a"))
+        // A group icon told only by its description has an index for a key: it is on the bar, with no group ID.
+        let described = MenuBarItem(id: ItemID(bundleID: "com.example.mantel", key: .index(3)), ownerBundleID: "com.example.mantel", appName: nil,
+                                    label: nil, frames: [main: CGRect(x: 3060, y: 0, width: 40, height: 30)], overflowedOn: [], isMantel: true,
+                                    ownKind: .group)
+        #expect(OwnItems.layoutID(of: described) == nil)
+        let slots = EmptySpace.ownSlots(in: Inventory(capturedAt: Date(timeIntervalSince1970: 0), bars: bars, items: [described], chevrons: [:],
+                                                      reach: [], problems: [], unansweredApps: []))
+        #expect(slots.count == 1, "the icon is still an own item for the pointer")
+        #expect(GroupHover.group(under: .ownItem(slots[0].item), among: [GroupID(rawValue: "0000000a")]) == nil, "and has no hover")
+        // Not one of Mantel's, or a name that isn't an own item's: no layout identity.
+        let other = MenuBarItem(id: ItemID(bundleID: "com.example.other", key: .identifier("mantel.group.0000000a")), ownerBundleID: "com.example.other",
+                                appName: nil, label: nil, frames: [:], overflowedOn: [], isMantel: false)
+        #expect(OwnItems.layoutID(of: other) == nil)
+        let engine = MenuBarItem(id: ItemID(bundleID: "com.example.mantel", key: .identifier("mantel.spacer.divider")), ownerBundleID: "com.example.mantel",
+                                 appName: nil, label: nil, frames: [:], overflowedOn: [], isMantel: true)
+        #expect(OwnItems.layoutID(of: engine) == nil)
+    }
+
+    @Test func hoverFindsTheGroupUnderThePointerInARead() {
+        let id = GroupID(rawValue: "0000000a")
+        let spot = classifyOwn(CGPoint(x: 3070, y: 15))
+        #expect(GroupHover.group(under: spot, among: [id]) == id, "the spot a read's group icon gives names its group")
+        #expect(GroupHover.group(under: spot, among: []) == nil, "a group that doesn't open on hover isn't")
+        #expect(GroupHover.group(under: classifyOwn(CGPoint(x: 3105, y: 15)), among: [id]) == nil, "a spacer isn't")
+        #expect(GroupHover.group(under: .item, among: [id]) == nil)
     }
 
     @Test func isInBarExcludesHiddenBar() {

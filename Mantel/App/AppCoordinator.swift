@@ -1,6 +1,8 @@
 import AppKit
+import ApplicationServices
 import MKCommands
 import MKCore
+import MKLayout
 import MKMenuBar
 
 /// Owns everything in Mantel that lives as long as the app does: the settings store, the journal, the permission checker,
@@ -18,7 +20,8 @@ import MKMenuBar
 /// 5. Every settings document in use is loaded before any is saved: the store only protects a file it has read.
 /// 6. The hotkeys are registered from the bindings that were loaded.
 /// 7. The dots appear, 8. the displays are watched, 9. the menu bar starts (the running apps are watched, and the session begins to hide
-///    on a task of its own: the launch doesn't wait for it), and 10. onboarding opens if the person hasn't been through it.
+///    on a task of its own: the launch doesn't wait for it), and 10. onboarding opens if the person hasn't been through it, and Settings
+///    opens on Cosmetics if both dots are hidden (`LaunchSequence.opensSettingsForHiddenDots`).
 @MainActor
 final class AppCoordinator {
     let paths: MantelPaths
@@ -36,6 +39,19 @@ final class AppCoordinator {
     let runningApps = RunningAppsSource()
     /// Reads and changes the plist files the menu bar's state is kept in, with the journal behind every change.
     private(set) lazy var plist = PlistFileAccess(journal: journal, paths: paths, grants: grants, codecs: PlistBlobCodecs.standard)
+    /// Reads and changes preferences (`defaults`: the icon spacing), with the journal behind every change. Made when first used, for the same
+    /// reason as the journal it keeps its changes in.
+    private(set) lazy var defaultsAccess = DefaultsAccess(journal: journal, preferences: LivePreferences())
+    /// The one writer of `icons.json`: the Hotkeys page's changes and the Layout editor's go through it.
+    let iconPreferencesWriter = IconPreferencesWriter()
+    /// Reads and changes the icon spacing, which Settings › Advanced offers. Made when first used, with the journal its changes are kept in.
+    private(set) lazy var spacingWriter = SpacingWriter(defaults: defaultsAccess, journal: journal)
+    /// Asks the apps Settings › Advanced lists to quit and opens them again, when the person has ticked them.
+    private(set) lazy var appRelauncher: any AppRelaunching = LiveAppRelauncher(runningApps: { [runningApps] in runningApps.all })
+    /// What puts back the journal's entries, whatever kind of change they are: a plist file's (the layout table, the approvals file) or a
+    /// preference's (the icon spacing). Every replay (the launch's, quitting's, Reset's, Replay now) uses this one.
+    private(set) lazy var journalRestorer = RoutingJournalRestorer(plist: PlistJournalRestorer(access: plist, grants: grants),
+                                                                   defaults: DefaultsJournalRestorer(access: defaultsAccess))
     /// The way of hiding icons that works through the "Allow in the Menu Bar" switches. Made when first used, for the same reason as the
     /// journal it keeps its changes in.
     private(set) lazy var approvalsEngine = ApprovalsEngine(access: plist, grants: grants, journal: journal)
@@ -46,19 +62,33 @@ final class AppCoordinator {
         get { platformTestSwitch.isOn }
         set { platformTestSwitch.isOn = newValue }
     }
+    /// The Accessibility the scanner reads with, patient with a busy Mac (`PatientAX`). Held here so that quitting can tell it to stop waiting
+    /// at the very start, from the quit itself and before anything that needs a thread of the pool (`beginQuit`).
+    private let patientAX = PatientAX(inner: AXClient())
+    /// What reads the menu bar, finds an item in it and presses it. The menu bar controller's session scans with it, and the probes find
+    /// items and press them through the same one: what its scans learned of where each app's items are, while they were all drawn, is what
+    /// lets it say which slot an item that was concealed has been drawn in.
+    private(set) lazy var scanner = MenuBarScanner(
+        ax: patientAX, runningApps: { [runningApps] in runningApps.regular }, layout: { [layoutSource] in layoutSource.current },
+        ownBundleID: Bundle.main.bundleIdentifier ?? "com.example.mantel", isTrusted: { AXIsProcessTrusted() })
     /// The probes. Made when first used (it needs the journal): a copy that only hands off and quits never makes one, and so
     /// never opens the running copy's journal.
     var probes: ProbeRunner {
         if let probeRunner { return probeRunner }
         let runner = ProbeRunner(
             paths: paths, reader: MenuBarReader(ax: AXClient(), runningApps: { [runningApps] in runningApps.regular }),
-            plist: plist, grants: grants, layoutProvider: { [layoutSource] in layoutSource.current },
-            platform: .live(runningApps: runningApps), stateChangingAllowed: { [platformTestSwitch] in platformTestSwitch.isOn },
+            plist: plist, grants: grants, journal: journal, defaults: defaultsAccess,
+            layoutProvider: { [layoutSource] in layoutSource.current },
+            platform: .live(runningApps: runningApps, scanner: scanner, ownItemFrames: { [weak self] in await self?.ownItemFrames() ?? [:] }),
+            stateChangingAllowed: { [platformTestSwitch] in platformTestSwitch.isOn },
             resetUnderWay: { [resetActivity] in resetActivity.isUnderWay })
         probeRunner = runner
         return runner
     }
     private var probeRunner: ProbeRunner?
+    /// How macOS keeps the menu bar's order table, from the platform check's results. Built once; the writer, the applier and the session
+    /// all go by this value. (`LayoutRules.unmeasured` is what is assumed before anything was measured.)
+    private let layoutRules = LayoutRules.measured
     /// Set while a reset of the menu bar is under way: the probes that change the menu bar are refused meanwhile, and a reset is refused
     /// while one of them is changing it (`resetRefusal`).
     private let resetActivity = ResetActivity()
@@ -87,6 +117,8 @@ final class AppCoordinator {
     private(set) var hotkeyBindings = HotkeyBindings()
     /// The actions whose shortcut macOS wouldn't register, and why. Empty while the hotkeys are suspended.
     private(set) var hotkeyFailures: [HotkeyID: HotkeyRegistrationError] = [:]
+    /// What the person told Mantel about individual icons (`icons.json`), as loaded: which icons have an action for their shortcut.
+    private(set) var iconPreferences = IconPreferences()
 
     private lazy var router = makeRouter()
     private var controlServer: ControlSocketServer?
@@ -189,18 +221,27 @@ final class AppCoordinator {
         case .loadSettings:
             generalSettings = await store.load(GeneralSettings.self)
             hotkeyBindings = await store.load(HotkeyBindings.self)
+            iconPreferences = await store.load(IconPreferences.self)
             hasLoadedSettings = true
         case .registerHotkeys:
             hotkeyCenter = HotkeyCenter()
             registerHotkeys()
         case .createStatusItem:
             menuBar = MenuBarController(
-                store: store, approvals: approvalsEngine, runningApps: runningApps, layout: { [layoutSource] in layoutSource.current },
+                store: store, approvals: approvalsEngine, runningApps: runningApps, scanner: scanner,
+                layout: { [layoutSource] in layoutSource.current },
                 reveal: generalSettings.reveal, hiding: generalSettings.hiding,
+                dots: generalSettings.dots, secondBar: generalSettings.secondBar, ownImages: paths.ownImages, itemImagesFolder: paths.itemImages,
                 replayJournal: { [weak self] in await self?.replayJournal() },
                 resetRefusal: { [weak self] in await self?.resetRefusal() }, resetActivity: resetActivity,
+                layoutRules: layoutRules, layout: generalSettings.layout, plist: plist, grants: grants, journal: journal,
+                home: FileManager.default.homeDirectoryForCurrentUser,
+                probeChangingMenuBar: { [weak self] in await self?.isProbeChangingMenuBar() ?? false },
                 openSettings: { [weak self] in self?.openSettings(nil) }, openDiagnostics: { [weak self] in self?.openSettings(.diagnostics) },
-                activation: activation)
+                activation: activation,
+                recordsChecked: { [weak self] app, done in await self?.moveRecordSettings(ofApp: app, done) ?? SettingsMoved() })
+            menuBar?.openSettingsPage = { [weak self] page in self?.openSettings(page) }
+            menuBar?.iconPreferencesWriter = iconPreferencesWriter
         case .observeDisplays:
             updateDisplays()
             screenObserver = NotificationCenter.default.addObserver(
@@ -214,6 +255,11 @@ final class AppCoordinator {
         case .openOnboardingIfNeeded:
             if !generalSettings.onboardingCompleted {
                 openOnboarding()
+            }
+            // With both dots off the bar nothing of Mantel is there to be found: Settings opens on the page that turns them back on.
+            if LaunchSequence.opensSettingsForHiddenDots(onboardingCompleted: generalSettings.onboardingCompleted,
+                                                         dots: generalSettings.dots) {
+                openSettings(.cosmetics)
             }
         }
     }
@@ -236,14 +282,14 @@ final class AppCoordinator {
         menuBar?.displaysChanged(layout)
     }
 
-    /// Replays the journal: puts back what an earlier run changed and didn't put back. Gives up after 10 seconds (what is
-    /// left stays in the journal for the next launch). Returns a sentence about how it went, for the Diagnostics pane.
+    /// Replays the journal: puts back the temporary changes an earlier run made and didn't put back (what Mantel keeps, its own
+    /// arrangement, stays: only Restore original layout puts that back). Gives up after 10 seconds (what is left stays in the journal
+    /// for the next launch). Returns a sentence about how it went, for the Diagnostics pane.
     @discardableResult
     func replayJournal() async -> String {
-        let restorer = PlistJournalRestorer(access: plist, grants: grants)
-        switch await journal.replay(using: restorer, cap: .seconds(10)) {
+        switch await journal.replay(using: journalRestorer, cap: .seconds(10)) {
         case .completed(let failures):
-            if failures.isEmpty { return "Everything in the journal was put back." }
+            if failures.isEmpty { return "All of Mantel's temporary changes were put back." }
             // A journal that couldn't be read restores nothing, and its one failure says what to do.
             if await !journal.isUsable, let reason = failures.first?.message {
                 Log.error("launch", "the journal couldn't be read, so nothing was put back")
@@ -258,6 +304,11 @@ final class AppCoordinator {
         }
     }
 
+    /// Whether a platform test is changing the menu bar now (the order table isn't written meanwhile).
+    private func isProbeChangingMenuBar() async -> Bool {
+        await probeRunner?.isChangingMenuBar ?? false
+    }
+
     /// Why a reset of the menu bar can't be made now, if it can't: a platform test is changing it, and the reset's replay would put the test's
     /// records back in the middle of a measurement.
     private func resetRefusal() async -> String? {
@@ -269,11 +320,12 @@ final class AppCoordinator {
         await replayJournal()
     }
 
-    /// Whether the journal has nothing to put back. One that couldn't be read isn't empty: its replay says why it can't be done.
+    /// Whether the journal has nothing to put back: no temporary change is waiting. What Mantel keeps isn't waiting for anything. One
+    /// that couldn't be read isn't empty: its replay says why it can't be done.
     var journalIsEmpty: Bool {
         get async {
             guard await journal.isUsable else { return false }
-            return await journal.records().isEmpty
+            return await journal.untilQuitRecords().isEmpty
         }
     }
 
@@ -281,6 +333,11 @@ final class AppCoordinator {
     /// an app's icons hidden. ("Replay now" would put them back from under it.)
     var engineHoldsJournal: Bool {
         get async { await approvalsEngine.holdsJournalEntries }
+    }
+
+    /// Where Mantel's own items' buttons are, for the probes: none until the menu bar controller has made the dots.
+    private func ownItemFrames() -> [String: CGRect] {
+        menuBar?.ownItemFrames() ?? [:]
     }
 
     /// Runs a probe, unless quitting has begun (nil then): from the control socket and from the Diagnostics pane.
@@ -358,7 +415,7 @@ final class AppCoordinator {
         switch HandOff.decide(facts) {
         case .quit:
             Log.info("launch", "handed off to the running Mantel; quitting")
-            NSApp.terminate(nil)
+            AppQuit.request()
             return .heldByAnotherMantel
         case .start:
             Log.info("launch", "the other Mantel is gone; carrying on")
@@ -374,36 +431,77 @@ final class AppCoordinator {
     /// In this order:
     /// 1. Nothing new is started: no probe (the only command that changes the system) is run from now on, and the tap that holds clicks on
     ///    the clock is stopped for good (the states the session publishes from now on start nothing again).
-    /// 2. What is waiting to be saved is written, before anything that can take long.
+    /// 2. What is waiting to be saved is written, before anything that can take long; so is an order change still in its debounce, in a
+    ///    fraction of a second (it is dropped, and the log says so, when that isn't enough).
     /// 3. A probe that runs is cut short, and puts back what it changed.
     /// 4. The hiding method is taken down (`MenuBarController.tearDownForQuit`): the pointer monitors are removed, a takeover of the menu
     ///    bar ends, no more plans are delivered, and the engine in charge shows everything and puts back what it changed, waited for for
-    ///    1.5 seconds at most. When the journal holds changes the timer is stretched first, so that the engine's undoing and the replay
-    ///    after it have the three seconds and not the one.
-    /// 5. If the journal still holds changes, they are put back, within what is left of the quit timer's wait (so that when the replay is
-    ///    cut short, it is the replay that says so, and not the app that quits in the middle of it).
+    ///    1.5 seconds at most. When the journal holds temporary changes the timer is stretched first, so that the engine's undoing and
+    ///    the replay after it have the three seconds and not the one. (What Mantel keeps stays across a quit, and asks for no time.)
+    /// 5. If the journal still holds temporary changes, they are put back, within what is left of the quit timer's wait less a margin
+    ///    (so that when the replay is cut short, it is the replay that says so, and not the app that quits in the middle of it, and the
+    ///    final steps have their time).
     /// 6. The socket stops, the hotkeys are let go, and the settings are written once more.
     func prepareToQuit() async {
         isQuitting = true
         menuBar?.stopClockClicks()
-        await lastSave?.value
-        await store.flush()
-        await probeRunner?.shutDown()
-        if ownsJournal, await !journal.records().isEmpty { await quitTimer.extend() }
-        await menuBar?.tearDownForQuit()
-        if ownsJournal, await !journal.records().isEmpty {
-            await quitTimer.extend()
-            let restorer = PlistJournalRestorer(access: plist, grants: grants)
-            switch await journal.replay(using: restorer, cap: await quitTimer.remaining()) {
-            case .completed(let failures):
-                if !failures.isEmpty { Log.warning("quit", "\(failures.count) journal entries weren't put back and stay for the next launch") }
-            case .timedOut:
-                Log.warning("quit", "putting the journal back took too long; what is left stays for the next launch")
+        let trace = quitTrace
+        await trace.step("saving what waits to be saved") { await lastSave?.value }
+        // The settings of the icons that a check of the saved layout took out are moved on a task of the session's, and a move that hasn't been
+        // made when the settings are written is lost for good: the app was checked, and isn't checked again.
+        // A move can change a shortcut, which is a save of its own, so what waits to be saved is awaited again after the moves, and the step
+        // has a bound: it comes out of the quit timer's first second.
+        await trace.step("finishing the moves of the settings of icons that were checked") {
+            await menuBar?.settingsMovesFinishedForQuit { [weak self] in await self?.lastSave?.value }
+        }
+        await trace.step("flushing the settings") { await store.flush() }
+        await trace.step("flushing the layout") { await menuBar?.flushLayoutForQuit() }
+        await trace.step("shutting down the probes") { await probeRunner?.shutDown() }
+        if ownsJournal { await trace.step("stretching the quit for the journal's replay") { await quitTimer.extendForReplay(of: journal) } }
+        await trace.step("taking down the engine") { await menuBar?.tearDownForQuit() }
+        if ownsJournal, await !journal.untilQuitRecords().isEmpty {
+            await trace.step("putting the journal back") {
+                await quitTimer.extend()
+                switch await journal.replay(using: journalRestorer, cap: await quitTimer.replayCap()) {
+                case .completed(let failures):
+                    if !failures.isEmpty { Log.warning("quit", "\(failures.count) journal entries weren't put back and stay for the next launch") }
+                case .timedOut:
+                    Log.warning("quit", "putting the journal back took too long; what is left stays for the next launch")
+                }
             }
         }
-        controlServer?.stop()
-        hotkeyCenter?.unregisterAll()
-        await store.flush()
+        // On the main thread, and waited for for half a second at most: the one step that the quit timer can't get past.
+        trace.quickStep("stopping the control socket") { controlServer?.stop() }
+        trace.quickStep("letting go of the hotkeys") { hotkeyCenter?.unregisterAll() }
+        await trace.step("the last flush of the settings") { await store.flush() }
+    }
+
+    /// What the log says of the quit (`QuitTrace`): set when it begins.
+    private(set) var quitTrace = QuitTrace(write: { Log.info("quit", $0) })
+
+    /// What the SIGTERM fallback's line says besides the last step reached: how many queries wait for an app, how long the oldest has, and
+    /// the read gate's counts. Registered when the app starts, and not when the quit begins, so that a SIGTERM whose main thread never runs
+    /// the quit has them too.
+    func registerQuitDiagnostics(on trace: QuitTrace) {
+        let scanner = scanner
+        trace.setDiagnostics { [patientAX] in
+            let activity = patientAX.activity()
+            let queries = "\(activity.inFlight) Accessibility queries waiting, the oldest \(Int((activity.oldestAge * 1000).rounded())) ms"
+            let gate = scanner.readGateCounts
+            return "\(queries); the read gate: \(gate.running) running, \(gate.waiting) waiting"
+        }
+    }
+
+    /// The very start of the quit, called by the app's delegate on the main thread before anything is awaited and before the cleanup's task
+    /// is made: reads of the menu bar stop waiting for apps (`MenuBarScanner.stopWaiting`: switches that are turned over, which need no thread
+    /// of the pool, and which no actor has to take a turn for), so that the threads they hold are back as soon as the call each is in ends, a
+    /// scan that is under way doesn't sleep through its retries, and the cleanup and the timer that need the threads aren't held up. Then the
+    /// log's account of the quit begins (`QuitTrace`).
+    func beginQuit(_ trace: QuitTrace, because cause: String) {
+        isQuitting = true
+        scanner.stopWaiting()
+        quitTrace = trace
+        trace.begin(cause)
     }
 
     // MARK: Windows
@@ -418,7 +516,7 @@ final class AppCoordinator {
         }
         let window = settingsWindow ?? SettingsWindowController(coordinator: self)
         settingsWindow = window
-        window.show(pane: page.map(SettingsPane.init(page:)))
+        window.show(page: page)
     }
 
     /// Mantel was opened again, with the Dock icon or from Finder: onboarding comes forward if it is open, and otherwise Settings opens
@@ -465,13 +563,13 @@ final class AppCoordinator {
 
     // MARK: Settings
 
-    /// The pane Settings was last on.
-    var lastSettingsPane: SettingsPane {
-        generalSettings.settingsPage.flatMap(SettingsPane.init(rawValue:)) ?? .general
+    /// The page Settings was last on.
+    var lastSettingsPage: SettingsPage {
+        generalSettings.settingsPage.flatMap(SettingsPage.init(rawValue:)) ?? .general
     }
 
-    func rememberSettingsPane(_ pane: SettingsPane) {
-        updateGeneralSettings { $0.settingsPage = pane.rawValue }
+    func rememberSettingsPage(_ page: SettingsPage) {
+        updateGeneralSettings { $0.settingsPage = page.rawValue }
     }
 
     /// Changes `generalSettings` and has the store save them, and passes what reveals and hides on to the menu bar. It is the one way a
@@ -482,7 +580,8 @@ final class AppCoordinator {
         change(&generalSettings)
         enqueueSave(generalSettings)
         // What reveals and hides follows the settings: the menu bar passes on only what is different.
-        menuBar?.settingsChanged(reveal: generalSettings.reveal, hiding: generalSettings.hiding)
+        menuBar?.settingsChanged(reveal: generalSettings.reveal, hiding: generalSettings.hiding, dots: generalSettings.dots,
+                                 layout: generalSettings.layout, secondBar: generalSettings.secondBar)
     }
 
     /// Hands a settings document to the store after the saves that came before it.
@@ -503,7 +602,7 @@ final class AppCoordinator {
     /// A combo without a modifier (`KeyCombo.lacksModifier`) is never saved: it would take a key that is typed.
     func setHotkey(_ combo: KeyCombo?, for id: HotkeyID) -> HotkeySetOutcome {
         // Before the file has been read nothing changes, for the reason given at `updateGeneralSettings`.
-        guard hasLoadedSettings else { return .notSaved("Mantel is still starting. Try again in a moment.") }
+        guard hasLoadedSettings else { return .notSaved(Self.stillStarting) }
         if let combo, combo.withoutFunction.lacksModifier {
             return .notSaved(HotkeyClash.noModifier.message(actionTitle: HotkeyAction.title(for:)))
         }
@@ -514,6 +613,69 @@ final class AppCoordinator {
         return .saved
     }
 
+    private static let stillStarting = "Mantel is still starting. Try again in a moment."
+
+    /// Gives an icon a shortcut, or none when `combo` is nil, together with what it does: the action is written to `icons.json` and is
+    /// registered with the shortcut at once, so that a shortcut is never saved that does nothing. The outcome is `setHotkey`'s.
+    func setIconShortcut(_ combo: KeyCombo?, action: IconHotkeyAction, for item: ItemID) async -> HotkeySetOutcome {
+        guard hasLoadedSettings else { return .notSaved(Self.stillStarting) }
+        await writeIconPreferences { $0.hotkeyActions[item] = action }
+        return setHotkey(combo, for: .icon(item))
+    }
+
+    /// Changes what an icon's shortcut does. The shortcut stays as it is.
+    func setIconAction(_ action: IconHotkeyAction, for item: ItemID) async {
+        guard hasLoadedSettings else { return }
+        await writeIconPreferences { $0.hotkeyActions[item] = action }
+    }
+
+    /// Takes an icon's shortcut away, and with it what the shortcut did.
+    func removeIconShortcut(for item: ItemID) async {
+        guard hasLoadedSettings else { return }
+        _ = setHotkey(nil, for: .icon(item))
+        await writeIconPreferences { $0.hotkeyActions[item] = nil }
+    }
+
+    /// Gives several icons' shortcuts the action each is to do, in one write.
+    func setIconActions(_ actions: [ItemID: IconHotkeyAction]) async {
+        guard hasLoadedSettings, !actions.isEmpty else { return }
+        await writeIconPreferences { preferences in
+            for (item, action) in actions { preferences.hotkeyActions[item] = action }
+        }
+    }
+
+    /// A check of an app's saved icons took records out: the settings of the icons they were (a shortcut, the names it is found by, what the
+    /// shortcut does) go to the app's one icon when it has exactly one and none of that kind, and stay under the old ID otherwise
+    /// (`IconSettingsMover`). The settings kept under a name of Mantel's own that the version 1 file's migration took out of the layout are
+    /// among them. Returns what was moved and what was left.
+    func moveRecordSettings(ofApp bundleID: String, _ done: SectionModel.Reconciled) async -> SettingsMoved {
+        guard hasLoadedSettings else { return SettingsMoved() }
+        var bindings = hotkeyBindings
+        var preferences = iconPreferences
+        let ownNamed = IconSettingsMover.ownNamedRecords(ofApp: bundleID, preferences: preferences, bindings: bindings)
+        let dropped = done.dropped + ownNamed.filter { !done.dropped.contains($0) }
+        guard !dropped.isEmpty else { return SettingsMoved() }
+        let current = done.kept + done.added
+        let outcome = IconSettingsMover.move(dropped: dropped, current: current, preferences: &preferences, bindings: &bindings)
+        guard !outcome.moved.isEmpty else { return outcome }
+        if bindings != hotkeyBindings {
+            hotkeyBindings = bindings
+            enqueueSave(hotkeyBindings)
+        }
+        // The same moves on the file as it is when its turn comes; this registers the icons' shortcuts again.
+        await writeIconPreferences { preferences in
+            var unused = HotkeyBindings()
+            _ = IconSettingsMover.move(dropped: dropped, current: current, preferences: &preferences, bindings: &unused)
+        }
+        return outcome
+    }
+
+    /// Changes `icons.json` as it is when its turn comes, through `iconPreferencesWriter` (the one writer of the file), and registers the
+    /// icons' shortcuts again (`iconPreferencesChanged`), in the order of the writes.
+    private func writeIconPreferences(_ change: @escaping @Sendable (inout IconPreferences) -> Void) async {
+        _ = await iconPreferencesWriter.update(in: store, change, saved: { [weak self] in self?.iconPreferencesChanged($0) }).value
+    }
+
     /// Unregisters every hotkey while a shortcut is being recorded, and registers them again when it is done.
     func setHotkeysSuspended(_ suspended: Bool) {
         guard suspended != hotkeysSuspended else { return }
@@ -521,29 +683,39 @@ final class AppCoordinator {
         registerHotkeys()
     }
 
+    /// What the icons' shortcuts do changed (`icons.json` was written): the icons that have an action are registered, the others aren't.
+    func iconPreferencesChanged(_ preferences: IconPreferences) {
+        iconPreferences = preferences
+        registerHotkeys()
+    }
+
     /// Makes the registered hotkeys what `hotkeyBindings` says: everything is unregistered, and each action with a shortcut
-    /// is registered again, without Fn (which Carbon can't represent). Only the actions this version knows are registered;
-    /// the rest of the file is kept as it is.
+    /// is registered again, without Fn (which Carbon can't represent), and so is each icon's that has something to do
+    /// (`HotkeyRegistrationPlan`). Only the actions this version knows are registered; the rest of the file is kept as it is.
     private func registerHotkeys() {
         guard let center = hotkeyCenter else { return }
         center.unregisterAll()
         hotkeyFailures = [:]
         guard !hotkeysSuspended else { return }
 
-        for action in HotkeyAction.all {
-            guard let combo = hotkeyBindings.bindings[action.id]?.withoutFunction else { continue }
+        let combos = hotkeyBindings.bindings
+        for id in HotkeyRegistrationPlan.iconBindingsWithoutAction(combos, preferences: iconPreferences) {
+            Log.warning("hotkeys", "\(id.rawValue) has no action for its shortcut and isn't registered")
+        }
+        for (id, saved) in HotkeyRegistrationPlan.bindings(combos, actions: HotkeyAction.all, preferences: iconPreferences) {
+            let combo = saved.withoutFunction
             guard !combo.lacksModifier else {
                 // Only a file edited by hand can hold one: the pane doesn't save it.
-                Log.warning("hotkeys", "\(action.id.rawValue) has a shortcut without ⌘, ⌃ or ⌥ and isn't registered")
+                Log.warning("hotkeys", "\(id.rawValue) has a shortcut without ⌘, ⌃ or ⌥ and isn't registered")
                 continue
             }
             do throws(HotkeyRegistrationError) {
-                try center.register(action.id, combo) { [weak self] event in
-                    self?.hotkeyFired(action.id, event)
+                try center.register(id, combo) { [weak self] event in
+                    self?.hotkeyFired(id, event)
                 }
             } catch {
-                hotkeyFailures[action.id] = error
-                Log.warning("hotkeys", "\(action.id.rawValue) isn't registered: \(error)")
+                hotkeyFailures[id] = error
+                Log.warning("hotkeys", "\(id.rawValue) isn't registered: \(error)")
             }
         }
     }
@@ -553,6 +725,11 @@ final class AppCoordinator {
         guard event == .pressed else { return }
         if id == .openSettings {
             openSettings(nil)
+        } else if let item = id.iconItem {
+            // What the shortcut does is read when it is pressed: it may have been changed since the shortcuts were registered.
+            Task { [store] in
+                if let action = await store.load(IconPreferences.self).hotkeyActions[item] { menuBar?.iconHotkeyFired(item, action) }
+            }
         } else {
             // The menu bar isn't made until the launch gets to it: a key pressed before that does nothing.
             menuBar?.hotkeyFired(id)

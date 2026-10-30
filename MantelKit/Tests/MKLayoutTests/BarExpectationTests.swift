@@ -194,4 +194,21 @@ struct BarExpectationTests {
         expectation.learn(from: read, plan: plan(visible: [vpn, notes]))
         #expect(count(plan(visible: [weather, vpn, notes]), read, expectation) == 2, "the weather app's and the notes app's")
     }
+
+    // MARK: Forgetting
+
+    @Test func forgottenAppsAreExpectedAgain() {
+        // The weather app's icon was found with no place on the bar while the plan asked for it: it stays out of the count.
+        let read = Fixtures.inventory([item(weather, framed: false), item(notes)], bars: [bar])
+        let shown = plan(visible: [weather, notes])
+        var expectation = BarExpectation()
+        expectation.learn(from: read, plan: shown)
+        #expect(count(shown, read, expectation) == 1)
+
+        // Another engine will draw it (the switches draw what the allowlist doesn't): it is waited for again. Others stay as they were.
+        expectation.forget(apps: [weather])
+        #expect(count(shown, read, expectation) == 2)
+        expectation.forget(apps: ["com.example.nobody"])
+        #expect(count(shown, read, expectation) == 2)
+    }
 }

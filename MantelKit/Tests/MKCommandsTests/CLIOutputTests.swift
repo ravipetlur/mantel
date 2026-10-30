@@ -109,6 +109,20 @@ struct CLIOutputTests {
                 == CLIOutcome(stdout: "", stderr: "mantel: Add --yes to reset without being asked.", exitCode: 2))
     }
 
+    @Test func layoutRestoreNoAndNoTerminal() {
+        #expect(CLIOutput.restoreDeclined == CLIOutcome(stdout: "", stderr: "mantel: Not restored.", exitCode: 1))
+        #expect(CLIOutput.restoreNeedsAnswerBeforehand
+                == CLIOutcome(stdout: "", stderr: "mantel: Add --yes to restore without being asked.", exitCode: 2))
+        // Which one is printed goes by the command that was asked about.
+        #expect(CLIOutput.declined(.restoreLayout) == CLIOutput.restoreDeclined)
+        #expect(CLIOutput.needsAnswerBeforehand(.restoreLayout) == CLIOutput.restoreNeedsAnswerBeforehand)
+        #expect(CLIOutput.declined(.reset) == CLIOutput.declined)
+        #expect(CLIOutput.needsAnswerBeforehand(.reset) == CLIOutput.needsAnswerBeforehand)
+        // A no is a no for this question as for the other.
+        #expect(!CLIConfirmation.accepts(""))
+        #expect(CLIConfirmation.accepts("y"))
+    }
+
     // MARK: Usage
 
     @Test func wrongArgumentsExitWith2AndSayWhatToTypeInstead() {

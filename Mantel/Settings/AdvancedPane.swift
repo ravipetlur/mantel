@@ -28,6 +28,7 @@ struct AdvancedPane: View {
             hidingSection(hiding: hiding, engine: engine)
             noRoomSection(hiding: hiding)
             wideScreensSection(hiding: hiding)
+            IconSpacingSection(coordinator: coordinator)
         }
         .formStyle(.grouped)
         .alert(AdvancedCopy.allowClockTitle, isPresented: $isAskingToAllowClock) {

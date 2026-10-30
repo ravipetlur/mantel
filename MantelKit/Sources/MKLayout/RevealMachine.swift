@@ -22,7 +22,7 @@ public enum RevealState: String, Codable, Sendable {
 }
 
 /// Which dot was clicked: • reveals Hidden, •• reveals everything.
-public enum DotKind: Sendable, Equatable {
+public enum DotKind: Sendable, Hashable {
     case hidden
     case always
 }

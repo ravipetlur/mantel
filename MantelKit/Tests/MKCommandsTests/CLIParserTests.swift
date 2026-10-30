@@ -80,24 +80,125 @@ struct CLIParserTests {
     @Test func resetWithoutYesAsks() throws {
         let parsed = try invocation(["reset"])
         #expect(parsed.command == .reset)
-        #expect(parsed.confirmation == "Reset the menu bar? Mantel shows every icon, puts back what it changed, and restarts macOS's menu bar. [y/N] ")
+        #expect(parsed.confirmation == "Reset the menu bar? Mantel shows every icon, puts back its temporary changes, and restarts macOS's menu bar. The order of your icons stays. [y/N] ")
         #expect(try invocation(["reset", "--json"]).confirmation == parsed.confirmation)
-        // Only a reset asks.
-        for arguments in [["ping"], ["version"], ["refresh"], ["engine"], ["show", "all"], ["focus", "off"], ["settings"], ["probe", "inventory"]] {
+        // Only a reset and a restore of the order ask.
+        for arguments in [["ping"], ["icons"], ["icon", "show", "x"], ["bar", "toggle"], ["recapture"], ["version"], ["refresh"], ["engine"], ["show", "all"], ["focus", "off"], ["settings"], ["probe", "inventory"]] {
             #expect(try invocation(arguments).confirmation == nil, "\(arguments)")
         }
         #expect(usageError(["reset", "now"]) == "“reset” takes no arguments, but got “now”. Run “mantel help” for usage.")
     }
 
-    @Test func yesOnlyWithReset() {
-        let refused = "“--yes” only goes with “reset”. Run “mantel help” for usage."
+    @Test func yesWithOtherCommandsIsAnError() {
+        let refused = "“--yes” only goes with “reset” and “layout restore”. Run “mantel help” for usage."
         for arguments in [["show", "hidden", "--yes"], ["ping", "--yes"], ["--yes", "engine"], ["refresh", "--yes"], ["focus", "on", "--yes"],
-                          ["settings", "about", "--yes"], ["probe", "inventory", "--yes"], ["diagnostics", "--yes"]] {
+                          ["settings", "about", "--yes"], ["probe", "inventory", "--yes"], ["diagnostics", "--yes"],
+                          ["icons", "--yes"], ["icon", "show", "Notes", "--yes"], ["bar", "open", "--yes"], ["recapture", "--yes"]] {
             #expect(usageError(arguments) == refused, "\(arguments)")
         }
         // A command that is wrong in its own right is told so first.
         #expect(usageError(["show", "--yes"]) == "“show” needs one of: hidden, all, none. Run “mantel help” for usage.")
         #expect(usageError(["bogus", "--yes"]) == "“bogus” isn't a command. Run “mantel help” for usage.")
+    }
+
+    @Test func iconsWithAndWithoutSection() throws {
+        #expect(try invocation(["icons"]).command == .icons(nil))
+        #expect(try invocation(["icons", "--json"]).json)
+        #expect(try invocation(["--json", "icons"]).command == .icons(nil))
+        #expect(try invocation(["icons", "--section", "shown"]).command == .icons(.shown))
+        #expect(try invocation(["icons", "--section", "hidden"]).command == .icons(.hidden))
+        #expect(try invocation(["icons", "--section", "always"]).command == .icons(.always))
+        #expect(try invocation(["icons", "--section", "grouped", "--json"]).command == .icons(.grouped))
+        let needs = "“--section” needs one of: shown, hidden, always, grouped. Run “mantel help” for usage."
+        #expect(usageError(["icons", "--section"]) == needs)
+        #expect(usageError(["icons", "--section", "all"]) == needs)
+        #expect(usageError(["icons", "--section", "shown", "hidden"]) == needs)
+        #expect(usageError(["icons", "shown"])
+                == "“icons” takes only “--section” and then one of: shown, hidden, always, grouped. It got “shown”. Run “mantel help” for usage.")
+    }
+
+    @Test func iconShowAndClick() throws {
+        #expect(try invocation(["icon", "show", "Notes"]).command == .icon(.show, query: "Notes", kind: .left))
+        #expect(try invocation(["icon", "click", "Notes"]).command == .icon(.click, query: "Notes", kind: .left))
+        // The name is one argument: the shell keeps a quoted name together.
+        #expect(try invocation(["icon", "click", "Wi-Fi and more"]).command == .icon(.click, query: "Wi-Fi and more", kind: .left))
+        #expect(try invocation(["icon", "show", "com.example.notes::main", "--json"]).json)
+        let needs = "“icon” needs show or click, then an icon's ID or name. Run “mantel help” for usage."
+        for arguments in [["icon"], ["icon", "show"], ["icon", "click"], ["icon", "press", "Notes"], ["icon", "show", "Wi-Fi", "and", "more"],
+                          ["icon", "Notes"], ["icon", "show", " "]] {
+            #expect(usageError(arguments) == needs, "\(arguments)")
+        }
+    }
+
+    @Test func clickKinds() throws {
+        #expect(try invocation(["icon", "click", "Notes", "--right"]).command == .icon(.click, query: "Notes", kind: .right))
+        #expect(try invocation(["icon", "click", "Notes", "--option"]).command == .icon(.click, query: "Notes", kind: .option))
+        // The flag can stand anywhere, as `--json` can.
+        #expect(try invocation(["--right", "icon", "click", "Notes"]).command == .icon(.click, query: "Notes", kind: .right))
+        #expect(try invocation(["icon", "--option", "click", "Notes", "--json"]).command == .icon(.click, query: "Notes", kind: .option))
+    }
+
+    @Test func rightAndOptionTogetherIsAnError() {
+        let refused = "“--right” and “--option” only go with “icon click”, one of them. Run “mantel help” for usage."
+        #expect(usageError(["icon", "click", "Notes", "--right", "--option"]) == refused)
+        #expect(usageError(["icon", "click", "Notes", "--option", "--right"]) == refused)
+    }
+
+    @Test func kindOnlyWithClick() {
+        let refused = "“--right” and “--option” only go with “icon click”, one of them. Run “mantel help” for usage."
+        for arguments in [["icon", "show", "Notes", "--right"], ["icon", "show", "Notes", "--option"], ["icons", "--right"], ["ping", "--option"],
+                          ["bar", "open", "--right"], ["show", "hidden", "--option"], ["recapture", "--right"]] {
+            #expect(usageError(arguments) == refused, "\(arguments)")
+        }
+        // A command that is wrong in its own right is told so first.
+        #expect(usageError(["icon", "--right"]) == "“icon” needs show or click, then an icon's ID or name. Run “mantel help” for usage.")
+    }
+
+    @Test func barChanges() throws {
+        #expect(try invocation(["bar", "open"]).command == .bar(.open, all: false))
+        #expect(try invocation(["bar", "close"]).command == .bar(.close, all: false))
+        #expect(try invocation(["bar", "toggle"]).command == .bar(.toggle, all: false))
+        #expect(try invocation(["bar", "open", "--all"]).command == .bar(.open, all: true))
+        #expect(try invocation(["bar", "--all", "toggle", "--json"]).command == .bar(.toggle, all: true))
+        let needs = "“bar” needs one of: open, close, toggle. Run “mantel help” for usage."
+        for arguments in [["bar"], ["bar", "show"], ["bar", "open", "close"], ["bar", "--all"]] {
+            #expect(usageError(arguments) == needs, "\(arguments)")
+        }
+    }
+
+    @Test func allOnlyWithBar() {
+        let refused = "“--all” only goes with “bar”. Run “mantel help” for usage."
+        for arguments in [["show", "all", "--all"], ["icons", "--all"], ["icon", "show", "Notes", "--all"], ["ping", "--all"],
+                          ["recapture", "--all"], ["layout", "restore", "--all"], ["reset", "--all", "--yes"]] {
+            #expect(usageError(arguments) == refused, "\(arguments)")
+        }
+    }
+
+    @Test func recaptureTakesNoArguments() throws {
+        #expect(try invocation(["recapture"]).command == .recapture)
+        #expect(try invocation(["recapture"]).confirmation == nil)
+        #expect(usageError(["recapture", "now"]) == "“recapture” takes no arguments, but got “now”. Run “mantel help” for usage.")
+    }
+
+    @Test func layoutRestoreAsks() throws {
+        let parsed = try invocation(["layout", "restore"])
+        #expect(parsed.command == .restoreLayout)
+        #expect(parsed.confirmation == "Put the menu bar icons back in the order they had before Mantel changed it? [y/N] ")
+        #expect(parsed.confirmation == CLIConfirmation.layoutRestoreQuestion)
+        #expect(try invocation(["layout", "restore", "--json"]).confirmation == parsed.confirmation)
+        let needs = "“layout” needs “restore”. Run “mantel help” for usage."
+        for arguments in [["layout"], ["layout", "undo"], ["layout", "restore", "now"], ["layout", "--yes"]] {
+            #expect(usageError(arguments) == needs, "\(arguments)")
+        }
+    }
+
+    @Test func layoutRestoreYes() throws {
+        for arguments in [["layout", "restore", "--yes"], ["--yes", "layout", "restore"], ["layout", "--yes", "restore"]] {
+            let parsed = try invocation(arguments)
+            #expect(parsed.command == .restoreLayout)
+            #expect(parsed.confirmation == nil, "\(arguments)")
+        }
+        #expect(try invocation(["layout", "restore", "--yes", "--json"]).json)
     }
 
     @Test func engineTakesNoArguments() throws {
@@ -127,6 +228,29 @@ struct CLIParserTests {
                 == "The option “--compare” is given twice. Run “mantel help” for usage.")
         #expect(usageError(["probe", "approvals-flip", "--flag-path"])
                 == "The option “--flag-path” needs a value. Run “mantel help” for usage.")
+    }
+
+    @Test func theStepsOfLayoutOrderAreSwitches() throws {
+        // The lines the platform check runs: a switch takes no value, so the option after it is read as an option.
+        #expect(try invocation(["probe", "layout-order", "--visibility"]).command == .probe(.layoutOrder, options: ["visibility": "true"]))
+        #expect(try invocation(["probe", "layout-order", "--relaunch-item", "--extra-count", "2"]).command
+                == .probe(.layoutOrder, options: ["relaunch-item": "true", "extra-count": "2"]))
+        for step in ["dots", "dots-keep", "dots-restore"] {
+            #expect(try invocation(["probe", "layout-order", "--\(step)"]).command == .probe(.layoutOrder, options: [step: "true"]))
+        }
+        #expect(try invocation(["probe", "layout-order", "--runs", "3", "--item", "extra.1"]).command
+                == .probe(.layoutOrder, options: ["runs": "3", "item": "extra.1"]))
+        #expect(try invocation(["probe", "click-path", "--item", "extra.1", "--kind", "right", "--route", "post", "--runs", "3"]).command
+                == .probe(.clickPath, options: ["item": "extra.1", "kind": "right", "route": "post", "runs": "3"]))
+        #expect(try invocation(["probe", "click-path", "--allow-any", "--item", "system:wifi", "--kind", "left", "--route", "post"]).command
+                == .probe(.clickPath, options: ["allow-any": "true", "item": "system:wifi", "kind": "left", "route": "post"]))
+        #expect(usageError(["probe", "layout-order", "--dots", "--dots"])
+                == "The option “--dots” is given twice. Run “mantel help” for usage.")
+        // A value that is not a switch's still needs one.
+        #expect(usageError(["probe", "layout-order", "--extra-count"]) == "The option “--extra-count” needs a value. Run “mantel help” for usage.")
+        for word in ["click-path", "layout-order", "--dots-keep", "--dots-restore", "--relaunch-item", "--visibility"] {
+            #expect(CLIParser.usage.contains(word), "usage mentions \(word)")
+        }
     }
 
     @Test func aMatchPathWithStarsAndSlashesIsOneValue() throws {
@@ -232,7 +356,8 @@ struct CLIParserTests {
     @Test func usageNamesEveryCommandAndExitCode() {
         let usage = CLIParser.usage
         for word in ["mantel ping", "mantel version", "mantel diagnostics", "mantel settings", "mantel probe",
-                     "mantel show hidden|all|none", "mantel focus on|off|toggle", "mantel refresh", "mantel reset [--yes]", "mantel engine",
+                     "mantel show hidden|all|none", "mantel focus on|off|toggle", "mantel refresh", "mantel reset [--yes]", "mantel engine", "mantel icons", "mantel icon show", "mantel icon click",
+                     "mantel bar open|close|toggle", "mantel recapture", "mantel layout restore [--yes]",
                      "mantel help", "--json", "--allow-any"] {
             #expect(usage.contains(word), "usage mentions \(word)")
         }

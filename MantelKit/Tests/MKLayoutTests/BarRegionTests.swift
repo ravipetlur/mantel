@@ -57,6 +57,19 @@ struct BarRegionTests {
         #expect(OverflowInputs.overflowedApps(in: result) == ["com.example.a", "com.example.b", "com.example.c", "com.example.d", "com.example.e"])
     }
 
+    @Test func aReadMarkedAsOutOfTheWayKeepsWhatItSaysOfItsApps() {
+        // The read is made again with the icons that are out of the way marked, and what the matcher said of the apps goes with it: which
+        // processes listed each, and which were read only in part (`WholeReads` judges the read by them).
+        let read = Inventory(capturedAt: Fixtures.date(0), bars: [notched], items: [item("com.example.a", strays: ["notched": place(484)])],
+                             chevrons: [:], reach: [], problems: [], incompleteApps: ["com.example.b"],
+                             appProcesses: ["com.example.a": [41], "com.example.b": [42, 43]], agentReadCut: true)
+        let result = marked(read)
+        #expect(overflowed("com.example.a", in: result) == ["notched"], "the read was made again")
+        #expect(result.incompleteApps == ["com.example.b"])
+        #expect(result.appProcesses == ["com.example.a": [41], "com.example.b": [42, 43]])
+        #expect(result.agentReadCut)
+    }
+
     @Test func theEdgeOfTheNotchIsWhereTheRightAreaStarts() {
         // Two points of give: an icon that starts at the edge is in the area, one that starts a point or so inside the notch is a rounding.
         #expect(BarRegion.drawnFrom(bar: notched, menuFrames: []) == 828)

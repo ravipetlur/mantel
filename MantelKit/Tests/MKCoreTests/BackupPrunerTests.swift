@@ -116,4 +116,67 @@ struct BackupPrunerTests {
         let left = try names()
         #expect(!left.contains(all[1]) && !left.contains(all[3]) && !left.contains(all[4]), "the deletions around the failed one were made")
     }
+
+    // MARK: Names in UTC
+
+    @Test func theStampIsUTCWhateverTheLocalTimeIs() {
+        // 2026-11-01 05:30:00 UTC and 06:15:00 UTC: in New York the first is 1:30 EDT and the second 1:15 EST, because the clocks went
+        // back in between.
+        #expect(BackupPruner.stamp(for: Date(timeIntervalSince1970: 1_793_511_000)) == "20261101-053000Z")
+        #expect(BackupPruner.stamp(for: Date(timeIntervalSince1970: 1_793_513_700)) == "20261101-061500Z")
+        #expect(BackupPruner.stamp(for: Date(timeIntervalSince1970: 0)) == "19700101-000000Z")
+    }
+
+    @Test func utcNamesSortAcrossDSTChange() throws {
+        // Named by the local time, the copy made later (1:15 EST) would sort before the earlier one (1:30 EDT) and be pruned as the
+        // older. Named in UTC, they are in the order they were made.
+        let earlier = "snap-\(BackupPruner.stamp(for: Date(timeIntervalSince1970: 1_793_511_000))).plist"
+        let later = "snap-\(BackupPruner.stamp(for: Date(timeIntervalSince1970: 1_793_513_700))).plist"
+        #expect(earlier == "snap-20261101-053000Z.plist" && later == "snap-20261101-061500Z.plist")
+        try plant([earlier, later])
+
+        let newYork = try #require(TimeZone(identifier: "America/New_York"))
+        try BackupPruner.prune(in: folder.url, stem: "snap", pathExtension: "plist", keepOldest: 0, keepNewest: 1, localTimeZone: newYork)
+        #expect(try names() == [later], "the copy made later is the one kept")
+    }
+
+    @Test func oldAndNewNamesMix() throws {
+        // An old copy is named by the local time of the time it was made, a new one in UTC. In New York, 23:00 on 31 October is 03:00 UTC
+        // on 1 November: later than a new copy made at 02:00 UTC, though its name sorts before it.
+        let oldLocal = "snap-20261031-230000.plist"
+        let newUTC = "snap-20261101-020000Z.plist"
+        let muchOlder = "snap-20260101-120000.plist"
+        let muchNewer = "snap-20261201-120000Z.plist"
+        try plant([oldLocal, newUTC, muchOlder, muchNewer])
+
+        let newYork = try #require(TimeZone(identifier: "America/New_York"))
+        try BackupPruner.prune(in: folder.url, stem: "snap", pathExtension: "plist", keepOldest: 1, keepNewest: 2, localTimeZone: newYork)
+        // Oldest to newest: muchOlder, newUTC (02:00Z), oldLocal (03:00Z), muchNewer. The oldest and the two newest stay.
+        #expect(try names() == [muchOlder, oldLocal, muchNewer].sorted())
+
+        // Read as UTC, the old name is the earlier one, and it is newUTC that goes.
+        try plant([newUTC])
+        try BackupPruner.prune(in: folder.url, stem: "snap", pathExtension: "plist", keepOldest: 1, keepNewest: 2,
+                               localTimeZone: try #require(TimeZone(identifier: "UTC")))
+        #expect(try names() == [muchOlder, newUTC, muchNewer].sorted(), "the old names are read in the time zone they were written in")
+    }
+
+    @Test func numberedCopiesOfTheSameSecondKeepTheirOrderInUTC() throws {
+        let first = "snap-20261101-053000Z.plist"
+        let second = "snap-20261101-053000Z-2.plist"
+        let third = "snap-20261101-053000Z-10.plist"
+        try plant([third, first, second])
+        try BackupPruner.prune(in: folder.url, stem: "snap", pathExtension: "plist", keepOldest: 0, keepNewest: 2)
+        #expect(try names() == [second, third].sorted())
+    }
+
+    @Test func aTimeThatIsNotATimeIsLeftAlone() throws {
+        // Digits in the right places, but no such month, day or minute: not a copy this pruner made, so it isn't counted or deleted.
+        let impossible = ["snap-20261340-120000.plist", "snap-20261101-126100Z.plist", "snap-20261101-250000Z.plist",
+                          "snap-20260230-120000.plist"]
+        let mine = copies(4)
+        try plant(impossible + mine)
+        try BackupPruner.prune(in: folder.url, stem: "snap", pathExtension: "plist", keepOldest: 0, keepNewest: 1)
+        #expect(try names() == (impossible + [mine[3]]).sorted())
+    }
 }

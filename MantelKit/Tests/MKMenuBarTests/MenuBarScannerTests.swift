@@ -65,6 +65,26 @@ private final class ReadCounter: Sendable {
     var value: Int { count.withLock { $0 } }
 }
 
+/// Notes which apps were asked, and answers as the fixture does unless an outcome was given for the app.
+private final class RecordingExtrasReader: AppExtrasReading {
+    private let base: AppExtrasReader
+    private let outcomes: [String: ExtrasOutcome]
+    private let asked = Mutex<[String]>([])
+
+    init(_ fixture: Fixture, outcomes: [String: ExtrasOutcome] = [:]) {
+        base = AppExtrasReader(ax: fixture.ax)
+        self.outcomes = outcomes
+    }
+
+    var askedApps: [String] { asked.withLock { $0 } }
+
+    func read(_ app: RunningApp) async -> ExtrasOutcome {
+        let bundleID = app.bundleID ?? ""
+        asked.withLock { $0.append(bundleID) }
+        return outcomes[bundleID] ?? base.read(app)
+    }
+}
+
 private func makeScanner(_ fixture: Fixture, running: (@Sendable () -> [RunningApp])? = nil, clock: any Clock = FakeClock(),
                          trusted: @escaping @Sendable () -> Bool = { true },
                          latency: [String: Duration]? = nil) -> MenuBarScanner {
@@ -125,6 +145,22 @@ struct MenuBarScannerTests {
                                                              InventoryFixtures.sync, InventoryFixtures.vpn, InventoryFixtures.weather].sorted())
         #expect(inventory.reach.allSatisfy { $0.status == .fine })
         #expect(inventory.items(ofApp: InventoryFixtures.ownBundleID).allSatisfy { $0.isMantel })
+    }
+
+    @Test func namesSurviveAnIdentifierTimeout() async {
+        // The slots carry no names, so the weather app's items are told by what the app itself calls them. One scan in which it is slow to
+        // say them leaves them what they were: not items told by their place instead, which are other items to the layout and to the pictures.
+        let fixture = InventoryFixtures.desk(.init(stripThirdPartyNames: true))
+        let scanner = makeScanner(fixture)
+        let named = await scanner.scan().items(ofApp: InventoryFixtures.weather).map(\.id)
+        #expect(named == [ItemID(bundleID: InventoryFixtures.weather, key: .identifier("weather.temp")),
+                          ItemID(bundleID: InventoryFixtures.weather, key: .identifier("weather.alerts"))])
+
+        let nodes = Set(fixture.extrasNodes(of: InventoryFixtures.weather))
+        fixture.ax.setOverride { id, name in nodes.contains(id) && name == AXName.identifier ? .failure(.timeout) : nil }
+        let slow = await scanner.scan()
+        #expect(slow.items(ofApp: InventoryFixtures.weather).map(\.id) == named)
+        #expect(slow.reach.first { $0.bundleID == InventoryFixtures.weather }?.status == .slow, "it is slow all the same")
     }
 
     // MARK: Which apps are asked
@@ -297,6 +333,57 @@ struct MenuBarScannerTests {
         #expect(inventory.items.isEmpty)
     }
 
+    @Test func oneAppRefusingIsNotMantelUngranted() async {
+        // Apple's authentication agent answers every read with "API disabled", whoever asks. Mantel has the grant: that app refuses.
+        let fixture = InventoryFixtures.desk()
+        let refuser = RunningApp.fake(2007, "com.example.refuser", "Refuser")
+        let root = fixture.ax.root(ofApp: refuser.pid)
+        fixture.ax.failReads(on: root, with: .notTrusted)
+        let all = fixture.running + [refuser]
+        let clock = FakeClock()
+        let scanner = makeScanner(fixture, running: { all }, clock: clock)
+        func reach(_ inventory: Inventory) -> AppReach? { inventory.reach.first { $0.bundleID == "com.example.refuser" } }
+
+        let first = await scanner.scan()
+        #expect(first.problems.isEmpty, "no problem is Mantel's")
+        #expect(reach(first)?.status == .refused)
+        #expect(first.unansweredApps.contains("com.example.refuser"), "what it has or hasn't says nothing")
+        #expect(first.items.count == 17, "the other apps are read")
+        let reads = fixture.ax.attributeReads(on: root)
+        #expect(reads > 0)
+
+        // Left alone as an app with no items is, and still said to refuse while it is.
+        let second = await scanner.scan()
+        #expect(reach(second)?.status == .refused)
+        #expect(reach(second)?.readMs == 0)
+        #expect(fixture.ax.attributeReads(on: root) == reads, "not asked again")
+        clock.advance(by: .seconds(59))
+        #expect(reach(await scanner.scan())?.status == .refused)
+        #expect(fixture.ax.attributeReads(on: root) == reads, "not at 59 seconds")
+        clock.advance(by: .seconds(2))
+        let third = await scanner.scan()
+        #expect(fixture.ax.attributeReads(on: root) > reads, "asked again after a minute")
+        #expect(third.problems.isEmpty)
+    }
+
+    @Test func untrustedStillReportsNotGranted() async {
+        // The grant is checked before the apps are asked, and a read that says no after the grant was taken away is the grant.
+        let fixture = InventoryFixtures.desk()
+        let refuser = RunningApp.fake(2007, "com.example.refuser", "Refuser")
+        fixture.ax.failReads(on: fixture.ax.root(ofApp: refuser.pid), with: .notTrusted)
+        let all = fixture.running + [refuser]
+
+        let gone = await makeScanner(fixture, running: { all }, trusted: { false }).scan()
+        #expect(gone.problems == [.accessibilityNotGranted])
+        #expect(gone.reach.isEmpty)
+
+        let asked = Mutex(0)
+        let revoked = makeScanner(fixture, running: { all }, trusted: { asked.withLock { $0 += 1; return $0 == 1 } })
+        let during = await revoked.scan()
+        #expect(during.problems == [.accessibilityNotGranted], "taken away while the apps were asked")
+        #expect(!during.reach.contains { $0.status == .refused })
+    }
+
     // MARK: Bars
 
     @Test func barGeometryComesFromAgentWindow() async throws {
@@ -362,14 +449,19 @@ struct MenuBarScannerTests {
     }
 
     @Test func deficientFirstWindowIsNotUsed() async {
-        // The first window of each display has no names on its third-party slots, and the apps' own lists give no identifiers either,
-        // so what the items are called comes from the slots. The scan uses the window that has the names.
+        // The first window of each display has no names on its third-party slots, and the apps' own lists give no identifiers either.
+        // The scan uses the window that has the names (the items are `#n` whichever it is: a slot's name is no item's).
         let full = await makeScanner(InventoryFixtures.desk(.init(windowsWithoutNames: [], appsReportIdentifiers: false))).scan()
         let deficient = InventoryFixtures.desk(.init(windowsWithoutNames: [0], appsReportIdentifiers: false))
         let result = await makeScanner(deficient).scan()
-        #expect(result.items.contains { $0.id.string == "com.example.weather::weather.temp" })
+        #expect(slotNames(of: result).contains("weather.temp"))
         #expect(result == full)
         #expect(deficient.slotReads(ofWindow: deficient.windows[0][1]) > 0, "it read on to the second window")
+    }
+
+    /// The names the slots of the bars carry in a read: what the window that was used has. (An item's ID doesn't come from them.)
+    private func slotNames(of inventory: Inventory) -> Set<String> {
+        Set(inventory.barSlots.values.joined().compactMap(\.name))
     }
 
     /// How many times the slots of each of a display's windows have been read, for the windows in the order MenuBarAgent lists them.
@@ -428,7 +520,7 @@ struct MenuBarScannerTests {
         let before = slotReads(fixture) + slotReads(fixture, display: 1)
         let appsChanged = await scanner.scan(reasons: [.appsChanged, .poll])
         #expect(zip(before, slotReads(fixture) + slotReads(fixture, display: 1)).allSatisfy { $1 > $0 }, "every window was read")
-        #expect(appsChanged.items.contains { $0.id.string == "com.example.weather::weather.temp" })
+        #expect(slotNames(of: appsChanged).contains("weather.temp"))
 
         // Not a comparison: two scans in a row that find a window's slots moved are no doubt for this reason.
         let slot = try #require(try fixture.ax.children(of: fixture.ax.ref(fixture.windows[0][1])).first.map(fixture.ax.id(of:)))
@@ -460,7 +552,7 @@ struct MenuBarScannerTests {
             while found == nil, polls < windows - 1 {
                 polls += 1
                 let inventory = await scanner.scan(reasons: [.poll])
-                if inventory.items.contains(where: { $0.id.string == "com.example.weather::weather.temp" }) { found = inventory }
+                if slotNames(of: inventory).contains("weather.temp") { found = inventory }
             }
             #expect(found != nil, "\(windows) windows, names in \(gaining): not found in \(windows - 1) polls")
             #expect(found?.items.map(\.id) == full.items.map(\.id), "\(windows) windows, names in \(gaining)")
@@ -475,7 +567,7 @@ struct MenuBarScannerTests {
         let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 4, windowsWithoutNames: [0, 1], appsReportIdentifiers: false))
         let first = await makeScanner(fixture).scan(reasons: [.poll])
         #expect((slotReads(fixture) + slotReads(fixture, display: 1)).allSatisfy { $0 > 0 })
-        #expect(first.items.contains { $0.id.string == "com.example.weather::weather.temp" })
+        #expect(slotNames(of: first).contains("weather.temp"))
 
         // A display that wasn't there at the last scan has nothing remembered either. Its windows are all read, and the main
         // display's are not.
@@ -525,10 +617,10 @@ struct MenuBarScannerTests {
                                      layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
                                      isTrusted: { true }, clock: FakeClock())
         let first = await scanner.scan(reasons: [.refresh])
-        #expect(first.items.contains { $0.id.string == "com.example.weather::weather.temp" }, "the fifth window was the best")
+        #expect(slotNames(of: first).contains("weather.temp"), "the fifth window was the best")
         phase.set(false)
         let second = await scanner.scan(reasons: [.poll])
-        #expect(second.items.contains { $0.id.string == "com.example.weather::weather.temp" })
+        #expect(slotNames(of: second).contains("weather.temp"))
         #expect(slotReads(after)[0] > 0, "the first window of the display was read in its place")
     }
 
@@ -566,7 +658,8 @@ struct MenuBarScannerTests {
 
         // It runs but has no window.
         let silent = InventoryFixtures.desk(.init(windowsPerDisplay: 0))
-        let quiet = makeScanner(silent)
+        // The read is asked for again a few times before it is taken as it is (`EmptyReadRetry`), each after a wait: a clock that moves by itself.
+        let quiet = makeScanner(silent, clock: SteppingClock())
         let noWindows = await quiet.scan()
         #expect(noWindows.problems == [.agentHasNoWindows])
         #expect(!noWindows.agentAnswered)
@@ -579,7 +672,7 @@ struct MenuBarScannerTests {
         #expect(back.agentAnswered)
         #expect(await scanner.agentFailureStreak == 0)
         #expect(InventoryProblem.agentNotRunning.message == "MenuBarAgent isn't running.")
-        #expect(InventoryProblem.accessibilityNotGranted.message == "Accessibility isn't granted to Mantel.")
+        #expect(InventoryProblem.accessibilityNotGranted.message == "Device control and data access isn't granted to Mantel.")
         #expect(InventoryProblem.ambiguousSpace.message
             == "Mantel couldn't tell which copy of the menu bar is current, so it used the one with the most names. If icons look wrong, choose Refresh Menu Bar.")
     }
@@ -712,12 +805,13 @@ struct MenuBarScannerTests {
         let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                      runningApps: { apps }, layout: { layout },
                                      ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
-        let first = Task { await scanner.scan() }
+        let first = Task { await scanner.scan(reasons: [.poll]) }
         let begun = await waitUntil { counter.value > 0 }
         #expect(begun, "the first scan began to read")
-        let second = Task { await scanner.scan() }
-        let third = Task { await scanner.scan(reasons: [.refresh]) }
-        try await Task.sleep(for: .milliseconds(100))  // long enough for them to have reached the scanner
+        // Neither asks for more than the quiet read that is under way covers.
+        let second = Task { await scanner.scan(reasons: [.poll]) }
+        let third = Task { await scanner.scan(reasons: [.trial]) }
+        #expect(await reaches(scanner, waiting: [.poll, .trial]), "they reached the scanner")
         #expect(counter.value == 6, "six apps, asked once")
         gate.open()
         let results = await [first.value, second.value, third.value]
@@ -727,6 +821,166 @@ struct MenuBarScannerTests {
         // Once it is over, the next scan is a scan of its own.
         _ = await scanner.scan()
         #expect(counter.value == 12)
+    }
+
+    /// Returns once the scanner has been asked, while a scan runs, for all of these reasons.
+    private func reaches(_ scanner: MenuBarScanner, waiting reasons: Set<ScanScheduler.Reason>) async -> Bool {
+        await withinTimeLimit(.seconds(5)) {
+            while await scanner.waitingReasons != reasons, !Task.isCancelled { await Task.yield() }
+            return true
+        } ?? false
+    }
+
+    /// Returns once one more scan waits for the one under way.
+    private func followUpWaits(_ scanner: MenuBarScanner) async -> Bool {
+        await withinTimeLimit(.seconds(5)) {
+            while await scanner.hasFollowUp == false, !Task.isCancelled { await Task.yield() }
+            return true
+        } ?? false
+    }
+
+    @Test func overlappingScanKeepsBothReasons() async throws {
+        // A scan under way, and calls that come while it runs: one for apps that came or went, which wants every window read (the quiet read
+        // that is under way reads two), and one for a change of displays, which wants every window read and compared. The reasons of
+        // both are kept, and the one more scan has them, and covers the most either asked; a call for a refresh that comes after joins it.
+        let fixture = InventoryFixtures.desk()
+        let gate = Gate()
+        let counter = ReadCounter()
+        let apps = fixture.running
+        let layout = fixture.layout
+        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
+                                     runningApps: { apps }, layout: { layout },
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+        let first = Task { await scanner.scan(reasons: [.poll]) }
+        #expect(await waitUntil { counter.value > 0 }, "the first scan began to read")
+
+        let second = Task { await scanner.scan(reasons: [.appsChanged]) }
+        #expect(await reaches(scanner, waiting: [.appsChanged]))
+        let third = Task { await scanner.scan(reasons: [.displaysChanged]) }
+        #expect(await reaches(scanner, waiting: [.appsChanged, .displaysChanged]), "both are kept")
+        let fourth = Task { await scanner.scan(reasons: [.refresh]) }
+        #expect(await reaches(scanner, waiting: [.appsChanged, .displaysChanged, .refresh]))
+        #expect(counter.value == 6, "nothing is read again while the first scan is under way")
+
+        gate.open()
+        _ = await [first.value, second.value, third.value, fourth.value]
+
+        #expect(counter.value == 12, "one scan more, for the three of them")
+        #expect(await scanner.scanReasons == [[.poll], [.appsChanged, .displaysChanged, .refresh]])
+        #expect(await scanner.scanCoverages == ["steady", "thorough"], "the one more reads what the most demanding of them asked")
+        #expect(await scanner.waitingReasons.isEmpty, "and nothing is left over")
+        // Once it is over, the next scan is a scan of its own.
+        _ = await scanner.scan(reasons: [.poll])
+        #expect(counter.value == 18)
+        #expect(await scanner.scanReasons.last == [.poll])
+    }
+
+    @Test func appsChangedDuringAQuietScanIsReadAgainInEveryWindow() async throws {
+        // The quiet read that is under way reads two windows of each display. A call for apps that came or went wants every window read (to
+        // find the one that has gained or lost the names of the slots), which that read doesn't cover: it is read again, with the reason.
+        let fixture = InventoryFixtures.desk()
+        let gate = Gate()
+        let counter = ReadCounter()
+        let apps = fixture.running
+        let layout = fixture.layout
+        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
+                                     runningApps: { apps }, layout: { layout },
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+        let first = Task { await scanner.scan(reasons: [.poll]) }
+        #expect(await waitUntil { counter.value > 0 })
+        let second = Task { await scanner.scan(reasons: [.appsChanged]) }
+        #expect(await followUpWaits(scanner), "one more scan waits for the quiet one")
+        #expect(counter.value == 6)
+
+        gate.open()
+        _ = await [first.value, second.value]
+
+        #expect(counter.value == 12)
+        #expect(await scanner.scanReasons == [[.poll], [.appsChanged]])
+        #expect(await scanner.scanCoverages == ["steady", "allWindows"])
+    }
+
+    @Test func theAppsThatDontVoteOfACallThatJoinsAScanReachTheOneMore() async throws {
+        // The apps' own frames are on the second display's bar, and the scan under way (asked with no apps left out) says so. A call that
+        // comes while it runs, for apps that came or went, was made by a session that has just drawn the apps again: they don't vote, and the
+        // one more scan, which is the answer to that call, doesn't count them.
+        let fixture = InventoryFixtures.desk(.init(listingDisplay: 1))
+        let gate = Gate()
+        let counter = ReadCounter()
+        let apps = fixture.running
+        let layout = fixture.layout
+        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
+                                     runningApps: { apps }, layout: { layout },
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+        let first = Task { await scanner.scan(reasons: [.poll]) }
+        #expect(await waitUntil { counter.value > 0 })
+        let second = Task { await scanner.scan(reasons: [.appsChanged], notVoting: Set(apps.compactMap(\.bundleID))) }
+        #expect(await followUpWaits(scanner), "one more scan waits for the one under way")
+
+        gate.open()
+        let (under, more) = await (first.value, second.value)
+
+        #expect(under.activeDisplay == layout.displays[1].uuid, "the scan under way counted the apps' frames")
+        #expect(more.activeDisplay == nil, "the one more scan was asked with every app left out of the vote")
+    }
+
+    @Test func whatTheScanUnderWayCoversIsNotReadAgain() async throws {
+        // A call that asks for no more than the scan under way reads (for the same, for less) is given its result, and its reasons are kept,
+        // in case one more comes.
+        let cases: [(running: Set<ScanScheduler.Reason>, newcomers: [Set<ScanScheduler.Reason>])] = [
+            ([.appsChanged], [[.appsChanged], [.poll]]),
+            ([.displaysChanged], [[.appsChanged], [.displaysChanged], [.refresh], [.poll]]),
+            ([.refresh], [[.appsChanged], [.displaysChanged], []]),
+            ([.poll], [[.poll], [.trial], [.reveal]]),
+        ]
+        for (running, newcomers) in cases {
+            let fixture = InventoryFixtures.desk()
+            let gate = Gate()
+            let counter = ReadCounter()
+            let apps = fixture.running
+            let layout = fixture.layout
+            let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
+                                         runningApps: { apps }, layout: { layout },
+                                         ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+            let first = Task { await scanner.scan(reasons: running) }
+            #expect(await waitUntil { counter.value > 0 })
+            let calls = newcomers.map { reasons in Task { await scanner.scan(reasons: reasons) } }
+            #expect(await reaches(scanner, waiting: newcomers.reduce(into: Set<ScanScheduler.Reason>()) { $0.formUnion($1) }), "\(running)")
+            #expect(await scanner.hasFollowUp == false, "\(running)")
+
+            gate.open()
+            var results = [await first.value]
+            for call in calls { results.append(await call.value) }
+
+            #expect(results.allSatisfy { $0 == results[0] }, "\(running)")
+            #expect(counter.value == 6, "one scan: \(running)")
+            #expect(await scanner.scanReasons == [running], "\(running)")
+        }
+    }
+
+    @Test func aThoroughCallThatComesWhileAScanRunsIsReadAgain() async throws {
+        // A call that asks for a thorough read (no reason given, a change of displays or a refresh) while a quiet read is under way isn't
+        // covered by it: it is read again, and the answer it is given is of the second read.
+        let fixture = InventoryFixtures.desk()
+        let gate = Gate()
+        let counter = ReadCounter()
+        let apps = fixture.running
+        let layout = fixture.layout
+        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
+                                     runningApps: { apps }, layout: { layout },
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+        let first = Task { await scanner.scan(reasons: [.poll]) }
+        #expect(await waitUntil { counter.value > 0 })
+        let second = Task { await scanner.scan() }
+        #expect(await followUpWaits(scanner), "one more scan waits for the first")
+
+        gate.open()
+        _ = await [first.value, second.value]
+
+        #expect(counter.value == 12)
+        #expect(await scanner.scanReasons.count == 2)
+        #expect(await scanner.scanReasons.last == [], "a call that gave no reason is a thorough one: the one more is too")
+        #expect(await scanner.scanCoverages == ["steady", "thorough"])
     }
 
     @Test func aNewAppWithNoExtrasIsRecheckedAfterTwoSeconds() async {
@@ -1010,6 +1264,78 @@ struct MenuBarScannerTests {
         #expect(await scanner.appMenuFrames(pid: 99_999).isEmpty, "an app with no menu bar")
         fixture.ax.failReads(on: root, with: .timeout)
         #expect(await scanner.appMenuFrames(pid: pid).isEmpty, "an app that doesn't answer")
+    }
+
+    // MARK: The frames of some apps
+
+    private func scanner(_ fixture: Fixture, reader: any AppExtrasReading, trusted: @escaping @Sendable () -> Bool = { true }) -> MenuBarScanner {
+        let apps = fixture.running
+        let layout = fixture.layout
+        return MenuBarScanner(ax: fixture.ax, extrasReader: reader, runningApps: { apps }, layout: { layout },
+                              ownBundleID: InventoryFixtures.ownBundleID, isTrusted: trusted, clock: FakeClock())
+    }
+
+    @Test func theFramesOfTheAppsAskedAreTheirItemsFramesAndNoOtherAppIsAsked() async throws {
+        let fixture = InventoryFixtures.desk()
+        let reader = RecordingExtrasReader(fixture)
+        let scanner = scanner(fixture, reader: reader)
+
+        let frames = await scanner.itemFrames(ofApps: [InventoryFixtures.notes, InventoryFixtures.weather])
+
+        #expect(Set(reader.askedApps) == [InventoryFixtures.notes, InventoryFixtures.weather], "only the apps that were named")
+        #expect(reader.askedApps.count == 2)
+        #expect(frames[InventoryFixtures.notes]?.count == 1)
+        #expect(frames[InventoryFixtures.weather]?.count == 2, "every item of an app")
+        #expect(frames[InventoryFixtures.vpn] == nil)
+        // The frame is where the apps list it on the bar: six points inside the slot.
+        let inventory = await scanner.scan()
+        let slot = try #require(inventory.items(ofApp: InventoryFixtures.notes).first?.frames[mainUUID])
+        #expect(frames[InventoryFixtures.notes] == [slot.insetBy(dx: 6, dy: 1)])
+    }
+
+    @Test func anAppThatDoesntAnswerInFullIsNotInTheAnswer() async {
+        let fixture = InventoryFixtures.desk()
+        let reader = RecordingExtrasReader(fixture, outcomes: [InventoryFixtures.vpn: .timedOut, InventoryFixtures.sync: .noExtras])
+        let scanner = scanner(fixture, reader: reader)
+
+        let frames = await scanner.itemFrames(ofApps: [InventoryFixtures.notes, InventoryFixtures.vpn, InventoryFixtures.sync, "com.example.gone"])
+
+        #expect(Set(frames.keys) == [InventoryFixtures.notes], "one that timed out, one with no items now and one that isn't running say nothing")
+    }
+
+    @Test func anAppWhoseReadsTimedOutSaysNothing() async {
+        let fixture = InventoryFixtures.desk()
+        let partial = AppExtras(pid: 1, bundleID: InventoryFixtures.vpn, name: nil, items: [ExtraItem(index: 0, frame: nil, identifier: nil, title: nil, description: nil)],
+                                timedOut: false, itemTimeouts: 1)
+        let scanner = scanner(fixture, reader: RecordingExtrasReader(fixture, outcomes: [InventoryFixtures.vpn: .items(partial)]))
+
+        #expect(await scanner.itemFrames(ofApps: [InventoryFixtures.vpn]).isEmpty, "a frame that wasn't read is not one that isn't there")
+    }
+
+    @Test func noFramesAreAskedForWithoutAccessibility() async {
+        let fixture = InventoryFixtures.desk()
+        let reader = RecordingExtrasReader(fixture)
+        let scanner = scanner(fixture, reader: reader, trusted: { false })
+
+        #expect(await scanner.itemFrames(ofApps: [InventoryFixtures.notes]).isEmpty)
+        #expect(reader.askedApps.isEmpty)
+    }
+
+    @Test func theAppsAreAskedTogether() async {
+        // All four reads are under way before any of them has an answer.
+        let fixture = InventoryFixtures.desk()
+        let gate = Gate()
+        let counter = ReadCounter()
+        let scanner = scanner(fixture, reader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter))
+        let asking = Task {
+            await scanner.itemFrames(ofApps: [InventoryFixtures.notes, InventoryFixtures.weather, InventoryFixtures.vpn, InventoryFixtures.sync])
+        }
+        let together = await waitUntil { counter.value == 4 }
+        gate.open()
+        let frames = await asking.value
+
+        #expect(together, "four apps, under the scanner's limit of \(MenuBarReader.concurrency)")
+        #expect(frames.count == 4)
     }
 
     // MARK: Over several scans

@@ -9,6 +9,8 @@ import Foundation
 ///   the files set aside as corrupt, the five newest.
 /// - A document can only be saved once it has been `load`ed by this store: saving defaults over a file nobody has read would
 ///   lose what is in it.
+/// - A file migrated by a load is migrated once: until a save replaces the old file, later loads answer with the migrated
+///   document, and the copy in `Backups` is made once.
 /// - `save` is debounced, per document: a burst of saves (a slider being dragged) is one write, `debounce` after the last.
 /// - `flush` writes what is still waiting, for `applicationWillTerminate`.
 public actor SettingsStore {
@@ -33,6 +35,10 @@ public actor SettingsStore {
     /// written by a newer Mantel; for the others the file on disk is the only copy of what it holds.
     private var readOnlyFiles: [String: String] = [:]
     private var warnedAboutReadOnly: Set<String> = []
+    /// By file name: a file that has been migrated and not saved yet, as the old file's bytes and the migrated document (as the
+    /// file of the current version would hold it). The file on disk still says the old version until a save, so a second load
+    /// of the same bytes answers from here instead of migrating, and backing up, the old file again.
+    private var migrated: [String: (source: Data, envelope: Data)] = [:]
     /// The names of the documents this store has loaded: only those can be saved.
     private var loadedFiles: Set<String> = []
 
@@ -66,6 +72,11 @@ public actor SettingsStore {
             data = try Data(contentsOf: url)
         } catch {
             return setAside(url, because: "couldn't be read (\(error.localizedDescription))")
+        }
+
+        // Migrated a moment ago and not saved yet: that is the document, as long as the file is still the one it came from.
+        if let kept = migrated[name], kept.source == data, let envelope = try? decoder.decode(Envelope<D>.self, from: kept.envelope) {
+            return envelope.document
         }
 
         let version: Int
@@ -115,13 +126,16 @@ public actor SettingsStore {
         }
 
         do {
-            try keep(url, as: "\(name)-v\(version)-\(AtomicFile.timestamp(for: clock.now()))", moving: false)
+            try keep(url, as: "\(name)-v\(version)-\(BackupPruner.stamp(for: clock.now()))", moving: false)
             prune(stem: "\(name)-v\(version)", keepOldest: 1, keepNewest: 4)
             Log.info("settings", "\(name) was migrated from version \(version) to \(D.currentVersion); the old file is in Backups")
         } catch {
             // The old file is the only copy of what it holds, and a save would replace it with the new shape.
             readOnlyFiles[name] = "couldn't be backed up before its migration; changes aren't saved"
             Log.error("settings", "\(name) was migrated from version \(version) but a copy of the old file couldn't be made (\(error.localizedDescription)); the file is left alone and changes aren't saved")
+        }
+        if let envelope = try? encoder.encode(Envelope(version: D.currentVersion, document: document)) {
+            migrated[name] = (source: data, envelope: envelope)
         }
         return document
     }
@@ -159,7 +173,7 @@ public actor SettingsStore {
         let name = D.fileName
         let stem = url.deletingPathExtension().lastPathComponent
         do {
-            let kept = try keep(url, as: "corrupt-\(stem)-\(AtomicFile.timestamp(for: clock.now()))", moving: true)
+            let kept = try keep(url, as: "corrupt-\(stem)-\(BackupPruner.stamp(for: clock.now()))", moving: true)
             prune(stem: "corrupt-\(stem)", keepOldest: 0, keepNewest: 5)
             if let migrationFailure {
                 Log.error("settings", "\(migrationFailure.localizedDescription) It is Backups/\(kept.lastPathComponent).")
@@ -223,6 +237,8 @@ public actor SettingsStore {
             return
         }
 
+        // From here the saved document is the one that loads, and the file is rewritten by it.
+        migrated[name] = nil
         generation += 1
         let thisSave = generation
         pending[name] = PendingWrite(data: data, generation: thisSave)

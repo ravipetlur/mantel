@@ -17,13 +17,17 @@ public enum MenuBarTakeoverPolicy {
         /// often isn't): the menus are still on the bar, so the takeover is undone without giving the focus anywhere, and what has no room
         /// stays in the « menu, as the second-bar policy leaves it.
         case undo(NoRoomAction)
+        /// The takeover was ended while it was being begun (the second bar opened, which gives the menu bar back; the person went to another
+        /// app; the reveal was put away; or Mantel is quitting): there is nothing to look at again and nothing to undo.
+        case endedMeanwhile
     }
 
     /// - Parameters:
-    ///   - activated: whether Mantel is the active app now.
+    ///   - activated: whether Mantel is the active app now; nil when the takeover was ended while it was being begun.
     ///   - overflowAlreadyLogged: whether the log has said, during this run, that the « menu keeps the revealed icons.
-    public static func afterBegin(activated: Bool, overflowAlreadyLogged: Bool) -> AfterBegin {
-        activated ? .recheckRoom : .undo(.leaveOverflow(logOnce: !overflowAlreadyLogged))
+    public static func afterBegin(activated: Bool?, overflowAlreadyLogged: Bool) -> AfterBegin {
+        guard let activated else { return .endedMeanwhile }
+        return activated ? .recheckRoom : .undo(.leaveOverflow(logOnce: !overflowAlreadyLogged))
     }
 
     /// Whether there is a menu bar to make room in: the bar of the display the front app is on is on screen. A full-screen app hides

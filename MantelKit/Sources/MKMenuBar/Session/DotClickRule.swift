@@ -1,3 +1,5 @@
+import Foundation
+
 /// What the mouse did when a dot's button sent its action: the kinds that matter.
 public enum DotClickEvent: Sendable, Equatable {
     case leftMouseUp
@@ -23,9 +25,16 @@ public enum DotClickAction: Sendable, Equatable {
 /// the left button, and an assistive tool that presses it (which comes with no mouse event of its own). A modifier key changes nothing,
 /// so a click with ⌃ held reveals.
 public enum DotClickRule {
+    /// The longest ago an event may have been dispatched and still be the click that sent the action, in seconds. Long enough for a busy
+    /// Mac, where the action can come a second or more after the button went up (a right click taken as too old would reveal instead of
+    /// opening the menu), and short enough that the event left over from long before an assistive tool's press isn't taken for it.
+    public static let freshEventAge: TimeInterval = 2
+
     /// What the app's current event makes of the action that arrived. A right click counts only when it is on the dot's own window; a left
-    /// click is one wherever its window is.
-    public static func event(isLeftMouseUp: Bool, isRightMouseUp: Bool, isOnTheDotsWindow: Bool) -> DotClickEvent {
+    /// click is one wherever its window is. Neither counts when the event was dispatched longer ago than `freshEventAge` (`age`): a press
+    /// comes with no event of its own, and the current event is then one from long before it.
+    public static func event(isLeftMouseUp: Bool, isRightMouseUp: Bool, isOnTheDotsWindow: Bool, age: TimeInterval) -> DotClickEvent {
+        guard age <= freshEventAge else { return .noMouseEvent }
         if isRightMouseUp, isOnTheDotsWindow { return .rightMouseUp }
         if isLeftMouseUp { return .leftMouseUp }
         return .noMouseEvent

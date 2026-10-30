@@ -4,7 +4,7 @@ import MKCore
 import Synchronization
 
 /// Which mouse event it is, of the three the tap listens to.
-enum ClickKind: Equatable {
+enum TapMouseEvent: Equatable {
     case leftDown, leftUp, leftDragged
 }
 
@@ -26,7 +26,7 @@ struct ClickReplayPolicy {
         self.rects = rects
     }
 
-    mutating func decide(_ kind: ClickKind, at point: CGPoint, isOurs: Bool) -> ClickDecision {
+    mutating func decide(_ kind: TapMouseEvent, at point: CGPoint, isOurs: Bool) -> ClickDecision {
         if isOurs { return .pass }
         switch kind {
         case .leftDown:
@@ -141,7 +141,7 @@ public enum ClickReplayError: Error, Equatable, LocalizedError {
     case tapUnavailable
 
     public var errorDescription: String? {
-        "macOS wouldn't let Mantel watch clicks. Check that Accessibility is on for Mantel."
+        "macOS wouldn't let Mantel watch clicks. Check that Device control and data access is on for Mantel."
     }
 }
 
@@ -167,10 +167,6 @@ public final class ClickReplayTap: Sendable {
     static func clamped(lifetime: Duration) -> Duration {
         min(max(lifetime, .zero), maximumLifetime)
     }
-
-    /// How long the tap's thread runs its loop before it asks whether the tap is still wanted. `stop()` also stops the loop, but
-    /// a stop that comes before the loop is running has nothing to stop, and this is how long such a stop can go unseen.
-    static let runLoopSlice: CFTimeInterval = 0.25
 
     /// Core Foundation objects that are only handed from the thread that made them to the one that stops them, under the lock.
     private struct Handles: @unchecked Sendable {
@@ -232,10 +228,7 @@ public final class ClickReplayTap: Sendable {
         state.withLock { $0.handles.timer = timer }
         timer.resume()
 
-        let thread = Thread { [self] in runLoopMain() }
-        thread.name = "Mantel click replay"
-        thread.qualityOfService = .userInteractive
-        thread.start()
+        TapThread.start(named: "Mantel click replay") { [self] in runLoopMain() }
     }
 
     /// Removes the tap. It can be called more than once, and from any thread.
@@ -261,40 +254,26 @@ public final class ClickReplayTap: Sendable {
     // MARK: The tap's thread
 
     private func runLoopMain() {
-        guard let port = state.withLock({ $0.handles.port }),
-              let source = CFMachPortCreateRunLoopSource(nil, port, 0) else {
-            Unmanaged.passUnretained(self).release()
-            return
-        }
-        let runLoop = CFRunLoopGetCurrent()!
-        CFRunLoopAddSource(runLoop, source, .commonModes)
-        // Published and switched on in one step, under the lock and only while the tap runs: a `stop()` that came before this
-        // has marked the phase, and finds nothing to switch off, and the tap is never switched on after it.
-        let switchedOn = state.withLock { state -> Bool in
-            state.handles.runLoop = runLoop
-            guard state.lifecycle.mayEnableTap else { return false }
-            CGEvent.tapEnable(tap: port, enable: true)
-            return true
-        }
-        if switchedOn {
-            // In slices, asking each time whether the tap is still wanted: `CFRunLoopStop` from `stop()` ends a slice, and a
-            // stop it couldn't deliver (the loop wasn't running yet) is seen at the end of the slice it fell in.
-            // The first slice is run because the tap runs; after each, the result says whether to go on.
-            var result = CFRunLoopRunResult.timedOut
-            while state.withLock({ $0.lifecycle.keepsRunLoopGoing(after: result) }) {
-                result = CFRunLoopRunInMode(.defaultMode, Self.runLoopSlice, true)
-            }
-        }
-        CFRunLoopRemoveSource(runLoop, source, .commonModes)
-        CFMachPortInvalidate(port)
-        // The reference `start()` took for the callback.
-        Unmanaged.passUnretained(self).release()
+        // The reference `start()` took for the callback, given back when the thread ends.
+        defer { Unmanaged.passUnretained(self).release() }
+        guard let port = state.withLock({ $0.handles.port }) else { return }
+        TapThread.run(
+            port: port,
+            publishAndEnable: { runLoop in
+                state.withLock { state -> Bool in
+                    state.handles.runLoop = runLoop
+                    guard state.lifecycle.mayEnableTap else { return false }
+                    CGEvent.tapEnable(tap: port, enable: true)
+                    return true
+                }
+            },
+            keepsGoing: { result in state.withLock { $0.lifecycle.keepsRunLoopGoing(after: result) } })
     }
 
     // MARK: Events
 
     fileprivate func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let kind: ClickKind
+        let kind: TapMouseEvent
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             // The system switched the tap off because it was slow or asked to. It is switched on again, under the lock and only

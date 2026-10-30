@@ -53,7 +53,7 @@ struct MenuBarSnapshotTests {
                              items: [ExtraItem(index: 0, frame: nil, identifier: "i", title: "t", description: "d")],
                              timedOut: false)],
             rawAgentTree: .object(["role": .string("AXApplication"), "children": .array([])]),
-            problems: ["Accessibility isn't granted"])
+            problems: ["Device control and data access isn't granted"])
         let data = try JSONEncoder().encode(snapshot)
         #expect(try JSONDecoder().decode(MenuBarSnapshot.self, from: data) == snapshot)
     }
@@ -374,31 +374,45 @@ struct MenuBarReaderTests {
         #expect(after.apps.first?.items.count == 1)
     }
 
-    @Test func snapshotOf40FakeAppsIsFast() async {
-        let ax = FakeAX()
-        let window = ax.addAgentWindow(agent: agentPID, frame: CGRect(x: 0, y: 0, width: 3360, height: 31))
-        var apps: [RunningApp] = []
-        for index in 0..<40 {
-            let pid = pid_t(1000 + index)
-            let frame = CGRect(x: 3000 - index * 40, y: 0, width: 38, height: 31)
-            ax.addApp(pid: pid, extras: [.init(title: "App \(index)", frame: frame), .init(title: "Second \(index)", frame: nil)])
-            ax.addSlot(in: window, identifier: "com.example.app\(index).item", frame: frame)
-            apps.append(.fake(pid, "com.example.app\(index)", "App \(index)"))
+    @Test func snapshotOf40FakeAppsReadsEachAppAsOftenAsASnapshotOfOne() async {
+        // A desk of `count` apps, each with two items, and the elements the snapshot reads of each app: its root and its items.
+        func desk(_ count: Int) -> (ax: FakeAX, apps: [RunningApp], elements: [[Int]]) {
+            let ax = FakeAX()
+            let window = ax.addAgentWindow(agent: agentPID, frame: CGRect(x: 0, y: 0, width: 3360, height: 31))
+            var apps: [RunningApp] = []
+            var elements: [[Int]] = []
+            for index in 0..<count {
+                let pid = pid_t(1000 + index)
+                let frame = CGRect(x: 3000 - index * 40, y: 0, width: 38, height: 31)
+                let items = ax.addApp(pid: pid, extras: [.init(title: "App \(index)", frame: frame), .init(title: "Second \(index)", frame: nil)])
+                ax.addSlot(in: window, identifier: "com.example.app\(index).item", frame: frame)
+                apps.append(.fake(pid, "com.example.app\(index)", "App \(index)"))
+                elements.append([ax.root(ofApp: pid)] + items)
+            }
+            return (ax, apps, elements)
         }
-        let reader = reader(ax, apps: apps)
+        func reads(_ ax: FakeAX, _ elements: [Int]) -> Int { elements.map { ax.attributeReads(on: $0) }.reduce(0, +) }
 
-        let started = ContinuousClock.now
-        let snapshot = await reader.snapshot(layout: .desk, includeRawTree: false)
-        let elapsed = ContinuousClock.now - started
+        // What reading one app costs, on a desk of one.
+        let alone = desk(1)
+        _ = await reader(alone.ax, apps: alone.apps).snapshot(layout: .desk, includeRawTree: false)
+        let perApp = reads(alone.ax, alone.elements[0])
+        #expect(perApp > 0, "the app is asked")
+
+        let big = desk(40)
+        let snapshot = await reader(big.ax, apps: big.apps).snapshot(layout: .desk, includeRawTree: false)
 
         #expect(snapshot.apps.count == 40)
         #expect(snapshot.allSlots.count == 40)
-        // The fake tree answers at once, so this can't tell reading the apps one after the other from reading them at once: it
-        // guards against a gross slowdown of the read, and nothing finer. (That the apps are asked at once, with a limit, is checked
-        // on a fake clock where each answer takes a second: `MenuBarScannerTests.scanReadsAppsConcurrently`.) The limit is loose so
-        // that a loaded machine doesn't make it flaky: run alone, the snapshot takes milliseconds, and in the whole suite it waits for
-        // a free thread behind tests that are busy, for a second or more.
-        #expect(elapsed < .seconds(5))
+        // Counted, not timed: how long a read of the fake tree takes says nothing but how busy the machine is, and a limit on it fails
+        // when the machine is loaded. What the snapshot must do is ask each app once, however many apps there are, so that a desk of
+        // forty costs forty times a desk of one and not more (no app asked again, none asked for the others' sake). That the apps are
+        // asked at once, with a limit, is checked on a fake clock where each answer takes a second:
+        // `MenuBarScannerTests.scanReadsAppsConcurrently`.
+        for (index, elements) in big.elements.enumerated() {
+            #expect(big.ax.attributeReads(on: elements[0]) == 1, "app \(index) is asked for its extras menu bar once")
+            #expect(reads(big.ax, elements) == perApp, "app \(index) is asked as often as the only app of a desk of one")
+        }
     }
 
     // MARK: The agent alone
@@ -452,7 +466,7 @@ struct MenuBarReaderTests {
         let (ax, apps) = smallDesk()
         ax.failReads(on: ax.root(ofApp: agentPID), with: .notTrusted)
         let refused = await reader(ax, apps: apps).agentSnapshot(layout: .desk)
-        #expect(refused.problems == ["Accessibility isn't granted to Mantel."])
+        #expect(refused.problems == ["Device control and data access isn't granted to Mantel."])
     }
 
     @Test func anAgentOnlyReadOfADeskWithFortyAppsAsksNoneOfThem() async {
@@ -544,7 +558,7 @@ struct MenuBarReaderTests {
         let snapshot = await reader(ax, apps: apps).snapshot(layout: .desk, includeRawTree: false)
         #expect(snapshot.agentWindows.isEmpty)
         #expect(snapshot.apps.isEmpty)
-        #expect(snapshot.problems == ["Accessibility isn't granted to Mantel."])
+        #expect(snapshot.problems == ["Device control and data access isn't granted to Mantel."])
     }
 
     @Test func withoutMenuBarAgentTheSnapshotSaysSo() async {

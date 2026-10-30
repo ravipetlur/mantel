@@ -145,7 +145,7 @@ public enum AdvancedCopy {
 
     public static func caption(for policy: NoRoomPolicy) -> String {
         switch policy {
-        case .secondBar: "The second bar isn't available yet. Until it is, macOS's « menu holds the icons that don't fit."
+        case .secondBar: "Hidden icons that don't fit open in a bar of their own under the menu bar."
         case .swap: "Mantel hides shown icons from the right until the revealed ones fit, and brings them back afterwards."
         case .hideAppMenus: "Mantel briefly becomes the front app so its short menu leaves room. Its Dock icon shows for a moment."
         }

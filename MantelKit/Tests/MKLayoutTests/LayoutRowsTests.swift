@@ -179,7 +179,7 @@ struct LayoutRowsTests {
         let unavailable = LayoutRows.readOnly(lists: lists(turnedOff: .unavailable("The list can't be read.")), inventory: .empty,
                                               names: names, allowClockAndControlCenter: false)
         #expect(unavailable.turnedOff == .unavailable("The list can't be read."))
-        #expect(LayoutRows.readOnly(lists: lists(), inventory: .empty, names: [:], allowClockAndControlCenter: false).turnedOff == .apps([]))
+        #expect(LayoutRows.readOnly(lists: ReadOnlyLists(cantMove: [], turnedOff: .apps([]), missing: [], overflow: [], cantHideYet: []), inventory: .empty, names: [:], allowClockAndControlCenter: false).turnedOff == .apps([]))
     }
 
     @Test func missingAppsAreNamedAndSortedByName() {
@@ -210,25 +210,6 @@ struct LayoutRowsTests {
         // No label (or a blank one) falls back to the module.
         #expect(rows.cantHideYet.map(\.name) == ["AirDrop", "blank", "newthing"])
         #expect(rows.cantHideYet.map(\.id) == ["system:airdrop", "system:blank", "system:newthing"])
-    }
-
-    // MARK: Dropping
-
-    @Test func aRowDroppedOnItsOwnSectionDoesNothing() {
-        var sections = SectionModel()
-        sections.move(app: "com.example.a", to: .hidden)
-        let inventory = Fixtures.inventory([item("com.example.a"), item("com.example.b")])
-        let rows = LayoutRows.apps(inventory: inventory, sections: sections, names: [:])
-
-        #expect(LayoutRows.droppedApps(["com.example.a"], into: .hidden, rows: rows).isEmpty)
-        #expect(LayoutRows.droppedApps(["com.example.a"], into: .alwaysHidden, rows: rows) == ["com.example.a"])
-        #expect(LayoutRows.droppedApps(["com.example.b", "com.example.a"], into: .hidden, rows: rows) == ["com.example.b"])
-    }
-
-    @Test func textThatIsNotAListedAppMovesNothing() {
-        let rows = LayoutRows.apps(inventory: Fixtures.inventory([item("com.example.a")]), sections: SectionModel(), names: [:])
-        #expect(LayoutRows.droppedApps(["some text", "", "com.example.gone"], into: .hidden, rows: rows).isEmpty)
-        #expect(LayoutRows.droppedApps(["com.example.a", "com.example.a"], into: .hidden, rows: rows) == ["com.example.a"])
     }
 
     // MARK: Names to find
@@ -283,13 +264,6 @@ struct LayoutRowsTests {
         let rows = LayoutRows.apps(inventory: inventory, sections: sections, names: [:])
         #expect(rows[.hidden]?.count == 1)
         #expect(rows[.hidden]?.first?.isNotAnswering == false)
-    }
-
-    @Test func aRowThatIsNotAnsweringCanBeDropped() {
-        var sections = SectionModel()
-        sections.move(app: "com.example.slow", to: .hidden)
-        let rows = LayoutRows.apps(inventory: Fixtures.inventory([], unansweredApps: ["com.example.slow"]), sections: sections, names: [:])
-        #expect(LayoutRows.droppedApps(["com.example.slow"], into: .shown, rows: rows) == ["com.example.slow"])
     }
 
     // MARK: An app macOS has turned off
@@ -377,69 +351,115 @@ struct LayoutRowsTests {
         #expect(allowed == ["clock": .alwaysHidden, "controlcenter": .hidden, "wifi": .hidden])
     }
 
-    // MARK: Moves that are being made
+    // MARK: An icon macOS doesn't tie to its app
 
-    @Test func aPendingMoveShowsWhereTheIconIsGoing() {
+    private let unattachedNote = "macOS can't tell which app this icon belongs to, so it's hidden whenever anything is hidden."
+
+    @Test func unattachedRowCarriesTheNoteWhileTheAllowlistIsInUse() {
         var sections = SectionModel()
-        sections.move(app: "com.example.a", to: .shown)
-        sections.move(item: .system("wifi"), to: .shown)
-        var pending = PendingMoves()
-        pending.move(app: "com.example.a", to: .hidden)
-        pending.move(app: "com.example.new", to: .alwaysHidden)
-        pending.move(systemItem: "wifi", to: .hidden)
-        pending.setNewItems(.hidden)
+        sections.move(app: "com.example.hid", to: .hidden)
+        let inventory = Fixtures.inventory([item("com.example.one"), item("com.example.hid"), item("com.example.fine")])
+        let rows = LayoutRows.apps(inventory: inventory, sections: sections, names: [:], unattached: ["com.example.one", "com.example.hid"],
+                                   allowlistInUse: true)
+        let byID = Dictionary(uniqueKeysWithValues: rows.values.joined().map { ($0.id, $0) })
 
-        let shown = pending.applied(to: sections)
-        #expect(shown.section(ofApp: "com.example.a") == .hidden)
-        #expect(shown.section(ofApp: "com.example.new") == .alwaysHidden)
-        #expect(shown.section(of: .system("wifi")) == .hidden)
-        #expect(shown.newItems == .hidden)
-        #expect(sections.section(ofApp: "com.example.a") == .shown, "the model itself isn't changed")
-        #expect(!pending.isEmpty)
-
-        // The row of the app is in the section it is going to.
-        let inventory = Fixtures.inventory([item("com.example.a")])
-        #expect(LayoutRows.apps(inventory: inventory, sections: shown, names: [:])[.hidden]?.map(\.id) == ["com.example.a"])
+        // In any section: the note, the tooltip and the colour; the status stays the count of icons.
+        for id in ["com.example.one", "com.example.hid"] {
+            let row = byID[id]
+            #expect(row?.isUnattached == true, "\(id)")
+            #expect(row?.note == unattachedNote)
+            #expect(row?.helpText == unattachedNote)
+            #expect(row?.needsAttention == true)
+            #expect(row?.statusText == "1 icon")
+        }
+        #expect(LayoutCopy.unattachedIcon == unattachedNote)
+        let fine = byID["com.example.fine"]
+        #expect(fine?.note == nil)
+        #expect(fine?.helpText == "")
+        #expect(fine?.needsAttention == false)
     }
 
-    @Test func aPendingMoveEndsWhenThatIconIsWhereItWasAskedToGoAndNotBefore() {
-        var pending = PendingMoves()
-        pending.move(app: "com.example.a", to: .hidden)
-        pending.move(app: "com.example.b", to: .alwaysHidden)
-        pending.move(systemItem: "wifi", to: .hidden)
-        pending.setNewItems(.hidden)
-
-        // Another app was moved, a new app was placed, and the system icon is still where it was: nothing here is settled.
-        var sections = SectionModel()
-        sections.move(app: "com.example.other", to: .hidden)
-        sections.assignNew(apps: ["com.example.fresh"])
-        pending.settle(against: sections)
-        #expect(pending.apps == ["com.example.a": .hidden, "com.example.b": .alwaysHidden])
-        #expect(pending.systemItems == ["wifi": .hidden])
-        #expect(pending.newItems == .hidden)
-
-        // The first app arrives, and the new-items section.
-        sections.move(app: "com.example.a", to: .hidden)
-        sections.newItems = .hidden
-        pending.settle(against: sections)
-        #expect(pending.apps == ["com.example.b": .alwaysHidden])
-        #expect(pending.systemItems == ["wifi": .hidden])
-        #expect(pending.newItems == nil)
-
-        // The rest.
-        sections.move(app: "com.example.b", to: .alwaysHidden)
-        sections.move(item: .system("wifi"), to: .hidden)
-        pending.settle(against: sections)
-        #expect(pending.isEmpty)
+    @Test func noNoteUnderTheSwitches() {
+        let inventory = Fixtures.inventory([item("com.example.one")])
+        let rows = LayoutRows.apps(inventory: inventory, sections: SectionModel(), names: [:], unattached: ["com.example.one"],
+                                   allowlistInUse: false)
+        let row = rows.values.joined().first
+        #expect(row?.isUnattached == false)
+        #expect(row?.note == nil)
+        #expect(row?.needsAttention == false)
+        // Nor by default.
+        #expect(LayoutRows.apps(inventory: inventory, sections: SectionModel(), names: [:], unattached: ["com.example.one"])
+            .values.joined().first?.note == nil)
     }
 
-    @Test func aPendingMoveBackToWhereAnIconWasIsSettledAtOnceAndAskingAgainReplacesIt() {
-        var pending = PendingMoves()
-        pending.move(systemItem: "wifi", to: .hidden)
-        pending.move(systemItem: "wifi", to: .shown)
-        #expect(pending.systemItems == ["wifi": .shown])
-        pending.settle(against: SectionModel())
-        #expect(pending.isEmpty, "wifi is Shown when nothing says otherwise")
+    @Test func turnedOffOrNotAnsweringRowsCarryNoNote() {
+        var sections = SectionModel()
+        sections.move(app: "com.example.silent", to: .shown)
+        let inventory = Fixtures.inventory([item("com.example.off")], unansweredApps: ["com.example.silent"])
+        let rows = LayoutRows.apps(inventory: inventory, sections: sections, names: [:], turnedOff: .apps(["com.example.off"]),
+                                   unattached: ["com.example.off", "com.example.silent"], allowlistInUse: true)
+        let byID = Dictionary(uniqueKeysWithValues: rows.values.joined().map { ($0.id, $0) })
+        #expect(byID["com.example.off"]?.isTurnedOff == true)
+        #expect(byID["com.example.off"]?.note == nil)
+        #expect(byID["com.example.off"]?.helpText == LayoutCopy.offInSystemSettingsHelp)
+        #expect(byID["com.example.silent"]?.isNotAnswering == true)
+        #expect(byID["com.example.silent"]?.note == nil)
+        #expect(byID["com.example.silent"]?.helpText == LayoutCopy.notAnsweringHelp)
+    }
+
+    // MARK: What the strips say of an app
+
+    @Test func unattachedAppsTooltipCarriesTheNoteWhileTheAllowlistIsInUse() {
+        let inventory = Fixtures.inventory([item("com.example.one"), item("com.example.fine")])
+        let sections = SectionModel()
+        let rows = Dictionary(uniqueKeysWithValues: LayoutRows.apps(inventory: inventory, sections: sections, names: [:],
+                                                                    unattached: ["com.example.one"], allowlistInUse: true)
+            .values.joined().map { ($0.id, $0) })
+        let one = StripToken.app(bundleID: "com.example.one", items: [Fixtures.itemID("com.example.one")])
+        let fine = StripToken.app(bundleID: "com.example.fine", items: [Fixtures.itemID("com.example.fine")])
+        let names = ["com.example.one": "One", "com.example.fine": "Fine"]
+
+        #expect(LayoutEditorModel.tooltip(of: one, names: names, sections: sections, cantReorder: [], rows: rows)
+            == "One\n\(unattachedNote)")
+        #expect(LayoutEditorModel.accessibilityLabel(of: one, names: names, sections: sections, cantReorder: [], rows: rows)
+            == "One, \(unattachedNote)")
+        #expect(LayoutEditorModel.tooltip(of: fine, names: names, sections: sections, cantReorder: [], rows: rows) == "Fine")
+        #expect(LayoutEditorModel.accessibilityLabel(of: fine, names: names, sections: sections, cantReorder: [], rows: rows) == "Fine")
+    }
+
+    @Test func noNoteInTheTooltipUnderTheSwitches() {
+        let inventory = Fixtures.inventory([item("com.example.one")])
+        let rows = Dictionary(uniqueKeysWithValues: LayoutRows.apps(inventory: inventory, sections: SectionModel(), names: [:],
+                                                                    unattached: ["com.example.one"], allowlistInUse: false)
+            .values.joined().map { ($0.id, $0) })
+        let one = StripToken.app(bundleID: "com.example.one", items: [Fixtures.itemID("com.example.one")])
+
+        #expect(LayoutEditorModel.tooltip(of: one, names: [:], sections: SectionModel(), cantReorder: [], rows: rows) == "com.example.one")
+        #expect(LayoutEditorModel.accessibilityLabel(of: one, names: [:], sections: SectionModel(), cantReorder: [], rows: rows)
+            == "com.example.one")
+    }
+
+    @Test func theTooltipSaysEachThingInItsOrder() {
+        var sections = SectionModel()
+        sections.move(app: "com.example.off", to: .hidden)
+        sections.place(app: "com.example.off", in: .hidden, isAuto: true)
+        let inventory = Fixtures.inventory([item("com.example.off")], unansweredApps: ["com.example.silent"])
+        sections.move(app: "com.example.silent", to: .hidden)
+        let rows = Dictionary(uniqueKeysWithValues: LayoutRows.apps(inventory: inventory, sections: sections, names: [:],
+                                                                    turnedOff: .apps(["com.example.off"])).values.joined().map { ($0.id, $0) })
+        let off = StripToken.app(bundleID: "com.example.off", items: [Fixtures.itemID("com.example.off")])
+        let silent = StripToken.app(bundleID: "com.example.silent", items: [Fixtures.itemID("com.example.silent")])
+        let names = ["com.example.off": "Off", "com.example.silent": "Silent"]
+
+        // The title, the row's help, that Mantel moved it, that it can't be reordered.
+        #expect(LayoutEditorModel.tooltip(of: off, names: names, sections: sections, cantReorder: ["com.example.off"], rows: rows)
+            == "Off\n\(LayoutCopy.offInSystemSettingsHelp)\n\(LayoutCopy.autoHelp)\n\(LayoutCopy.cantReorderHelp)")
+        #expect(LayoutEditorModel.accessibilityLabel(of: off, names: names, sections: sections, cantReorder: ["com.example.off"], rows: rows)
+            == "Off, Off in System Settings, Auto, can't reorder")
+        #expect(LayoutEditorModel.tooltip(of: silent, names: names, sections: sections, cantReorder: [], rows: rows)
+            == "Silent\n\(LayoutCopy.notAnsweringHelp)")
+        #expect(LayoutEditorModel.accessibilityLabel(of: silent, names: names, sections: sections, cantReorder: [], rows: rows)
+            == "Silent, Not answering")
     }
 }
 
@@ -459,7 +479,6 @@ struct LayoutCopyTests {
     }
 
     @Test func theWordsOfTheRowsAndTheLists() {
-        #expect(LayoutCopy.emptySection == "No apps here. Drag one in, or use an app's Move to menu.")
         #expect(LayoutCopy.autoHelp == "Moved here to make room. It moves back when there's room.")
         #expect(LayoutCopy.overflowFooter
             == "When the menu bar is full or the notch is in the way, apps move to Hidden instead of disappearing into «, so the dots stay in sight. They move back when there's room.")
@@ -473,5 +492,69 @@ struct LayoutCopyTests {
         #expect(LayoutCopy.notAnsweringHelp == "This app didn't answer when Mantel last read the menu bar. It keeps its place.")
         #expect([LayoutCopy.cantMoveTitle, LayoutCopy.turnedOffTitle, LayoutCopy.missingTitle, LayoutCopy.overflowTitle,
                  LayoutCopy.cantHideYetTitle] == ["Can't move", "Turned off in System Settings", "Missing", "In the « overflow", "Can't be hidden yet"])
+    }
+
+    // MARK: What can't be reordered
+
+    @Test func cantReorderRows() {
+        let inventory = Fixtures.inventory([Fixtures.item(Fixtures.itemID("com.example.quiet")),
+                                            Fixtures.item(Fixtures.itemID("com.example.mute"))])
+        let sourceLists = ReadOnlyLists(
+            cantMove: [], turnedOff: .apps([]), missing: [], overflow: [], cantHideYet: [],
+            cantReorder: [Fixtures.itemID("com.example.quiet", "one"), Fixtures.itemID("com.example.quiet", "two"),
+                          Fixtures.itemID("com.example.mute"), .system("wifi"), OwnItems.itemID(SpacerID(rawValue: "0000000a"))])
+        let names = ["com.example.quiet": "Quiet", "com.example.mute": "Mute"]
+
+        let rows = LayoutRows.readOnly(lists: sourceLists, inventory: inventory, names: names, allowClockAndControlCenter: false)
+
+        // Once for each app, by name; a system icon or one of Mantel's own is no app's.
+        #expect(rows.cantReorder == [NamedRow(id: "com.example.mute", name: "Mute"), NamedRow(id: "com.example.quiet", name: "Quiet")])
+        #expect(LayoutRows.cantReorderApps(lists: sourceLists) == ["com.example.quiet", "com.example.mute"])
+        // The app is given a name like any other listed one.
+        let ids = LayoutRows.appIDs(inventory: .empty, sections: SectionModel(), lists: sourceLists)
+        #expect(ids == ["com.example.quiet", "com.example.mute"])
+        #expect(LayoutRows.readOnly(lists: ReadOnlyLists(cantMove: [], turnedOff: .apps([]), missing: [], overflow: [], cantHideYet: []), inventory: inventory, names: names, allowClockAndControlCenter: false)
+            .cantReorder.isEmpty)
+    }
+
+    @Test func newCopyStrings() {
+        #expect(LayoutCopy.cantReorderTitle == "Can't reorder")
+        #expect(LayoutCopy.cantReorderCaption == "macOS gives Mantel no way to place these. ⌘-drag them in the menu bar.")
+        #expect(LayoutCopy.cantReorderHelp == "Can't reorder: ⌘-drag it in the menu bar.")
+        #expect(LayoutCopy.cantReorderLabel == "can't reorder")
+        #expect(LayoutEditorCopy.cantPlaceThisIcon == "macOS gives Mantel no way to place this icon. ⌘-drag it in the menu bar.")
+        #expect(LayoutEditorCopy.systemIconsKeepOrder == "System icons keep macOS's order.")
+        #expect(LayoutCopy.needsGrantBanner == "Grant access to reorder, or ⌘-drag in the menu bar")
+        #expect(LayoutCopy.grantAccessButton == "Grant Access…")
+        #expect(LayoutCopy.notAcceptedBanner == "macOS didn't accept the last order. Try the change again, or ⌘-drag in the menu bar.")
+        #expect(LayoutCopy.notPlacedBanner
+            == "Some of Mantel's icons couldn't be placed among icons it can't reorder. ⌘-drag them in the menu bar.")
+        #expect(LayoutCopy.addedAtTheEnd(of: .hidden) == "Added at the end of Hidden. ⌘-drag it into place in the menu bar.")
+        #expect(LayoutCopy.groupedHeader == "Grouped")
+        #expect(LayoutCopy.groupedFooter == "Grouped icons open from their group's icon. •• shows them too.")
+        #expect(LayoutCopy.emptyStrip == "Drag icons here")
+        #expect(LayoutCopy.paletteHeader == "Add to the menu bar")
+        #expect(LayoutCopy.paletteFooter == "Drag one into a row.")
+        #expect(PaletteItem.allCases.map(LayoutCopy.paletteTitle) == ["Spacer", "Group", "New icons go here"])
+        #expect(PaletteItem.allCases.map(LayoutCopy.paletteSymbol) == ["arrow.left.and.right", "square.grid.2x2", "plus.square.dashed"])
+        #expect(LayoutCopy.add == "Add")
+        #expect(LayoutCopy.noGroups == "No groups yet. Add one below.")
+        #expect(LayoutCopy.searchNamesPrompt == "Other names, separated by commas")
+        #expect(LayoutCopy.selectedIconHeader == "Selected icon")
+        #expect(LayoutCopy.iconCount(1) == "1 icon" && LayoutCopy.iconCount(3) == "3 icons")
+        #expect(LayoutCopy.movesWithOthers(count: 2, app: "Quiet") == "Moves with 2 other icons from Quiet")
+        #expect(LayoutCopy.movesWithOthers(count: 1, app: "Quiet") == "Moves with 1 other icon from Quiet")
+        #expect(LayoutCopy.keepDotsBesideClock == "Keep the dots beside the clock")
+        #expect(LayoutCopy.keepDotsFooter
+            == "They stay in place when icons show, and macOS's « never takes them. Hidden icons then appear left of your shown icons.")
+        #expect(LayoutCopy.showAllWhileDragging == "Show all sections while ⌘-dragging")
+        #expect(LayoutCopy.recaptureIcons == "Recapture icons")
+        #expect(LayoutCopy.restoreOriginal == "Restore original layout…")
+        #expect(LayoutCopy.restoreTitle == "Restore the original layout?")
+        #expect(LayoutCopy.restoreText
+            == "Mantel puts the menu bar icons back in the order they had before Mantel first changed it. Your sections stay as they are.")
+        #expect(LayoutCopy.markerNote == "New icons appear here.")
+        #expect(LayoutCopy.opensOnHover == "Open when the pointer rests on it")
+        #expect(LayoutEditorModel.tokenGap == 4)
     }
 }

@@ -83,18 +83,28 @@ public struct AppExtras: Codable, Sendable, Equatable {
     /// How many reads of an item's own attributes (its frame, identifier, title or description) timed out in this read. The item
     /// has no value for what was being read; the count says that this wasn't because the app has none.
     public let itemTimeouts: Int
+    /// An item's name didn't come (the read of it timed out or failed) and nothing was remembered of it, not even that it has none: the
+    /// item may have a name, so which ID it has isn't known from this read. Nothing is recorded of the app from a read like this
+    /// (`WholeReads`).
+    public let namesIncomplete: Bool
+    /// The reading of the app's list stopped before its last child, for whatever reason (too many timeouts, a budget or a deadline that ran
+    /// out): the app has items that `items` doesn't list. Nothing is recorded of the app from a read like this (`WholeReads`).
+    public let listCut: Bool
 
-    public init(pid: pid_t, bundleID: String?, name: String?, items: [ExtraItem], timedOut: Bool, itemTimeouts: Int = 0) {
+    public init(pid: pid_t, bundleID: String?, name: String?, items: [ExtraItem], timedOut: Bool, itemTimeouts: Int = 0,
+                namesIncomplete: Bool = false, listCut: Bool = false) {
         self.pid = pid
         self.bundleID = bundleID
         self.name = name
         self.items = items
         self.timedOut = timedOut
         self.itemTimeouts = itemTimeouts
+        self.namesIncomplete = namesIncomplete
+        self.listCut = listCut
     }
 
     private enum CodingKeys: String, CodingKey {
-        case pid, bundleID, name, items, timedOut, itemTimeouts
+        case pid, bundleID, name, items, timedOut, itemTimeouts, namesIncomplete, listCut
     }
 
     public init(from decoder: any Decoder) throws {
@@ -106,6 +116,8 @@ public struct AppExtras: Codable, Sendable, Equatable {
         timedOut = try container.decode(Bool.self, forKey: .timedOut)
         // A snapshot saved before the count was kept has none.
         itemTimeouts = try container.decodeIfPresent(Int.self, forKey: .itemTimeouts) ?? 0
+        namesIncomplete = try container.decodeIfPresent(Bool.self, forKey: .namesIncomplete) ?? false
+        listCut = try container.decodeIfPresent(Bool.self, forKey: .listCut) ?? false
     }
 }
 

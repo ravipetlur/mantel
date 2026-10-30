@@ -63,10 +63,11 @@ struct MenuBarSessionLifecycleTests {
     }
 
     /// An engine, a session over it that has started, and the log both write to.
-    private func started(sections initial: SectionModel = sections(hidden: [weather])) async -> (rig: SessionRig, engine: FakeEngine, log: CallLog) {
+    private func started(sections initial: SectionModel = sections(hidden: [weather]),
+                         sessionState: any SessionStateSource = SteadySessionState()) async -> (rig: SessionRig, engine: FakeEngine, log: CallLog) {
         let log = CallLog()
         let engine = FakeEngine(.allowlist, log: log)
-        let rig = SessionRig.withEngines([.allowlist: engine], sections: initial, events: log)
+        let rig = SessionRig.withEngines([.allowlist: engine], sections: initial, events: log, sessionState: sessionState)
         await rig.session.start()
         return (rig, engine, log)
     }
@@ -260,10 +261,37 @@ struct MenuBarSessionLifecycleTests {
 
         #expect(done)
         #expect(rig.clock.now().timeIntervalSince(began) >= 5, "five seconds of waiting, at the least")
-        // A read now, and one every 250 ms for five seconds, and the one that ends the reset.
-        #expect(await rig.session.scansIngested == reads + 1 + 20 + 1)
+        // A read now, one after each pause of 250 ms until five seconds of the clock's time are up (the time the reads take counts, and the
+        // clock here moves 100 ms at a time), and the one that ends the reset.
+        let taken = await rig.session.scansIngested - reads
+        #expect((17...23).contains(taken), "\(taken) reads")
         #expect(engine.applied.count > applied, "hiding is tried anyway")
         #expect(await rig.session.isResetting == false)
+    }
+
+    @Test func resetGivesUpOnTheAgentByTheClockWhateverTheReadsTook() async throws {
+        let (rig, engine, log) = await started()
+        let applied = engine.applied.count
+        let reads = await rig.session.scansIngested
+        let restarter = FakeRestarter(log: log)
+        restarter.whileRestarting { rig.world.setAgentRunning(false) }
+        let jumped = Switch(false)
+
+        // The reads take their time (the clock is ten seconds on after the first of them): the wait is over, whatever number of pauses it
+        // has made, after the read that finds it so.
+        let done = await driven(rig, each: { passed in
+            if passed >= .seconds(1), !jumped.isOn {
+                jumped.set(true)
+                rig.clock.advance(by: .seconds(10))
+            }
+        }, {
+            try? await rig.session.reset(restarter: restarter, replayJournal: {})
+        })
+
+        #expect(done)
+        let taken = await rig.session.scansIngested - reads
+        #expect(taken < 12, "\(taken) reads: not the twenty that counting the pauses would make")
+        #expect(engine.applied.count > applied, "and hiding is tried anyway")
     }
 
     @Test func autoRefreshSkippedDuringReset() async throws {
@@ -280,8 +308,9 @@ struct MenuBarSessionLifecycleTests {
         })
 
         #expect(done)
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(engine.reapplied == reapplied + 1, "the reset's own forced plan, and no refresh of the session's")
+        // A refresh is started inside the read that calls for it: the reset's reads are over, and none started one.
+        #expect(await rig.session.autoRefreshesStarted == 0, "no refresh of the session's")
+        #expect(engine.reapplied == reapplied + 1, "the reset's own forced plan")
         #expect(await rig.session.isResetting == false)
 
         // And nothing was counted: the reset's failed reads aren't the first of three, so three that come after it are the first three.
@@ -333,19 +362,21 @@ struct MenuBarSessionLifecycleTests {
         let first = Task { await rig.session.refresh() }
         await engine.applyEntered.wait()
         let second = Task { await rig.session.refresh() }
-        try await Task.sleep(for: .milliseconds(50))
+        await letTasksRun()
 
         // The reset begins, and stops at the restart.
         let restartGate = Gate()
         let restarter = FakeRestarter(log: log)
         restarter.whileRestarting { await restartGate.wait() }
         let reset = Task { await rig.session.resetIfIdle(restarter: restarter, replayJournal: replay(log)) }
-        try await Task.sleep(for: .milliseconds(50))
+        await letTasksRun()
         let applies = engine.applies
 
         gate.open()
         #expect(await waitUntil { restarter.restarts == 1 }, "the reset is waiting for the menu bar to restart")
-        try await Task.sleep(for: .milliseconds(50))
+        // Both refreshes have ended before anything is looked at: they don't wait for the restart.
+        _ = await first.value
+        _ = await second.value
 
         // The refresh that was under way, and the one behind it, found a reset and did nothing: nothing is applied while the menu bar is
         // being restarted, and so nothing is in charge.
@@ -354,8 +385,6 @@ struct MenuBarSessionLifecycleTests {
 
         restartGate.open()
         #expect(await reset.value == .done)
-        await first.value
-        await second.value
         #expect(engine.applies > applies, "and the reset's own plan was applied when it was done")
         #expect(log.all.last(where: { $0.hasPrefix("allowlist.") }) == "allowlist.apply")
     }
@@ -375,8 +404,7 @@ struct MenuBarSessionLifecycleTests {
         let applied = engine.applied.count
 
         gate.open()
-        await refreshing.value
-        try await Task.sleep(for: .milliseconds(50))
+        _ = await refreshing.value
         #expect(engineCalls(after: "allowlist.tearDown", in: log) == [], "the answer came too late to choose an engine or apply a plan")
         #expect(engine.applied.count == applied)
 
@@ -395,25 +423,25 @@ struct MenuBarSessionLifecycleTests {
         let applying = Task { await rig.session.move(app: weather, to: .shown) }
         await engine.applyEntered.wait()
         let waiting = Task { await rig.session.move(app: notes, to: .hidden) }
-        try await Task.sleep(for: .milliseconds(50))
+        await letTasksRun()
         let applies = engine.applies
 
         let restartGate = Gate()
         let restarter = FakeRestarter(log: log)
         restarter.whileRestarting { await restartGate.wait() }
         let reset = Task { await rig.session.resetIfIdle(restarter: restarter, replayJournal: replay(log)) }
-        try await Task.sleep(for: .milliseconds(30))
+        await letTasksRun()
         gate.open()
         #expect(await waitUntil { restarter.restarts == 1 })
-        try await Task.sleep(for: .milliseconds(30))
+        // The apply that was under way and the plan that waited behind it have both ended (neither waits for the restart).
+        await applying.value
+        await waiting.value
 
         #expect(engine.applies == applies, "the plan that was waiting was never given to the engine")
         #expect(engineCalls(after: "allowlist.tearDown", in: log) == [])
 
         restartGate.open()
         #expect(await reset.value == .done)
-        await applying.value
-        await waiting.value
     }
 
     @Test func aSecondResetWhileOneRunsIsRefused() async throws {
@@ -492,8 +520,8 @@ struct MenuBarSessionLifecycleTests {
 
         #expect(await pollOnce(rig))
         #expect(await pollOnce(rig))
-        try await Task.sleep(for: .milliseconds(30))
-        #expect(engine.reapplied == 0, "two reads in a row are not three")
+        #expect(await rig.session.autoRefreshesStarted == 0, "two reads in a row are not three")
+        #expect(engine.reapplied == 0)
         #expect(await pollOnce(rig))
         #expect(await waitUntil { engine.reapplied == 1 }, "the third makes a refresh: the plan is applied again, by force")
 
@@ -501,7 +529,7 @@ struct MenuBarSessionLifecycleTests {
         #expect(await pollOnce(rig))
         #expect(await pollOnce(rig))
         #expect(await pollOnce(rig))
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await rig.session.autoRefreshesStarted == 1, "three more failures in a row start no second refresh yet")
         #expect(engine.reapplied == 1)
     }
 
@@ -516,8 +544,8 @@ struct MenuBarSessionLifecycleTests {
         rig.world.setAgentRunning(false)
         #expect(await pollOnce(rig))
         #expect(await pollOnce(rig))
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(engine.reapplied == 0, "two and two, with an answer between, are not three in a row")
+        #expect(await rig.session.autoRefreshesStarted == 0, "two and two, with an answer between, are not three in a row")
+        #expect(engine.reapplied == 0)
     }
 
     @Test func anEmptyBarAfterADisplayChangeRefreshes() async throws {
@@ -548,14 +576,14 @@ struct MenuBarSessionLifecycleTests {
         let changed = Task { await rig.session.displaysChanged(layout) }
         #expect(await rig.letTheCoalescedReadGo())
         await changed.value
-        try await Task.sleep(for: .milliseconds(50))
 
+        #expect(await rig.session.autoRefreshesStarted == 0)
         #expect(engine.reapplied == 0)
         // It isn't counted at any later change either, while it has never had a bar.
         let again = Task { await rig.session.displaysChanged(layout) }
         #expect(await rig.letTheCoalescedReadGo())
         await again.value
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await rig.session.autoRefreshesStarted == 0)
         #expect(engine.reapplied == 0)
     }
 
@@ -564,8 +592,300 @@ struct MenuBarSessionLifecycleTests {
         let changed = Task { await rig.session.displaysChanged(rig.world.layout) }
         #expect(await rig.letTheCoalescedReadGo())
         await changed.value
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await rig.session.autoRefreshesStarted == 0)
         #expect(engine.reapplied == 0)
+    }
+
+    // MARK: Holding auto-refresh back
+
+    /// Lets the polling (every 10 seconds, with Settings closed) have one read, and waits for it.
+    private func pollIdle(_ rig: SessionRig) async -> Bool {
+        guard await rig.clock.waitForSleepers(2, within: .seconds(5)) else { return false }
+        let reads = await rig.session.scansIngested
+        rig.clock.advance(by: ScanScheduler.idleInterval)
+        return await rig.pumpUntilReads(reads + 1)
+    }
+
+    /// Polls until `minutes` of the clock's time have gone, and gives the clock's time, in seconds from the first poll, at which each
+    /// refresh of the session's own was decided. Stops short, with a failure, if a poll doesn't come.
+    private func poll(_ rig: SessionRig, forMinutes minutes: Int) async -> [Double] {
+        let began = rig.clock.now()
+        var refreshedAt: [Double] = []
+        var counted = await refreshLines(rig).count
+        while rig.clock.now().timeIntervalSince(began) < Double(minutes * 60) {
+            let polled = await pollIdle(rig)
+            #expect(polled, "a poll was read")
+            guard polled else { break }
+            let lines = await refreshLines(rig)
+            if lines.count > counted { refreshedAt += Array(repeating: rig.clock.now().timeIntervalSince(began), count: lines.count - counted) }
+            counted = lines.count
+        }
+        return refreshedAt
+    }
+
+    /// The refreshes the session has decided on, each as it was logged. The line is written when the refresh is decided, before the
+    /// refresh itself is started on a task of its own: a test that finds no new line knows there is no refresh on its way, and needn't
+    /// wait to see none happen.
+    private func refreshLines(_ rig: SessionRig) async -> [String] {
+        await rig.session.autoRefreshLogLines.filter { $0.hasPrefix("refreshing the menu bar: ") }
+    }
+
+    /// Whether `engine` has been refreshed this many times (the forced applies), once the refresh the session started on a task of its
+    /// own has got to it.
+    private func refreshed(_ engine: FakeEngine, _ times: Int) async -> Bool {
+        await waitUntil { engine.reapplied == times }
+    }
+
+    private let firstStep = "MenuBarAgent didn't answer 3 times in a row; refreshing (1 of 4); if it still doesn't answer, the next is in at least 1 minute"
+    private let secondStep = "MenuBarAgent didn't answer 3 times in a row; refreshing (2 of 4); if it still doesn't answer, the next is in at least 5 minutes"
+    private let thirdStep = "MenuBarAgent didn't answer 3 times in a row; refreshing (3 of 4); if it still doesn't answer, the next is in at least 15 minutes"
+    private let lastStep = "MenuBarAgent didn't answer 3 times in a row; refreshing (4 of 4); no more until it answers"
+
+    @Test func noAutoRefreshWhileTheScreenIsLocked() async throws {
+        let (rig, engine, _) = await started()
+        rig.world.setAgentRunning(false)
+        await rig.session.sessionChanged(.screenLocked(true))
+        let reads = await rig.session.scansIngested
+
+        // Half an hour of a MenuBarAgent that says nothing, read every ten seconds: as the 88 minutes that were the bug, with no refresh.
+        for _ in 0..<180 { #expect(await pollIdle(rig)) }
+
+        #expect(await rig.session.scansIngested >= reads + 180, "the reads go on: they are what notices the agent answering again")
+        #expect(await refreshLines(rig).isEmpty)
+        #expect(engine.reapplied == 0)
+        #expect(await rig.session.autoRefreshLogLines == ["auto-refresh paused: the screen is locked"])
+    }
+
+    @Test func nothingIsRefreshedWhileTheDisplaysAreAsleepOrAnotherUserIsOnScreen() async throws {
+        for held in [SessionChange.displaysAsleep(true), .sessionActive(false)] {
+            let (rig, engine, _) = await started()
+            rig.world.setAgentRunning(false)
+            await rig.session.sessionChanged(held)
+            for _ in 0..<30 { #expect(await pollIdle(rig)) }
+            #expect(await refreshLines(rig).isEmpty, "\(held)")
+            #expect(engine.reapplied == 0, "\(held)")
+        }
+    }
+
+    @Test func unlockStartsTheCountAgain() async throws {
+        let (rig, engine, _) = await started()
+        rig.world.setAgentRunning(false)
+        _ = await poll(rig, forMinutes: 25)
+        #expect(await refreshed(engine, 4), "all four of an outage, and the stop")
+
+        // Locked for a while: nothing, and nothing counted.
+        await rig.session.sessionChanged(.screenLocked(true))
+        for _ in 0..<12 { #expect(await pollIdle(rig)) }
+        #expect(await refreshLines(rig).count == 4)
+        #expect(engine.reapplied == 4)
+
+        // Unlocked: it is a new outage, and the third read that the agent doesn't answer refreshes it (the minute since the last refresh
+        // went by while the screen was locked).
+        await rig.session.sessionChanged(.screenLocked(false))
+        #expect(await pollIdle(rig))
+        #expect(await pollIdle(rig))
+        #expect(await refreshLines(rig).count == 4, "two reads aren't three")
+        #expect(engine.reapplied == 4)
+        #expect(await pollIdle(rig))
+        #expect(await refreshed(engine, 5))
+        let lines = await rig.session.autoRefreshLogLines
+        #expect(lines.suffix(2) == ["auto-refresh resumed", "refreshing the menu bar: \(firstStep)"], "the first of four again")
+    }
+
+    @Test func systemWakeStartsOver() async throws {
+        let (rig, engine, _) = await started()
+        rig.world.setAgentRunning(false)
+        _ = await poll(rig, forMinutes: 25)
+        #expect(await refreshed(engine, 4))
+
+        // The Mac wakes: the displays' own notification may come before or after, and either way this is a wake.
+        await rig.session.sessionChanged(.systemWoke)
+        #expect(await pollIdle(rig))
+        #expect(await pollIdle(rig))
+        #expect(await refreshLines(rig).count == 4, "two reads aren't three")
+        #expect(engine.reapplied == 4)
+        #expect(await pollIdle(rig))
+        #expect(await refreshed(engine, 5), "the count was begun again by the wake alone")
+        #expect(await refreshLines(rig).last == "refreshing the menu bar: \(firstStep)")
+        #expect(!(await rig.session.autoRefreshLogLines.contains("auto-refresh resumed")), "the session was never held")
+    }
+
+    @Test func twentyFiveSilentMinutesRefreshFourTimes() async throws {
+        let (rig, engine, _) = await started()
+        rig.world.setAgentRunning(false)
+        let times = Mutex<[Double]>([])
+
+        let lines = await LogCapture.lines {
+            let found = await self.poll(rig, forMinutes: 25)
+            times.withLock { $0 = found }
+        }
+
+        #expect(await refreshed(engine, 4), "the plan is applied again, by force, four times and no more")
+        let steps = await refreshLines(rig)
+        #expect(steps == [firstStep, secondStep, thirdStep, lastStep].map { "refreshing the menu bar: \($0)" })
+        // Each one is in the log (lines other tests log at the same time may be there too, so these are looked for, not counted).
+        let logged = lines.filter { $0.contains("refreshing the menu bar: ") }
+        #expect(logged.count >= 4)
+        for step in [firstStep, secondStep, thirdStep, lastStep] {
+            #expect(logged.contains { $0.hasSuffix("[session] refreshing the menu bar: \(step)") }, "\(step)")
+        }
+        // At 30 seconds or a little after, then the waits of the back-off at the least (the clock goes in steps of ten and a tenth).
+        let found = times.withLock { $0 }
+        #expect(found.count == 4)
+        #expect(found.first.map { $0 >= 30 && $0 < 45 } == true)
+        for (index, wait) in AutoRefreshPolicy.backOff.enumerated() where index + 1 < found.count {
+            #expect(found[index + 1] - found[index] >= Double(wait.components.seconds) - 0.5, "step \(index + 2)")
+        }
+        #expect(found.last.map { $0 < 25 * 60 } == true)
+    }
+
+    @Test func manualRefreshWorksWhileLockedAndAfterTheLastStep() async throws {
+        let (rig, engine, _) = await started()
+        await rig.session.sessionChanged(.screenLocked(true))
+        #expect(await rig.session.refresh() == .done)
+        #expect(engine.reapplied == 1, "a refresh that is asked for is not held back")
+        await rig.session.sessionChanged(.screenLocked(false))
+
+        // Unlocking started everything over, and the manual one left nothing behind: the outage has its four.
+        rig.world.setAgentRunning(false)
+        _ = await poll(rig, forMinutes: 25)
+        #expect(await refreshed(engine, 1 + 4))
+
+        // After the last step nothing refreshes by itself, and a refresh that is asked for still works.
+        #expect(await rig.session.refresh() == .done)
+        #expect(engine.reapplied == 6)
+        _ = await poll(rig, forMinutes: 5)
+        #expect(await refreshLines(rig).count == 4, "no fifth: it was not a reset, either, while the agent still says nothing")
+        #expect(engine.reapplied == 6)
+    }
+
+    @Test func aManualRefreshIsNeitherAStepNorAResetOfTheBackOff() async throws {
+        let (rig, engine, _) = await started()
+        rig.world.setAgentRunning(false)
+        for _ in 0..<3 { #expect(await pollIdle(rig)) }
+        #expect(await refreshed(engine, 1), "the first refresh of the outage")
+
+        // Asked for in the middle of the outage, with the screen on: it is a refresh like any, and moves nothing of what is counted.
+        #expect(await rig.session.refresh() == .done)
+        #expect(engine.reapplied == 2)
+
+        // The outage still has three more, 1, 5 and 15 minutes after the one before, and not the manual one.
+        _ = await poll(rig, forMinutes: 25)
+        #expect(await refreshed(engine, 2 + 3))
+        #expect(await refreshLines(rig) == [firstStep, secondStep, thirdStep, lastStep].map { "refreshing the menu bar: \($0)" },
+                "the numbers go one, two, three, four: the manual one has none")
+    }
+
+    @Test func aManualRefreshThatTheAgentAnswersThenAPollEndTheOutage() async throws {
+        let (rig, engine, _) = await started()
+        rig.world.setAgentRunning(false)
+        _ = await poll(rig, forMinutes: 25)
+        #expect(await refreshed(engine, 4))
+
+        // The agent is back, and the refresh that is asked for reads the bar: that read is answered, as is the idle poll ten seconds later,
+        // which ends the outage (answers that span less than a poll's interval are most likely the refresh's own read).
+        rig.world.setAgentRunning(true)
+        #expect(await rig.session.refresh() == .done)
+        #expect(engine.reapplied == 5)
+        #expect(await pollIdle(rig))
+        rig.world.setAgentRunning(false)
+        _ = await poll(rig, forMinutes: 1)
+        #expect(await refreshed(engine, 6), "a new outage, with its first refresh (the second waits a minute more)")
+    }
+
+    @Test func pauseAndResumeAreLoggedOnce() async throws {
+        let state = FakeSessionState()
+        let (rig, engine, _) = await started(sessionState: state)
+        rig.world.setAgentRunning(false)
+        let session = rig.session
+
+        let lines = await LogCapture.lines {
+            // The changes come through the source, as the system's do, and every one of them is a change of the state.
+            state.send(.displaysAsleep(true))
+            state.send(.screenLocked(true))
+            state.send(.sessionActive(false))
+            state.send(.systemWoke)
+            state.send(.displaysAsleep(false))
+            state.send(.screenLocked(false))
+            state.send(.sessionActive(true))
+            _ = await waitUntilLines(session, count: 2)
+        }
+
+        #expect(await rig.session.autoRefreshLogLines == ["auto-refresh paused: the displays are asleep", "auto-refresh resumed"],
+                "once when it was held back, and once when it was let go: the changes in between changed nothing")
+        #expect(lines.contains { $0.hasSuffix("[session] auto-refresh paused: the displays are asleep") })
+        #expect(lines.contains { $0.hasSuffix("[session] auto-refresh resumed") })
+        #expect(await rig.session.sessionNow == .awake)
+        #expect(engine.reapplied == 0)
+    }
+
+    @Test func aSessionThatStartsHeldBackSaysSoAndLetsGoWhenTheStateChanges() async throws {
+        let state = FakeSessionState(SessionState(screenLocked: true))
+        let (rig, engine, _) = await started(sessionState: state)
+        #expect(await rig.session.sessionNow == SessionState(screenLocked: true))
+        #expect(await rig.session.autoRefreshLogLines == ["auto-refresh paused: the screen is locked"])
+
+        rig.world.setAgentRunning(false)
+        for _ in 0..<12 { #expect(await pollIdle(rig)) }
+        #expect(await refreshLines(rig).isEmpty, "held from the start")
+        #expect(engine.reapplied == 0)
+
+        state.send(.screenLocked(false))
+        #expect(await waitUntilLines(rig.session, count: 2))
+        #expect(await rig.session.autoRefreshLogLines.last == "auto-refresh resumed")
+        for _ in 0..<3 { #expect(await pollIdle(rig)) }
+        #expect(await refreshed(engine, 1))
+    }
+
+    @Test func quitStopsListeningToTheSession() async throws {
+        let state = FakeSessionState()
+        let (rig, _, _) = await started(sessionState: state)
+        #expect(state.openStreams == 1)
+
+        await rig.session.tearDownForQuit()
+
+        #expect(await waitUntil { state.openStreams == 0 }, "the listener is ended with the polling")
+        // Nobody is listening for it now; and if it did get to the session, the session takes no change after the quit.
+        state.send(.screenLocked(true))
+        await rig.session.sessionChanged(.screenLocked(true))
+        #expect(await rig.session.sessionNow == .awake)
+        #expect(await rig.session.autoRefreshLogLines.isEmpty)
+    }
+
+    /// Returns once the session's log of auto-refresh has this many lines; false if it doesn't within five seconds.
+    private func waitUntilLines(_ session: MenuBarSession, count: Int) async -> Bool {
+        let enough = await withinTimeLimit(.seconds(5)) {
+            while await session.autoRefreshLogLines.count < count {
+                guard !Task.isCancelled else { return false }
+                await Task.yield()
+            }
+            return true
+        }
+        return enough ?? false
+    }
+
+    @Test func aDisplayChangeSeenWhileTheDisplaysAreAsleepIsJudgedAfterTheWake() async throws {
+        // As anEmptyBarAfterADisplayChangeRefreshes, with the displays asleep when the change is read, and the notification that wakes
+        // them after it: the bar is judged by the first read that may refresh, against the bars there were before the change.
+        let (rig, engine, _) = await started()
+        let had = try #require(await rig.state).inventory.bars.map(\.displayUUID)
+        #expect(had.contains(DisplayFixtures.deskPortrait.uuid), "the portrait display had a bar")
+        await rig.session.sessionChanged(.displaysAsleep(true))
+        rig.world.setShape(.laptop)
+        let layout = DisplayLayout(displays: rig.world.layout.displays + [DisplayFixtures.deskPortrait])
+
+        let changed = Task { await rig.session.displaysChanged(layout) }
+        #expect(await rig.letTheCoalescedReadGo())
+        await changed.value
+        #expect(await refreshLines(rig).isEmpty, "held: the displays are asleep")
+        #expect(engine.reapplied == 0)
+
+        await rig.session.sessionChanged(.displaysAsleep(false))
+        #expect(await refreshLines(rig).isEmpty, "the wake itself reads nothing")
+        #expect(engine.reapplied == 0)
+        #expect(await pollIdle(rig))
+        #expect(await refreshed(engine, 1), "the display that had a bar and has none: refreshed once")
+        #expect(await refreshLines(rig) == ["refreshing the menu bar: a display change left the menu bar empty; refreshing once"])
     }
 
     // MARK: Quit
@@ -587,12 +907,12 @@ struct MenuBarSessionLifecycleTests {
         await rig.session.move(app: notes, to: .hidden)
         #expect(await rig.session.refresh() == .refused("Mantel is quitting."))
         #expect(await rig.session.setReveal(.allShown) == .none)
+        // Nothing sleeps on the clock, so no length of time can wake anything: the polling is over.
+        #expect(rig.clock.sleeperCount == 0, "the polling is over")
         rig.clock.advance(by: .seconds(120))
-        try await Task.sleep(for: .milliseconds(30))
         #expect(engine.applied.count == applied)
         #expect(engine.tornDown == 1)
         #expect(await rig.session.scansIngested == reads)
-        #expect(rig.clock.sleeperCount == 0, "the polling is over")
     }
 
     @Test func nothingPutsAnEngineBackInChargeAfterQuitting() async throws {
@@ -650,10 +970,11 @@ struct MenuBarSessionLifecycleTests {
         gate.open()
         await starting.value
 
+        // What start sets going is set in the stretch of the call that starts it: nothing has to have reached the clock for this to show.
+        #expect(await rig.session.isPollingTheBar == false, "the bar isn't polled")
+        #expect(await rig.session.checksForRoomEveryMinute == false, "and there is no check for room every minute")
         rig.clock.advance(by: .seconds(120))
-        try await Task.sleep(for: .milliseconds(30))
         #expect(await rig.session.scansIngested == 0, "nothing was read")
-        #expect(rig.clock.sleeperCount == 0, "no polling, no check every minute")
         #expect(engine.applied.isEmpty, "and nothing was applied")
     }
 
@@ -670,9 +991,10 @@ struct MenuBarSessionLifecycleTests {
         gate.open()
         await starting.value
 
+        #expect(await rig.session.isPollingTheBar == false, "no polling")
+        #expect(await rig.session.checksForRoomEveryMinute == false, "no check every minute")
         rig.clock.advance(by: .seconds(120))
-        try await Task.sleep(for: .milliseconds(30))
-        #expect(rig.clock.sleeperCount == 0, "no polling, no check every minute")
+        #expect(rig.clock.sleeperCount == 0)
     }
 
     @Test func quitWaitsForATeardownThatIsUnderWay() async throws {
@@ -688,7 +1010,8 @@ struct MenuBarSessionLifecycleTests {
             finished.set(true)
         }
         await engine.tearDownEntered.wait()
-        try await Task.sleep(for: .milliseconds(20))
+        // The quit is waiting: its bound (1.5 s on the clock) is the one sleeper, and the engine's teardown is held.
+        #expect(await waitUntil { rig.clock.sleeperCount == 1 })
         #expect(!finished.isOn, "the journal's replay doesn't begin until the engine is down")
 
         gate.open()
@@ -710,7 +1033,7 @@ struct MenuBarSessionLifecycleTests {
         let applying = Task { await rig.session.move(app: weather, to: .shown) }
         await engine.applyEntered.wait()
         let waiting = Task { await rig.session.move(app: notes, to: .hidden) }
-        try await Task.sleep(for: .milliseconds(30))
+        await letTasksRun()
         let appliesBefore = engine.applies
 
         let result = Mutex<Bool?>(nil)
@@ -720,8 +1043,8 @@ struct MenuBarSessionLifecycleTests {
         }
         #expect(await waitUntil { rig.clock.sleeperCount == 1 }, "only the bound is waiting on the clock")
         rig.clock.advance(by: .milliseconds(1499))
-        try await Task.sleep(for: .milliseconds(20))
-        #expect(result.withLock { $0 } == nil, "1.499 seconds is inside the bound")
+        #expect(rig.clock.sleeperCount == 1, "the bound hasn't gone off: 1.499 seconds is inside it")
+        #expect(result.withLock { $0 } == nil)
         rig.clock.advance(by: .milliseconds(1))
         await quit.value
         #expect(result.withLock { $0 } == false, "and at 1.5 seconds it goes on: the journal's replay is next")

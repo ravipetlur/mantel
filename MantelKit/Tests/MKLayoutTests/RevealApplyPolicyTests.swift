@@ -123,4 +123,56 @@ struct RevealApplyPolicyTests {
         policy.forget()
         #expect(!policy.shouldApply(.collapsed, machineIsIn: .hiddenShown))
     }
+
+    @Test func aCorrectionIsStaleOnceAChangeHasPassedItsSecondLookSince() {
+        var policy = RevealApplyPolicy()
+        let stamp = policy.passedSecondLook()
+        #expect(!policy.isStale(stamp: stamp))
+        policy.passedSecondLook()
+        #expect(policy.isStale(stamp: stamp))
+    }
+
+    @Test func theNewestChangesCorrectionIsNotStale() {
+        var policy = RevealApplyPolicy()
+        policy.passedSecondLook()
+        let stamp = policy.passedSecondLook()
+        #expect(!policy.isStale(stamp: stamp))
+    }
+
+    @Test func aResetMakesACorrectionStale() {
+        var policy = RevealApplyPolicy()
+        let stamp = policy.passedSecondLook()
+        policy.forget()
+        #expect(policy.isStale(stamp: stamp))
+    }
+
+    @Test func theCollapseAfterAnIconClickHappensWhenNothingHasChangedSinceTheCellWasClicked() {
+        var policy = RevealApplyPolicy()
+        let stamp = policy.passedSecondLook()
+        #expect(policy.collapsesAfterIconClick(stamp: stamp))
+    }
+
+    @Test func theCollapseAfterAnIconClickIsSkippedOnceANewerRevealHasPassed() {
+        var policy = RevealApplyPolicy()
+        let stamp = policy.passedSecondLook()
+        // The click made room for seconds; meanwhile the person asked for an inline reveal (or Focus Mode).
+        policy.passedSecondLook()
+        #expect(!policy.collapsesAfterIconClick(stamp: stamp))
+    }
+
+    @Test func theCollapseAfterAnIconClickIsSkippedAfterAReset() {
+        var policy = RevealApplyPolicy()
+        let stamp = policy.passedSecondLook()
+        policy.forget()
+        #expect(!policy.collapsesAfterIconClick(stamp: stamp))
+    }
+
+    @Test func aChangeThatIsSkippedLeavesCorrectionsAlone() {
+        var policy = RevealApplyPolicy()
+        policy.didApply(.hiddenShown, machineIsIn: .hiddenShown)
+        let stamp = policy.passedSecondLook()
+        // Looking at whether a change is to be applied changes nothing.
+        _ = policy.shouldApply(.hiddenShown, machineIsIn: .hiddenShown)
+        #expect(!policy.isStale(stamp: stamp))
+    }
 }

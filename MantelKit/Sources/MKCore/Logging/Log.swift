@@ -31,8 +31,9 @@ public enum Log {
     }
 
     /// Installs the file the logs are written to. The app calls this once, at launch, with a sink on
-    /// `MantelPaths.logs`; before that, lines go to the unified log only.
-    public static func configure(sink: FileLogSink) {
+    /// `MantelPaths.logs`; before that, lines go to the unified log only. `nil` takes the sink away again, which is for a test that
+    /// reads what is logged meanwhile (`LogCapture`): the app never does.
+    public static func configure(sink: FileLogSink?) {
         router.configure(sink: sink)
     }
 }
@@ -46,7 +47,7 @@ final class LogRouter: Sendable {
         self.subsystem = subsystem
     }
 
-    func configure(sink newSink: FileLogSink) {
+    func configure(sink newSink: FileLogSink?) {
         sink.withLock { $0 = newSink }
     }
 

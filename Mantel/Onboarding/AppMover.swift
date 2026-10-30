@@ -30,7 +30,7 @@ enum AppMover {
                 alert.messageText = "Mantel couldn't check which copy is running, so it didn't replace anything"
                 alert.informativeText = "Quit Mantel and move it to Applications in Finder."
             }
-            alert.runModal()
+            await ModalLoop.run(alert)
             return false
         }
 
@@ -40,11 +40,11 @@ enum AppMover {
             alert.informativeText = "Another copy of Mantel is already there. Replacing it moves that copy to the Trash."
             alert.addButton(withTitle: "Replace")
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            guard await ModalLoop.run(alert) == .alertFirstButtonReturn else { return false }
             do {
                 try fileManager.trashItem(at: destination, resultingItemURL: nil)
             } catch {
-                show("Couldn't replace the copy in Applications", error)
+                await show("Couldn't replace the copy in Applications", error)
                 return false
             }
         }
@@ -52,7 +52,7 @@ enum AppMover {
         do {
             try fileManager.moveItem(at: source, to: destination)
         } catch {
-            show("Couldn't move Mantel to Applications", error)
+            await show("Couldn't move Mantel to Applications", error)
             return false
         }
         Log.info("onboarding", "moved Mantel to Applications")
@@ -65,10 +65,10 @@ enum AppMover {
             _ = try await NSWorkspace.shared.openApplication(at: destination, configuration: configuration)
         } catch {
             // Moved, though: the bundle this copy was run from is gone, so it must not be moved again.
-            show("Mantel is in Applications, but it didn't start there. Open it from Applications", error)
+            await show("Mantel is in Applications, but it didn't start there. Open it from Applications", error)
             return true
         }
-        NSApp.terminate(nil)
+        AppQuit.request()
         return true
     }
 
@@ -85,12 +85,12 @@ enum AppMover {
     }
 
     /// A failure, as an alert: what happened, and why as the system words it.
-    private static func show(_ message: String, _ error: any Error) {
+    private static func show(_ message: String, _ error: any Error) async {
         Log.error("onboarding", "\(message): \(error.localizedDescription)")
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = message
         alert.informativeText = error.localizedDescription
-        alert.runModal()
+        await ModalLoop.run(alert)
     }
 }

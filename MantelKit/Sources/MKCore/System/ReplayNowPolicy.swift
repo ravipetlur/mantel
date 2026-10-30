@@ -22,6 +22,10 @@ public enum ReplayNowPolicy {
 
     /// The first reason that applies: nothing to put back, a platform test is under way, or the hiding method is using what is
     /// journaled.
+    ///
+    /// `journalEmpty` means no temporary change is waiting (`Journal.untilQuitRecords` is empty). What Mantel keeps (`.kept` records)
+    /// is not waiting for anything: Replay now doesn't touch it, and only "Restore original layout" and "Restore original spacing"
+    /// put it back.
     public static func decide(journalEmpty: Bool, probeChangingMenuBar: Bool, engineHoldsJournal: Bool) -> ReplayNowDecision {
         if journalEmpty { return .refused("Nothing is waiting to be put back.") }
         if probeChangingMenuBar { return .refused(probeChangingMenuBarText) }

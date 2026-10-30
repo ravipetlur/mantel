@@ -50,6 +50,8 @@ public final class ControlSocketServer: Sendable {
     /// How the listener accepts a connection: `accept(2)` on the listening descriptor, which returns the client's descriptor,
     /// or -1 with `errno` set. A test gives its own to make it fail.
     typealias Accept = @Sendable (_ listener: Int32) -> Int32
+    /// Calls `work` once `after` has passed (on the server's queue, or on a test's clock).
+    typealias Scheduler = @Sendable (_ after: Duration, _ work: @escaping @Sendable () -> Void) -> Void
 
     private struct Running {
         let listener: any DispatchSourceRead
@@ -68,6 +70,8 @@ public final class ControlSocketServer: Sendable {
     private let handler: Handler
     private let accept: Accept
     private let pauseOnExhaustion: Duration
+    private let resumeAfter: Scheduler?
+    private let clock: any Clock
     private let warn: @Sendable (String) -> Void
     private let queue = DispatchQueue(label: "\(Log.subsystem).control-socket")
     private let running = Mutex<Running?>(nil)
@@ -84,10 +88,15 @@ public final class ControlSocketServer: Sendable {
                   pauseOnExhaustion: .seconds(1), warn: { Log.warning(Self.category, $0) }, handler: handler)
     }
 
-    /// With the way a connection is accepted, how long the listener rests when there are no descriptors left, and where the
-    /// warning about that goes given, so that a test can make `accept` fail and see what is said.
+    /// With the way a connection is accepted, how long the listener rests when there are no descriptors left (and what ends the rest, a
+    /// test's clock; the server's own queue when it isn't given), and where the warning about that goes given, so that a test can make
+    /// `accept` fail and see what is said. `clock` is what the wait for a client that doesn't read a reply goes by (the real time when it
+    /// isn't given), so that a test moves it by hand.
     init(path: URL, inspector: any PeerInspecting, own: OwnSigning, accept: @escaping Accept, pauseOnExhaustion: Duration,
-         warn: @escaping @Sendable (String) -> Void, handler: @escaping Handler) {
+         resumeAfter: Scheduler? = nil, clock: any Clock = SystemClock(), warn: @escaping @Sendable (String) -> Void,
+         handler: @escaping Handler) {
+        self.resumeAfter = resumeAfter
+        self.clock = clock
         self.path = path
         self.inspector = inspector
         self.own = own
@@ -113,9 +122,21 @@ public final class ControlSocketServer: Sendable {
         }
     }
 
-    /// Stops listening, closes every client's connection and removes the socket file. Does nothing when not running.
+    /// How long `stop()` waits for the listener to finish closing. The quit calls it on the main thread, and a main thread that waits with no
+    /// bound is the one step of the quit that the quit timer can't get past (it answers on the main actor too).
+    static let listenerCloseLimit: DispatchTimeInterval = .milliseconds(500)
+
+    /// Stops listening, closes every client's connection and removes the socket file. Does nothing when not running. Waits for the listener
+    /// to be closed for `listenerCloseLimit` at most: past it the file is removed all the same, and the listener finishes closing by itself.
     public func stop() {
         teardown(waiting: true)
+    }
+
+    /// Waits for the listener's cancel handler to have run, for `limit` at most; false when it hadn't (the quit's own trace says how long
+    /// the step took).
+    @discardableResult
+    static func waitForClose(_ closed: DispatchGroup, limit: DispatchTimeInterval) -> Bool {
+        closed.wait(timeout: .now() + limit) != .timedOut
     }
 
     private func teardown(waiting: Bool) {
@@ -129,7 +150,7 @@ public final class ControlSocketServer: Sendable {
         // A suspended source doesn't finish being cancelled until it is resumed.
         stopped.gate.shutDown()
         for connection in stopped.connections.values { connection.close() }
-        if waiting { stopped.listenerClosed.wait() }
+        if waiting { Self.waitForClose(stopped.listenerClosed, limit: Self.listenerCloseLimit) }
         // Only the file this server made, and only while the lock is still held.
         if stopped.file.matches(path.path) { unlink(path.path) }
         close(stopped.lock)
@@ -219,7 +240,7 @@ public final class ControlSocketServer: Sendable {
             guard client >= 0 else {
                 let code = errno
                 // No descriptor to give it: the connection stays waiting, and the source would call again at once, for ever.
-                if code == EMFILE || code == ENFILE, gate.pause(for: pauseOnExhaustion, on: queue) == .pausedFirstOfEpisode {
+                if code == EMFILE || code == ENFILE, pause(gate) == .pausedFirstOfEpisode {
                     warn("too many open files; pausing new connections for a second")
                 }
                 return
@@ -229,13 +250,23 @@ public final class ControlSocketServer: Sendable {
         }
     }
 
+    private func pause(_ gate: ListenerGate) -> ListenerGate.Pause {
+        guard let resumeAfter else { return gate.pause(for: pauseOnExhaustion, on: queue) }
+        return gate.pause(for: pauseOnExhaustion, schedule: resumeAfter)
+    }
+
+    /// Whether a client has sent more lines than could wait and is only being answered now (for a test to know the flood was read).
+    var hasOverflowedConnection: Bool {
+        running.withLock { $0?.connections.values.contains { $0.hasOverflowed } ?? false }
+    }
+
     /// Checks a client that has just connected: refuses it, or starts serving it.
     private func admit(_ fd: Int32) {
         guard SocketAddress.configure(fd) else {
             close(fd)
             return
         }
-        let connection = ControlConnection(fd: fd)
+        let connection = ControlConnection(fd: fd, clock: clock)
         let peer: PeerInfo
         switch vet(inspector.inspect(socket: fd)) {
         case .failure(let refusal):
@@ -377,6 +408,14 @@ final class ListenerGate: Sendable {
 
     /// Suspends the source, and resumes it after `duration` on `queue`.
     func pause(for duration: Duration, on queue: DispatchQueue) -> Pause {
+        pause(for: duration, schedule: { after, work in
+            let seconds = Double(after.components.seconds) + Double(after.components.attoseconds) / 1e18
+            queue.asyncAfter(deadline: .now() + seconds) { work() }
+        })
+    }
+
+    /// Suspends the source, and has `schedule` call back after `duration` to resume it.
+    func pause(for duration: Duration, schedule: ControlSocketServer.Scheduler) -> Pause {
         let outcome = state.withLock { [suspendSource] state -> Pause in
             guard !state.isShutDown, !state.isSuspended else { return .alreadyResting }
             state.isSuspended = true
@@ -385,8 +424,7 @@ final class ListenerGate: Sendable {
             return state.toldOfEpisode ? .paused : .pausedFirstOfEpisode
         }
         guard outcome != .alreadyResting else { return outcome }
-        let seconds = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-        queue.asyncAfter(deadline: .now() + seconds) { [self] in resume() }
+        schedule(duration) { [self] in resume() }
         return outcome
     }
 

@@ -13,7 +13,10 @@ import UniformTypeIdentifiers
 /// - `menuBarWindows`: every window on screen at the main menu's level or the status items' (24 and 25), with its owner's bundle ID
 ///   and its bounds;
 /// - `systemModules`: every `com.apple.menuextra.*` identifier in the menu bar;
-/// - `frontMenuFrames`: how many menus the front app has, whose frames are in the snapshot file (`MenuBarSnapshot.frontMenuFrames`).
+/// - `frontMenuFrames`: how many menus the front app has, whose frames are in the snapshot file (`MenuBarSnapshot.frontMenuFrames`);
+/// - `ownItemFrames`: where Mantel's own items' buttons are, by the name the system keeps their place under;
+/// - `ownFrameMatchesSlot`: for each display, whether the middle of each of those frames is in the slot that is that item's (`null` where
+///   the display has no slot for it).
 ///
 /// It only reads, and reads the window list for owners and levels, never for titles.
 enum InventoryProbe {
@@ -47,6 +50,10 @@ enum InventoryProbe {
         let prefix = "com.apple.menuextra."
         recorder.measure("systemModules", strings: Set(snapshot.allSlots.compactMap(\.identifier).filter { $0.hasPrefix(prefix) }).sorted())
 
+        let ownFrames = await context.platform.ownItemFrames()
+        recorder.measure("ownItemFrames", .object(ownFrames.mapValues(NotchCoordinatesProbe.rect)))
+        recorder.measure("ownFrameMatchesSlot", ownFrameMatchesSlot(ownFrames, in: snapshot))
+
         let name = "inventory-\(ProbeReport.timestamp(startedAt: context.startedAt))-snapshot"
         do {
             try AtomicFile.ensureFolder(context.paths.probes)
@@ -56,6 +63,34 @@ enum InventoryProbe {
         } catch {
             recorder.fail("The snapshot couldn't be saved: \(error.localizedDescription)")
         }
+    }
+}
+
+extension InventoryProbe {
+    /// For each display, each of Mantel's own items' frames, and whether the middle of the frame is in the item's slot on that display.
+    ///
+    /// A slot is an own item's by what Mantel gives the item: the name its place is kept under (in the slot's identifier) or what it is called
+    /// for the accessibility tools (`DotsCopy`); the dots are the two own items there are. The display's slot is the one in the window
+    /// that was chosen for it (as the scanner chooses).
+    static func ownFrameMatchesSlot(_ frames: [String: CGRect], in snapshot: MenuBarSnapshot) -> JSONValue {
+        let descriptions = [DotsCopy.hiddenDotName: DotsCopy.hiddenDotDescription, DotsCopy.alwaysDotName: DotsCopy.alwaysDotDescription]
+        var perDisplay: [String: JSONValue] = [:]
+        for window in snapshot.chosenWindows() {
+            let slots = snapshot.agentWindows[window.index].slots
+            var matches: [String: JSONValue] = [:]
+            for (name, frame) in frames {
+                let slot = slots.first { slot in
+                    (slot.identifier?.hasSuffix(name) ?? false) || (descriptions[name].map { $0 == slot.description } ?? false)
+                }
+                if let slotFrame = slot?.frame, !slotFrame.isEmpty {
+                    matches[name] = .bool(slotFrame.contains(CGPoint(x: frame.midX, y: frame.midY)))
+                } else {
+                    matches[name] = .null
+                }
+            }
+            perDisplay[window.displayUUID] = .object(matches)
+        }
+        return .object(perDisplay)
     }
 }
 

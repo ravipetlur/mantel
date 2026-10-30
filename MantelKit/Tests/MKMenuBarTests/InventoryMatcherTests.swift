@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import MKCore
+import MKLayout
 import MKTestSupport
 import Testing
 
@@ -147,6 +148,62 @@ struct InventoryMatcherTests {
                        apps: [app(2, "com.example.b", 106, width: 24), app(1, "com.example.a", 124, width: 37)], ownBundleID: "com.example.mantel"),
             memory: &other)
         #expect(reversed.items.map { [$0.ownerBundleID: $0.frames[mainUUID]?.minX] } == inventory.items.map { [$0.ownerBundleID: $0.frames[mainUUID]?.minX] })
+    }
+
+    @Test func staleFrameDoesNotStealWonSlot() {
+        // Two slots side by side, 100 to 138 and 138 to 176. The first is drawn by the notes app, whose frame is in it. A weather item that is
+        // concealed reports a stale frame whose center is in the first slot, a point short of the second slot's edge: its outset reaches
+        // the second slot, which no frame is in (nobody's icon is drawn there). It lost the first to the notes app's nearer frame, and it has
+        // no slot: it doesn't take the neighbour's.
+        let bar = MatchBar(displayUUID: mainUUID, rect: CGRect(x: 0, y: 0, width: 1000, height: 30), slots: [
+            AgentSlot(frame: CGRect(x: 100, y: 0, width: 38, height: 30), identifier: nil, role: nil, subrole: nil, description: nil, ownerPID: nil, isOverflowChevron: false),
+            AgentSlot(frame: CGRect(x: 138, y: 0, width: 38, height: 30), identifier: nil, role: nil, subrole: nil, description: nil, ownerPID: nil, isOverflowChevron: false),
+        ])
+        func app(_ pid: pid_t, _ bundleID: String, _ x: CGFloat, width: CGFloat) -> AppExtras {
+            AppExtras(pid: pid, bundleID: bundleID, name: nil,
+                      items: [ExtraItem(index: 0, frame: CGRect(x: x, y: 2, width: width, height: 26), identifier: nil, title: nil, description: nil)],
+                      timedOut: false)
+        }
+        // The notes app's frame is centered at 119, in the first slot; the stale one is centered at 137.5: in the first, 0.5 from its edge, and
+        // within the outset of the second.
+        let notes = app(1, "com.example.notes", 107, width: 24)
+        let stale = app(2, "com.example.weather", 125.5, width: 24)
+        var memory = IndexMemory()
+        let inventory = InventoryMatcher.match(
+            MatchInput(capturedAt: Date(timeIntervalSince1970: 0), layout: .desk, bars: [bar], apps: [notes, stale], ownBundleID: "com.example.mantel"),
+            memory: &memory)
+
+        #expect(inventory.items(ofApp: "com.example.notes").first?.frames[mainUUID]?.minX == 100)
+        #expect(inventory.items(ofApp: "com.example.weather").first?.frames[mainUUID] == nil, "it lost the slot it is in, and the next isn't its")
+        // A frame that is in the second slot, as one that is drawn there, still has it.
+        var other = IndexMemory()
+        let drawn = InventoryMatcher.match(
+            MatchInput(capturedAt: Date(timeIntervalSince1970: 0), layout: .desk, bars: [bar],
+                       apps: [notes, app(2, "com.example.weather", 144, width: 24)], ownBundleID: "com.example.mantel"), memory: &other)
+        #expect(drawn.items(ofApp: "com.example.weather").first?.frames[mainUUID]?.minX == 138)
+    }
+
+    @Test func staleFrameOfAConcealedAppDoesNotStealWonSlot() {
+        // The same bar and frames, and the weather app is one the plan conceals: its frames are believed last, after the notes app has won the
+        // first slot (the group of apps that aren't concealed claims first). It lost that slot, and the neighbour's isn't its.
+        let bar = MatchBar(displayUUID: mainUUID, rect: CGRect(x: 0, y: 0, width: 1000, height: 30), slots: [
+            AgentSlot(frame: CGRect(x: 100, y: 0, width: 38, height: 30), identifier: nil, role: nil, subrole: nil, description: nil, ownerPID: nil, isOverflowChevron: false),
+            AgentSlot(frame: CGRect(x: 138, y: 0, width: 38, height: 30), identifier: nil, role: nil, subrole: nil, description: nil, ownerPID: nil, isOverflowChevron: false),
+        ])
+        func app(_ pid: pid_t, _ bundleID: String, _ x: CGFloat, width: CGFloat) -> AppExtras {
+            AppExtras(pid: pid, bundleID: bundleID, name: nil,
+                      items: [ExtraItem(index: 0, frame: CGRect(x: x, y: 2, width: width, height: 26), identifier: nil, title: nil, description: nil)],
+                      timedOut: false)
+        }
+        var memory = IndexMemory()
+        let inventory = InventoryMatcher.match(
+            MatchInput(capturedAt: Date(timeIntervalSince1970: 0), layout: .desk, bars: [bar],
+                       apps: [app(1, "com.example.notes", 107, width: 24), app(2, "com.example.weather", 125.5, width: 24)],
+                       ownBundleID: "com.example.mantel", concealedApps: ["com.example.weather"]),
+            memory: &memory)
+
+        #expect(inventory.items(ofApp: "com.example.notes").first?.frames[mainUUID]?.minX == 100)
+        #expect(inventory.items(ofApp: "com.example.weather").first?.frames[mainUUID] == nil)
     }
 
     @Test func noAppFrameClaimsTheSlotOfASystemModule() {
@@ -372,7 +429,8 @@ struct InventoryMatcherTests {
         // The slots of the portrait display are wider, so that they can't be lined up either: nothing says whose they are.
         let main = mainBar([slot(100, name: "Item-0"), slot(200, name: "Item-0"), slot(300, name: "Item-1")])
         let portrait = portraitBar([slot(-500, width: 50, name: "Item-0"), slot(-400, width: 50, name: "Item-0"), slot(-300, width: 50, name: "Item-1")])
-        let apps = [app(1, "com.example.one", in: main.slots[0]), app(2, "com.example.two", in: main.slots[1]), app(3, "com.example.three", in: main.slots[2])]
+        let apps = [app(1, "com.example.one", in: main.slots[0], identifier: "Item-0"), app(2, "com.example.two", in: main.slots[1], identifier: "Item-0"),
+                    app(3, "com.example.three", in: main.slots[2], identifier: "Item-1")]
         var memory = IndexMemory()
         let result = InventoryMatcher.matchCounting(input([main, portrait], apps: apps), memory: &memory)
         let inventory = result.inventory
@@ -551,8 +609,8 @@ struct InventoryMatcherTests {
     private func twoBarsWithAMiddle(portraitMiddle: [AgentSlot]) -> (MatchInput, [AgentSlot]) {
         let main = mainBar([slot(100, name: "a"), slot(200), slot(300), slot(400, name: "b")])
         let portrait = portraitBar([slot(-900, name: "a")] + portraitMiddle + [slot(-500, name: "b")])
-        let apps = [app(1, "com.example.a", in: main.slots[0]), app(2, "com.example.one", in: main.slots[1]),
-                    app(3, "com.example.two", in: main.slots[2]), app(4, "com.example.b", in: main.slots[3])]
+        let apps = [app(1, "com.example.a", in: main.slots[0], identifier: "a"), app(2, "com.example.one", in: main.slots[1]),
+                    app(3, "com.example.two", in: main.slots[2]), app(4, "com.example.b", in: main.slots[3], identifier: "b")]
         return (input([main, portrait], apps: apps), portraitMiddle)
     }
 
@@ -595,9 +653,9 @@ struct InventoryMatcherTests {
         // The portrait display has an item more between A and B. The stretch between B and C is the same on both and is lined up.
         let main = mainBar([slot(100, name: "a"), slot(200), slot(300), slot(400, name: "b"), slot(500), slot(600, name: "c")])
         let portrait = portraitBar([slot(-900, name: "a"), slot(-800), slot(-700), slot(-600), slot(-500, name: "b"), slot(-400), slot(-300, name: "c")])
-        let apps = [app(1, "com.example.a", in: main.slots[0]), app(2, "com.example.one", in: main.slots[1]),
-                    app(3, "com.example.two", in: main.slots[2]), app(4, "com.example.b", in: main.slots[3]),
-                    app(5, "com.example.three", in: main.slots[4]), app(6, "com.example.c", in: main.slots[5])]
+        let apps = [app(1, "com.example.a", in: main.slots[0], identifier: "a"), app(2, "com.example.one", in: main.slots[1]),
+                    app(3, "com.example.two", in: main.slots[2]), app(4, "com.example.b", in: main.slots[3], identifier: "b"),
+                    app(5, "com.example.three", in: main.slots[4]), app(6, "com.example.c", in: main.slots[5], identifier: "c")]
         var memory = IndexMemory()
         let result = InventoryMatcher.matchCounting(input([main, portrait], apps: apps), memory: &memory)
         #expect(result.segmentsNotAligned == 1)
@@ -715,8 +773,9 @@ struct InventoryMatcherTests {
         // after E either).
         let main = mainBar([slot(100, name: "a1"), slot(200, name: "e"), slot(300), slot(400, name: "a2"), slot(500, name: "f")])
         let portrait = portraitBar([slot(-900, name: "e"), slot(-800, name: "a1"), slot(-700), slot(-600), slot(-500, name: "a2"), slot(-400, name: "f")])
-        let apps = [app(1, "com.example.a1", in: main.slots[0]), app(2, "com.example.e", in: main.slots[1]), app(3, "com.example.u", in: main.slots[2]),
-                    app(4, "com.example.a2", in: main.slots[3]), app(5, "com.example.f", in: main.slots[4])]
+        let apps = [app(1, "com.example.a1", in: main.slots[0], identifier: "a1"), app(2, "com.example.e", in: main.slots[1], identifier: "e"),
+                    app(3, "com.example.u", in: main.slots[2]), app(4, "com.example.a2", in: main.slots[3], identifier: "a2"),
+                    app(5, "com.example.f", in: main.slots[4], identifier: "f")]
         var memory = IndexMemory()
         let result = InventoryMatcher.matchCounting(input([main, portrait], apps: apps), memory: &memory)
         #expect(result.segmentsNotAligned == 2, "the stretch before A1, which has a slot more on the portrait display, and the one between A1 and A2")
@@ -783,6 +842,213 @@ struct InventoryMatcherTests {
         #expect(inventory.unansweredApps == ["com.example.hung", "com.example.left"])
     }
 
+    @Test func emptyBundleIDsAreFiltered() {
+        // An app with no bundle ID, or an empty one, can't be told from another that has none: it is nobody's items.
+        var memory = IndexMemory()
+        let bar = mainBar([slot(100), slot(200), slot(300)])
+        let nothing = AppExtras(pid: 3, bundleID: nil, name: nil,
+                                items: [ExtraItem(index: 0, frame: slot(300).frame?.insetBy(dx: 6, dy: 1), identifier: nil, title: nil, description: nil)],
+                                timedOut: false)
+
+        let result = InventoryMatcher.matchCounting(input([bar], apps: [app(1, "", in: slot(100)), app(2, "com.example.two", in: slot(200)), nothing]),
+                                                    memory: &memory)
+
+        #expect(result.inventory.items.map(\.ownerBundleID).filter { $0 != "" } == ["com.example.two"])
+        #expect(!result.inventory.items.contains { $0.ownerBundleID.isEmpty }, "no item is the empty app's")
+        #expect(result.listed.keys.allSatisfy { !$0.bundleID.isEmpty })
+        #expect(result.inventory.untiedSlots[mainUUID]?.count == 2, "the slots of the apps that were filtered are slots nobody claimed")
+    }
+
+    @Test func placesOfAnAppsItemsAreRememberedWhileTheyAreAllDrawn() {
+        // The app lists its items right to left: the first it lists is the right-hand one.
+        func two(_ first: AgentSlot, _ second: AgentSlot, drawn: Bool = true) -> AppExtras {
+            AppExtras(pid: 22, bundleID: "com.example.two", name: nil, items: [
+                ExtraItem(index: 0, frame: drawn ? first.frame?.insetBy(dx: 6, dy: 1) : nil, identifier: "two.right", title: nil, description: nil),
+                ExtraItem(index: 1, frame: drawn ? second.frame?.insetBy(dx: 6, dy: 1) : nil, identifier: "two.left", title: nil, description: nil),
+            ], timedOut: false)
+        }
+        var memory = IndexMemory()
+        let bar = mainBar([slot(100), slot(200)])
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == nil, "nothing is known before they are seen")
+
+        _ = InventoryMatcher.match(input([bar], apps: [two(slot(200), slot(100))]), memory: &memory)
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0], "position 0 is the right-hand one")
+
+        // They are concealed: nothing to be told by, and what was learned stays.
+        _ = InventoryMatcher.match(input([mainBar([slot(100, frame: false), slot(200, frame: false)])], apps: [two(slot(200), slot(100), drawn: false)]),
+                                   memory: &memory)
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1, 2]) == nil, "an app that now lists another number has another order")
+        #expect(memory.places(ofApp: "com.example.other", covering: [0, 1]) == nil)
+
+        // One drawn and one not: the order of the two isn't learned over what was known.
+        var partial = IndexMemory()
+        _ = InventoryMatcher.match(input([bar], apps: [AppExtras(pid: 22, bundleID: "com.example.two", name: nil, items: [
+            ExtraItem(index: 0, frame: slot(200).frame?.insetBy(dx: 6, dy: 1), identifier: "two.right", title: nil, description: nil),
+            ExtraItem(index: 1, frame: nil, identifier: "two.left", title: nil, description: nil),
+        ], timedOut: false)]), memory: &partial)
+        #expect(partial.places(ofApp: "com.example.two", covering: [0, 1]) == nil)
+    }
+
+    @Test func forgettingAnAppsPlacesKeepsItsOrder() {
+        var memory = IndexMemory()
+        memory.remember(order: [0: 1, 1: 0], ofApp: "com.example.two")
+        memory.remember(places: [0: 1, 1: 0], ofApp: "com.example.two")
+        memory.remember(places: [0: 0], ofApp: "com.example.other")
+
+        // Mantel changed the order of the app's items in macOS's table: where they sat is of the old order, and is learned again.
+        memory.forgetPlaces(ofApp: "com.example.two")
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == nil)
+        #expect(memory.order(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+        #expect(memory.places(ofApp: "com.example.other", covering: [0]) == [0: 0], "no other app's")
+    }
+
+    @Test func aRelaunchedAppForgetsItsPlacesButKeepsItsOrder() {
+        // Items with no names, listed right to left, drawn: the order and the places are learned. The app is started again (another process
+        // ID) and its items are concealed: the places were of the run before and may not be of this one, so they go; the order is what names
+        // the items that have no name, so it stays.
+        func unnamed(pid: pid_t, drawn: Bool) -> AppExtras {
+            AppExtras(pid: pid, bundleID: "com.example.two", name: nil, items: [
+                ExtraItem(index: 0, frame: drawn ? slot(200).frame?.insetBy(dx: 6, dy: 1) : nil, identifier: nil, title: nil, description: nil),
+                ExtraItem(index: 1, frame: drawn ? slot(100).frame?.insetBy(dx: 6, dy: 1) : nil, identifier: nil, title: nil, description: nil),
+            ], timedOut: false)
+        }
+        var memory = IndexMemory()
+        let drawn = input([mainBar([slot(100), slot(200)])], apps: [unnamed(pid: 22, drawn: true)])
+        let concealed = input([mainBar([slot(100, frame: false), slot(200, frame: false)])], apps: [unnamed(pid: 22, drawn: false)])
+        _ = InventoryMatcher.match(drawn, memory: &memory)
+        #expect(memory.order(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+
+        // The same process, concealed: it is all kept.
+        _ = InventoryMatcher.match(concealed, memory: &memory)
+        #expect(memory.order(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+
+        // Another process, concealed: the places are forgotten and the order is kept, so the items are told as they were, and not by the
+        // order the app lists them in.
+        let relaunched = InventoryMatcher.matchCounting(input([mainBar([slot(100, frame: false), slot(200, frame: false)])],
+                                                              apps: [unnamed(pid: 77, drawn: false)]), memory: &memory)
+        #expect(memory.order(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == nil)
+        #expect(relaunched.inventory.items(ofApp: "com.example.two").map(\.id.string) == ["com.example.two#0", "com.example.two#1"])
+        #expect(relaunched.listed[ItemID(bundleID: "com.example.two", key: .index(1))] == InventoryMatcher.ListedItem(pid: 77, index: 0),
+                "the app's first item is the right-hand one, as before the relaunch")
+        #expect(relaunched.listed[ItemID(bundleID: "com.example.two", key: .index(0))] == InventoryMatcher.ListedItem(pid: 77, index: 1))
+
+        // And the places are learned again when the items are drawn.
+        _ = InventoryMatcher.match(input([mainBar([slot(100), slot(200)])], apps: [unnamed(pid: 77, drawn: true)]), memory: &memory)
+        #expect(memory.places(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+        // Another app's memory is its own.
+        var other = IndexMemory()
+        _ = InventoryMatcher.match(drawn, memory: &other)
+        _ = InventoryMatcher.match(input([mainBar([slot(100), slot(200)])], apps: [AppExtras(pid: 5, bundleID: "com.example.other", name: nil, items: [], timedOut: false)]),
+                                   memory: &other)
+        #expect(other.places(ofApp: "com.example.two", covering: [0, 1]) == [0: 1, 1: 0])
+    }
+
+    @Test func eachItemSaysWhereItsAppListsIt() {
+        var memory = IndexMemory()
+        let bar = mainBar([slot(100), slot(200), slot(300)])
+        let two = AppExtras(pid: 22, bundleID: "com.example.two", name: nil, items: [
+            ExtraItem(index: 0, frame: slot(200).frame?.insetBy(dx: 6, dy: 1), identifier: "two.first", title: nil, description: nil),
+            ExtraItem(index: 1, frame: slot(300).frame?.insetBy(dx: 6, dy: 1), identifier: "two.second", title: nil, description: nil),
+        ], timedOut: false)
+        let result = InventoryMatcher.matchCounting(input([bar], apps: [app(11, "com.example.one", in: slot(100)), two]), memory: &memory)
+
+        #expect(result.listed[ItemID(bundleID: "com.example.two", key: .identifier("two.second"))] == InventoryMatcher.ListedItem(pid: 22, index: 1))
+        #expect(result.listed[ItemID(bundleID: "com.example.one", key: .index(0))] == InventoryMatcher.ListedItem(pid: 11, index: 0))
+        #expect(result.listed.count == 3)
+    }
+
+    // MARK: Mantel's own items
+
+    /// Mantel's items, one to a slot from the left: each with the name and the description it is given, and the app that draws them.
+    private func ownItemsInput(_ items: [(name: String?, description: String?)], bundleID: String = "com.example.mantel") -> MatchInput {
+        let slots = items.indices.map { slot(CGFloat(100 + 100 * $0)) }
+        let app = AppExtras(pid: 9, bundleID: bundleID, name: nil, items: items.enumerated().map { place, own in
+            ExtraItem(index: place, frame: slots[place].frame?.insetBy(dx: 6, dy: 1), identifier: own.name, title: nil, description: own.description)
+        }, timedOut: false)
+        return input([mainBar(slots)], apps: [app])
+    }
+
+    @Test func ownKindSetFromDescription() {
+        // The menu bar's own tree gives status items no names, so what an item of Mantel's is is told by what it is called.
+        let descriptions = [OwnItems.hiddenDotDescription, OwnItems.alwaysDotDescription, OwnItems.dividerDescription, OwnItems.spacerDescription,
+                            OwnItems.groupDescription(title: "Chat"), OwnItems.groupDescription(title: nil), "Something else"]
+        var memory = IndexMemory()
+        let inventory = InventoryMatcher.match(ownItemsInput(descriptions.map { (nil, $0) }), memory: &memory)
+        func kind(_ description: String) -> OwnItemKind? {
+            inventory.items.first { $0.label == description }?.ownKind
+        }
+        #expect(kind("Show hidden icons") == .hiddenDot)
+        #expect(kind("Show all icons") == .alwaysDot)
+        #expect(kind("Divider") == .divider)
+        #expect(kind("Spacer") == .spacer)
+        #expect(kind("Chat group") == .group)
+        #expect(kind("Icon group") == .group)
+        #expect(kind("Something else") == nil, "an item of Mantel's that is none of them has no kind")
+        #expect(inventory.items.count == descriptions.count)
+        #expect(inventory.items.allSatisfy { $0.isMantel })
+        // `isDot` is the two dots.
+        let dots: [OwnItemKind] = inventory.items.filter { $0.isDot }.compactMap { $0.ownKind }
+        #expect(dots.count == 2)
+        #expect(Set(dots) == [.alwaysDot, .hiddenDot])
+        #expect(inventory.items.allSatisfy { $0.isDot == ($0.ownKind == .hiddenDot || $0.ownKind == .alwaysDot) })
+    }
+
+    @Test func ownKindSetFromName() async throws {
+        let names = [OwnItems.hiddenDotName, OwnItems.alwaysDotName, OwnItems.dividerName, "mantel.spacer.1a2b3c4d", "mantel.group.5e6f7a8b",
+                     // The wide spacer's invisible items are Mantel's, and none of the above.
+                     "mantel.spacer.divider", "mantel.spacer.divider.2", "mantel.spacer.always"]
+        var memory = IndexMemory()
+        let named = InventoryMatcher.match(ownItemsInput(names.map { ($0, nil) }), memory: &memory)
+        func kind(_ name: String) -> OwnItemKind? {
+            named.items.first { $0.id.string == "com.example.mantel::\(name)" }?.ownKind
+        }
+        #expect(kind(OwnItems.hiddenDotName) == .hiddenDot)
+        #expect(kind(OwnItems.alwaysDotName) == .alwaysDot)
+        #expect(kind(OwnItems.dividerName) == .divider)
+        #expect(kind("mantel.spacer.1a2b3c4d") == .spacer)
+        #expect(kind("mantel.group.5e6f7a8b") == .group)
+        for engine in ["mantel.spacer.divider", "mantel.spacer.divider.2", "mantel.spacer.always"] {
+            #expect(named.items.contains { $0.id.string == "com.example.mantel::\(engine)" && $0.isMantel }, "\(engine) is read")
+            #expect(kind(engine) == nil, "\(engine) is not a spacer of the person's")
+        }
+        #expect(named.items.filter { $0.isDot }.count == 2)
+
+        // On the real fixture, where the dots are told by the name their slot has: both are dots, and the test item's are nothing.
+        let desk = await inventory(of: InventoryFixtures.desk())
+        let own: [MenuBarItem] = desk.items(ofApp: InventoryFixtures.ownBundleID)
+        let ownKinds: Set<OwnItemKind> = Set(own.compactMap { $0.ownKind })
+        #expect(own.count == 2)
+        #expect(ownKinds == [.hiddenDot, .alwaysDot])
+        #expect(item("com.example.mantel::mantel.dot.hidden", in: desk)?.ownKind == .hiddenDot)
+        #expect(item("com.example.mantel::mantel.dot.always", in: desk)?.ownKind == .alwaysDot)
+        #expect(item("com.example.mantel::mantel.dot.hidden", in: desk)?.isDot == true)
+    }
+
+    @Test func appItemsHaveNoOwnKind() async throws {
+        // Another app's item is nothing of Mantel's, whatever it is called: a name or a description that is Mantel's is only Mantel's
+        // from Mantel's own app.
+        let lookalikes: [(name: String?, description: String?)] = [
+            (OwnItems.hiddenDotName, OwnItems.hiddenDotDescription), (OwnItems.alwaysDotName, nil), (nil, OwnItems.dividerDescription),
+            (nil, OwnItems.spacerDescription), ("mantel.group.5e6f7a8b", "Chat group"),
+        ]
+        var memory = IndexMemory()
+        let imitation = InventoryMatcher.match(ownItemsInput(lookalikes, bundleID: "com.example.other"), memory: &memory)
+        #expect(imitation.items.count == lookalikes.count)
+        #expect(imitation.items.allSatisfy { $0.ownKind == nil && !$0.isDot && !$0.isMantel })
+
+        // Nor is anything on the whole fixture's bar that isn't Mantel's own: the apps' items, the test item's, the system's.
+        let desk = await inventory(of: InventoryFixtures.desk())
+        for found in desk.items where found.ownerBundleID != InventoryFixtures.ownBundleID {
+            #expect(found.ownKind == nil, "\(found.id.string)")
+            #expect(!found.isDot, "\(found.id.string)")
+        }
+        #expect(desk.items.filter { $0.ownKind != nil }.count == 2)
+    }
+
     @Test func anInventoryFromBeforeTheNewFieldsStillDecodes() throws {
         var memory = IndexMemory()
         let inventory = InventoryMatcher.match(
@@ -798,5 +1064,40 @@ struct InventoryMatcherTests {
         #expect(older.unansweredApps.isEmpty)
         #expect(older.untiedSlots.isEmpty)
         #expect(older.items == inventory.items)
+    }
+
+    // MARK: Contests for a slot
+
+    /// Two apps whose frames both lie in one slot (the slot is 100 to 140, centred at 120): one frame centred at `first`, the other at `second`.
+    private func contest(_ first: CGFloat, _ second: CGFloat) -> Inventory {
+        func app(_ pid: pid_t, _ bundleID: String, center: CGFloat) -> AppExtras {
+            AppExtras(pid: pid, bundleID: bundleID, name: nil,
+                      items: [ExtraItem(index: 0, frame: CGRect(x: center - 14, y: 1, width: 28, height: 28), identifier: nil, title: nil, description: nil)],
+                      timedOut: false)
+        }
+        var memory = IndexMemory()
+        return InventoryMatcher.match(
+            input([mainBar([slot(100)])], apps: [app(1, "com.example.one", center: first), app(2, "com.example.two", center: second)]),
+            memory: &memory)
+    }
+
+    @Test func nearTieForOneSlotIsReportedAsContested() {
+        // One frame is 1.5 pt from the slot's centre and the other 0 pt: the second has the slot by a near tie, and neither app's place is
+        // to be believed.
+        let inventory = contest(121.5, 120)
+        #expect(inventory.contestedApps == ["com.example.one", "com.example.two"])
+        #expect(inventory.items(ofApp: "com.example.two").first?.frames[mainUUID] != nil, "the nearer frame still has the slot")
+        #expect(inventory.items(ofApp: "com.example.one").first?.frames.isEmpty == true)
+    }
+
+    @Test func aClearWinIsNotContested() {
+        // 3 pt apart is a clear win.
+        #expect(contest(123, 120).contestedApps.isEmpty)
+        // And a frame that has a slot of its own is no rival for another's.
+        var memory = IndexMemory()
+        let apart = InventoryMatcher.match(input([mainBar([slot(100), slot(200)])], apps: [app(1, "com.example.one", in: slot(100)),
+                                                                                           app(2, "com.example.two", in: slot(200))]),
+                                           memory: &memory)
+        #expect(apart.contestedApps.isEmpty)
     }
 }

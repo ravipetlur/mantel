@@ -156,6 +156,10 @@ struct ProbeContext: Sendable {
     let options: ProbeOptions
     let store: ProbeReportStore
     let startedAt: Date
+    /// The journal the plist files and the preferences are changed behind, which a probe also asks what is kept in it.
+    let journal: Journal
+    /// Changes preferences with the journal behind each change: the icon spacing.
+    let defaults: DefaultsAccess
 
     /// The test item's bundle ID: Mantel's own with `.testitem` after it.
     var fixtureBundleID: String {
@@ -222,23 +226,30 @@ struct ProbeContext: Sendable {
     /// The framed slots of the window chosen for each display (`AgentWindowChooser`), and not the «, which isn't an item.
     ///
     /// A window of a display sometimes lacks the identifiers the others have, and they all have their slots in the same places, so a
-    /// slot without one takes the identifier another window has for the same place.
+    /// slot without one takes the identifier another window has for the same place. A name that repeats in a window (a window of a Space
+    /// that isn't on screen can give every slot of an app its first item's name) is no slot's: such a slot is told as one with none.
     private static func keyedSlots(_ snapshot: MenuBarSnapshot) -> [KeyedSlot] {
         var keyed: [KeyedSlot] = []
         for (display, window) in snapshot.chosenWindows().enumerated() {
             var namesByPlace: [String: String] = [:]
             for other in snapshot.agentWindows where other.frame == window.frame {
+                let repeated = repeatedNames(other.slots)
                 for slot in other.slots {
-                    if let name = slot.identifier, !name.isEmpty, let frame = slot.frame { namesByPlace[place(frame)] = name }
+                    if let name = slot.identifier, !name.isEmpty, !repeated.contains(name), let frame = slot.frame {
+                        namesByPlace[place(frame)] = name
+                    }
                 }
             }
+            let slots = snapshot.agentWindows[window.index].slots
+            let repeated = repeatedNames(slots)
             var unnamed: [(slot: AgentSlot, frame: CGRect)] = []
-            for slot in snapshot.agentWindows[window.index].slots where !OverflowDetector.isChevron(slot) {
+            for slot in slots where !OverflowDetector.isChevron(slot) {
                 guard let frame = slot.frame, !frame.isEmpty else { continue }
                 let name: String
+                let own = slot.identifier.flatMap { repeated.contains($0) ? nil : $0 }
                 if let identifier = slot.identifier, let module = ItemID.systemModule(ofIdentifier: identifier) {
                     name = ItemID.system(module).string
-                } else if let identifier = slot.identifier ?? namesByPlace[place(frame)], !identifier.isEmpty {
+                } else if let identifier = own ?? namesByPlace[place(frame)], !identifier.isEmpty {
                     name = ItemID.systemModule(ofIdentifier: identifier).map { ItemID.system($0).string } ?? identifier
                 } else {
                     unnamed.append((slot, frame))
@@ -256,6 +267,12 @@ struct ProbeContext: Sendable {
             }
         }
         return keyed
+    }
+
+    /// The names that more than one of these slots has.
+    private static func repeatedNames(_ slots: [AgentSlot]) -> Set<String> {
+        let names = slots.compactMap(\.identifier).filter { !$0.isEmpty }
+        return Set(Dictionary(names.map { ($0, 1) }, uniquingKeysWith: +).filter { $0.value > 1 }.keys)
     }
 
     /// A slot's place, to half a point: its x and its width.
@@ -304,5 +321,18 @@ struct ProbeContext: Sendable {
     /// The framed slots, left to right on each display, by the same names: the order the menu bar is in.
     static func framedOrder(_ snapshot: MenuBarSnapshot) -> [String] {
         keyedSlots(snapshot).sorted { ($0.display, $0.frame.minX, $0.key) < ($1.display, $1.frame.minX, $1.key) }.map(\.key)
+    }
+
+    /// Where each framed slot is, by the same names.
+    static func slotFrames(_ snapshot: MenuBarSnapshot) -> [String: CGRect] {
+        var frames: [String: CGRect] = [:]
+        for slot in keyedSlots(snapshot) { frames[slot.key] = slot.frame }
+        return frames
+    }
+
+    /// The name of the slot that is at `frame` (to a point), as `framedOrder` names slots; nil when none is. Two slots that are at the same
+    /// frame (a window of another display's) are one slot here, and the first is named.
+    static func slotKey(at frame: CGRect, in snapshot: MenuBarSnapshot) -> String? {
+        keyedSlots(snapshot).first { ItemLocator.sameFrame($0.frame, frame) }?.key
     }
 }

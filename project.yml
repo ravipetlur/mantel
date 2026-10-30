@@ -47,6 +47,12 @@ targets:
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities
         NSHumanReadableCopyright: Copyright © The Mantel Authors. Apache License 2.0.
+        # The type a drag in the layout editor carries (`LayoutDrag`), declared so that macOS knows it and logs nothing for it. It never
+        # leaves the app: the drag's data is visible to this process only.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER).layout-drag
+            UTTypeConformsTo:
+              - public.data
     # None yet: the file is empty but still signed into the app, and each later version adds here the entitlement its
     # feature needs.
     entitlements:
@@ -69,6 +75,8 @@ targets:
         product: MKLayout
       - package: MantelKit
         product: MKMenuBar
+      - package: MantelKit
+        product: MKSearch
       # The command-line tool goes into the app at Contents/Helpers/mantel, signed again as it is copied (keeping the
       # identifier it was built with), and the app only lets a program in over the control socket that is signed as this
       # tool is (see `PeerPolicy`). Not in Contents/MacOS: the volume is not case-sensitive, so `mantel` there would

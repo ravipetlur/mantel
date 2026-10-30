@@ -10,14 +10,14 @@ public enum JournalReplayOutcome: Sendable, Equatable {
 }
 
 extension Journal {
-    /// `replay(using:)`, given up on after `cap`.
+    /// `replay(using:lifetimes:)`, given up on after `cap`.
     ///
     /// A restore that hangs (a file that doesn't answer) would keep the launch from going on, and with it the • and Settings.
     /// After the cap the replay's task is cancelled, which makes the restorers that look at cancellation (the plist one does)
     /// restore nothing more, and this returns `.timedOut` at once, whether or not the restore that is under way ever
     /// returns. What wasn't restored is still in the journal; the journal stays closed to `record` until the replay is over.
-    public nonisolated func replay(using restorer: any JournalRestoring, cap: Duration,
-                                   clock: any Clock = SystemClock()) async -> JournalReplayOutcome {
+    public nonisolated func replay(using restorer: any JournalRestoring, cap: Duration, clock: any Clock = SystemClock(),
+                                   lifetimes: Set<JournalLifetime> = [.untilQuit]) async -> JournalReplayOutcome {
         let race = ReplayRace()
         return await withCheckedContinuation { (continuation: CheckedContinuation<JournalReplayOutcome, Never>) in
             race.install(continuation)
@@ -30,7 +30,7 @@ extension Journal {
                 }
             }
             let replay = Task {
-                race.finish(.completed(await self.replay(using: restorer)))
+                race.finish(.completed(await self.replay(using: restorer, lifetimes: lifetimes)))
             }
             race.tasks(timer: timer, replay: replay)
         }

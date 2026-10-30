@@ -779,7 +779,76 @@ struct JournalTests {
         let written = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any]
         let objects = try #require(written?["records"] as? [[String: Any]])
         #expect(objects.count == 3)
-        #expect(Set(objects[0].keys) == ["entry", "key", "recordedAt"], "no lastWritten where none is known")
+        #expect(Set(objects[0].keys) == ["entry", "key", "lifetime", "recordedAt"], "no lastWritten where none is known; the lifetime is written")
+    }
+
+    // MARK: Taking back what a call recorded
+
+    @Test func rollbackKeepsConcurrentWritersRecord() async throws {
+        let journal = makeJournal()
+        let mine = approval("mine", original: .integer(1))
+        let shared = approval("shared", original: .integer(2))
+        let theirs = approval("theirs", original: .integer(3))
+
+        // This writer records a place, and is about to record another, and then to make its change.
+        let first = try await journal.recordWithReceipt(mine)
+        #expect(first.change == .added(recordedAt: Date(timeIntervalSince1970: 1_700_000_000)))
+        // Meanwhile another writer (the layout writer next to the approvals engine) records a place of its own, and the one this writer is
+        // about to record: it is there when this writer comes to it.
+        clock.advance(by: .seconds(5))
+        try await journal.record(theirs)
+        try await journal.record(shared)
+        let second = try await journal.recordWithReceipt(shared)
+        #expect(second.change == .nothing, "it was there already, so it isn't this writer's")
+
+        // This writer's change can't be made, and it takes back what it did.
+        try await journal.rollBack(second)
+        try await journal.rollBack(first)
+
+        #expect(await journal.records().map(\.entry) == [theirs, shared], "the other writer's two records are as they were")
+        #expect(try readFile().records.map(\.entry) == [theirs, shared])
+    }
+
+    @Test func rollbackKeepsARecordMadeAgainAfterThisOnesWasTakenOut() async throws {
+        let journal = makeJournal()
+        let entry = approval("a", original: .integer(1))
+        let receipt = try await journal.recordWithReceipt(entry)
+
+        // A replay put the place back and took its record out, and then another writer recorded it afresh, later.
+        try await journal.remove(key: Journal.key(for: entry))
+        clock.advance(by: .seconds(30))
+        try await journal.record(approval("a", original: .integer(7)))
+
+        try await journal.rollBack(receipt)
+        let records = await journal.records()
+        #expect(records.map(\.entry) == [approval("a", original: .integer(7))], "the same key, but not the record this call made")
+        #expect(records.first?.recordedAt == Date(timeIntervalSince1970: 1_700_000_030))
+    }
+
+    @Test func rollbackOfAnUpgradeMakesTheRecordUntilQuitAgain() async throws {
+        let journal = makeJournal()
+        let entry = approval("a", original: .integer(1))
+        try await journal.record(entry)
+        let before = try #require(await journal.records().first)
+
+        clock.advance(by: .seconds(5))
+        let receipt = try await journal.recordWithReceipt(entry, lifetime: .kept)
+        #expect(receipt.change == .upgraded(recordedAt: before.recordedAt))
+        #expect(await journal.records().first?.lifetime == .kept)
+
+        try await journal.rollBack(receipt)
+        #expect(await journal.records() == [before], "as it was, to the last field")
+        #expect(try readFile().records == [before])
+    }
+
+    @Test func aReceiptOfNothingTakesNothingBack() async throws {
+        let journal = makeJournal()
+        let entry = approval("a", original: .integer(1))
+        try await journal.record(entry, lifetime: .kept)
+        let receipt = try await journal.recordWithReceipt(entry, lifetime: .kept)
+        #expect(receipt.change == .nothing)
+        try await journal.rollBack(receipt)
+        #expect(await journal.keptRecords().map(\.entry) == [entry])
     }
 
     // MARK: Keys

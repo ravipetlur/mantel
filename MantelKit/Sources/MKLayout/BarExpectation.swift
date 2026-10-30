@@ -40,6 +40,12 @@ public struct BarExpectation: Sendable, Equatable {
         }
     }
 
+    /// Forgets that these apps' icons were found not to be drawn: they are expected again. For apps whose icons the allowlist can't draw
+    /// and the switches will, once the switches are in use (a look at the bar then waits for them).
+    public mutating func forget(apps: Set<String>) {
+        notDrawn = notDrawn.filter { !apps.contains($0.bundleID) }
+    }
+
     /// How many slots the bar of `display` should have a place for under `plan`.
     ///
     /// - Parameters:
@@ -59,7 +65,7 @@ public struct BarExpectation: Sendable, Equatable {
     }
 
     /// The item's frames that are on the bar of their display. A frame on a display whose bar the read doesn't give is taken to be on it.
-    private static func framesOnABar(of item: MenuBarItem, in inventory: Inventory) -> [String: CGRect] {
+    public static func framesOnABar(of item: MenuBarItem, in inventory: Inventory) -> [String: CGRect] {
         item.frames.filter { isOnBar($0.value, of: $0.key, in: inventory) }
     }
 

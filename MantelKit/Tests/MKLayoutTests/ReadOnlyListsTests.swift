@@ -89,4 +89,16 @@ struct ReadOnlyListsTests {
             == .unavailable("Mantel can't read this list on this Mac."))
         #expect(make(.empty, turnedOff: .apps(["com.example.b", "com.example.a"])).turnedOff == .apps(["com.example.b", "com.example.a"]))
     }
+
+    @Test func cantReorderListsUnresolved() {
+        let nameless = ItemID(bundleID: "com.example.a", key: .index(0))
+        let other = ItemID(bundleID: "com.example.b", key: .index(1))
+        let quit = ItemID(bundleID: "com.example.c", key: .index(0))
+        #expect(make(.empty).cantReorder.isEmpty)
+        let inventory = Fixtures.inventory([Fixtures.item(nameless, frame: frame), Fixtures.item(other, frame: frame)])
+        let lists = ReadOnlyLists.make(inventory: inventory, sections: SectionModel(), running: [], turnedOff: .apps([]),
+                                       unresolved: [nameless, other, quit])
+        // An item the inventory doesn't hold (its app has quit) isn't listed.
+        #expect(lists.cantReorder == [nameless, other])
+    }
 }

@@ -70,7 +70,7 @@ struct PlistFileAccessTests {
         return try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
     }
 
-    private func resolved(_ url: URL) -> String { url.resolvingSymlinksInPath().path(percentEncoded: false) }
+    private func resolved(_ url: URL) -> String { CanonicalPath.of(url) }
 
     // MARK: Reading
 
@@ -441,7 +441,7 @@ struct PlistFileAccessTests {
         #expect(try onDisk(file)["trackedApplications"] as? [String: Bool] == ["com.example.app": true])
 
         // The file is gone: the grant says so (the plain way would have made a new file).
-        let entry = JournalEntry.plistKey(filePath: file.resolvingSymlinksInPath().path, key: "trackedApplications",
+        let entry = JournalEntry.plistKey(filePath: CanonicalPath.of(file), key: "trackedApplications",
                                           original: nil, strategy: .cfPreferences)
         try FileManager.default.removeItem(at: file)
         await #expect(throws: FileGrantError.stale(fileName: "group.com.apple.controlcenter.plist")) {
@@ -755,6 +755,162 @@ struct PlistFileAccessTests {
         let started = stepping.now()
         try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
         #expect(stepping.now() == started, "no wait at all")
+    }
+
+    // MARK: Places that are journaled already
+
+    @Test func newPathsOnlySkipsAgreementWaitForJournaledPath() async throws {
+        try writePlist(["table": ["a": 1]])
+        let journal = Journal(file: journalFile, clock: stepping)
+        let first = tableEntry("a", original: .integer(1))
+        try await journal.record(first)
+
+        // cfprefsd says a = 5, and the file says 1, which nobody wrote: with every place checked, that is a disagreement waited out for
+        // 2 s and refused.
+        let refusing = steppingAccess(journal, service: ScriptedService(.says(.dictionary(["a": .integer(5)]))))
+        await #expect(throws: PlistAccessError.disagree(key: "table")) {
+            try await refusing.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
+        }
+
+        // A place that has its original in the journal isn't waited for: the writer writes the same places again and again, and the
+        // preferences service flushes lazily after each re-sort of the menu bar.
+        let service = ScriptedService(.saysUntilWritten(.dictionary(["a": .integer(5)])))
+        let access = steppingAccess(journal, service: service)
+        let started = stepping.now()
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist, originalCheck: .newPathsOnly)
+
+        #expect(stepping.now() == started, "no wait at all")
+        #expect(service.writeCount == 1)
+        #expect(try tableOnDisk() == ["a": 10])
+        #expect(await journal.records().map(\.entry) == [first], "the original is the one that was recorded")
+    }
+
+    @Test func newPathsOnlyStillChecksANewPath() async throws {
+        try writePlist(["table": ["a": 1, "b": 2]])
+        let journal = Journal(file: journalFile, clock: stepping)
+        try await journal.record(tableEntry("a", original: .integer(1)))
+        let before = try Data(contentsOf: plist)
+
+        // cfprefsd and the file disagree about b, which has no record: its original can't be trusted, so it is waited for and refused,
+        // whether it is written alone or with a place that is journaled.
+        let access = steppingAccess(journal, service: ScriptedService(.says(.dictionary(["a": .integer(1), "b": .integer(9)]))))
+        for edits in [[PathEdit(path: [.key("b")], value: .integer(20))],
+                      [PathEdit(path: [.key("a")], value: .integer(10)), PathEdit(path: [.key("b")], value: .integer(20))]] {
+            let started = stepping.now()
+            await #expect(throws: PlistAccessError.disagree(key: "table")) {
+                try await access.write(edits, key: "table", in: plist, originalCheck: .newPathsOnly)
+            }
+            #expect(stepping.now().timeIntervalSince(started) >= 2, "it gave them 2 s first")
+        }
+        #expect(await journal.records().count == 1, "nothing was journaled")
+        #expect(try Data(contentsOf: plist) == before)
+        #expect(backupNames().isEmpty, "refused before the backup")
+    }
+
+    @Test func aPlaceUnderARecordedWholeKeyIsNotWaitedForEither() async throws {
+        // The whole key is recorded, which covers every place in it: each has its original already.
+        try writePlist(["table": ["a": 1]])
+        let journal = Journal(file: journalFile, clock: stepping)
+        try await journal.record(.plistKey(filePath: resolved(plist), key: "table", original: .dictionary(["a": .integer(1)]),
+                                           strategy: .cfPreferences))
+        let service = ScriptedService(.saysUntilWritten(.dictionary(["a": .integer(5)])))
+        let started = stepping.now()
+        try await steppingAccess(journal, service: service)
+            .write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist, originalCheck: .newPathsOnly)
+        #expect(stepping.now() == started)
+        #expect(try tableOnDisk() == ["a": 10])
+    }
+
+    // MARK: Putting back what Mantel keeps
+
+    @Test func restoreKeptIsOneWriteOnFreshRead() async throws {
+        try writePlist(["table": ["a": 1, "b": 2, "c": 3], "keep": "me"])
+        let journal = makeJournal()
+        let service = ScriptedService(.followsTheFile)
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: service.io, clock: clock)
+        // Mantel's arrangement: two places changed and one made (d held nothing).
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10)), PathEdit(path: [.key("b")], value: .integer(20)),
+                                PathEdit(path: [.key("d")], value: .integer(4))], key: "table", in: plist, lifetime: .kept)
+        #expect(service.writeCount == 1)
+        #expect(await journal.keptRecords().count == 3)
+        // Then macOS changes a place of its own in the same table, which the restore must find when it reads.
+        try PlistIO.writeFile(.dictionary(["a": .integer(10), "b": .integer(20), "c": .integer(33), "d": .integer(4)]), key: "table", to: plist)
+
+        let restored = try await access.restoreKept(key: "table", in: plist)
+
+        #expect(restored == 3)
+        #expect(service.writeCount == 2, "one write for the three places")
+        #expect(try tableOnDisk() == ["a": 1, "b": 2, "c": 33], "a and b are back, d is gone, and c, which was macOS's, is as it is now")
+        #expect(try onDisk()["keep"] as? String == "me")
+        #expect(await journal.records().isEmpty, "the records go once the read-back holds")
+        #expect(try await access.restoreKept(key: "table", in: plist) == 0, "and a second restore has nothing to do")
+        #expect(service.writeCount == 2)
+    }
+
+    @Test func restoreKeptLeavesOtherPathsAlone() async throws {
+        try writePlist(["table": ["a": 1, "b": 2], "other": ["x": 1]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist, lifetime: .kept)
+        try await access.write([PathEdit(path: [.key("x")], value: .integer(10))], key: "other", in: plist, lifetime: .kept)
+        // A platform test's temporary change in the same key.
+        try await access.write([PathEdit(path: [.key("b")], value: .integer(20))], key: "table", in: plist)
+
+        #expect(try await access.restoreKept(key: "table", in: plist) == 1)
+
+        #expect(try tableOnDisk() == ["a": 1, "b": 20], "a is back; b is the platform test's, which only quitting or Replay now puts back")
+        let other = try #require(onDisk()["other"] as? [String: Int])
+        #expect(other == ["x": 10], "another key's place is Mantel's still")
+        let left = await journal.records()
+        #expect(left.map(\.lifetime) == [.kept, .untilQuit])
+        #expect(left.map(\.key) == ["plist:\(resolved(plist))#other/k:x", "plist:\(resolved(plist))#table/k:b"])
+    }
+
+    @Test func restoreKeptTakesOutTheContainersTheWriteMade() async throws {
+        try writePlist(["keep": "me"])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(1)), PathEdit(path: [.key("b")], value: .integer(2))],
+                               key: "table", in: plist, lifetime: .kept)
+        #expect(try tableOnDisk() == ["a": 1, "b": 2])
+
+        #expect(try await access.restoreKept(key: "table", in: plist) == 2)
+
+        #expect(try onDisk()["table"] == nil, "the table is gone, not left as {}")
+        #expect(try onDisk()["keep"] as? String == "me")
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func restoreKeptKeepsTheRecordsWhenTheServiceDoesNotKeepTheWrite() async throws {
+        try writePlist(["table": ["a": 1]])
+        let journal = makeJournal()
+        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist, lifetime: .kept)
+
+        let dropping = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.dropsWrites).io, clock: clock)
+        await #expect(throws: PlistAccessError.notPersisted(key: "table")) {
+            try await dropping.restoreKept(key: "table", in: plist)
+        }
+        #expect(try tableOnDisk() == ["a": 10], "nothing came back")
+        #expect(await journal.keptRecords().count == 1, "so the record stays, for the next try")
+
+        // And the next try, with a service that keeps what it is told, puts it back.
+        #expect(try await access.restoreKept(key: "table", in: plist) == 1)
+        #expect(try tableOnDisk() == ["a": 1])
+        #expect(await journal.records().isEmpty)
+    }
+
+    @Test func restoreKeptPutsBackEvenWhenTheJournalIsReopened() async throws {
+        // The records are Mantel's across quits: a new process, with a new journal on the same file, restores them.
+        try writePlist(["table": ["a": 1, "b": 2]])
+        let first = PlistFileAccess(journal: makeJournal(), paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        try await first.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist, lifetime: .kept)
+
+        let later = Journal(file: journalFile, clock: clock)
+        clock.advance(by: .seconds(40 * 24 * 60 * 60))
+        let access = PlistFileAccess(journal: later, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
+        #expect(try await access.restoreKept(key: "table", in: plist) == 1, "whatever its age")
+        #expect(try tableOnDisk() == ["a": 1, "b": 2])
     }
 
     // MARK: Containers the write made

@@ -16,8 +16,12 @@ public struct MenuBarItem: Codable, Sendable, Equatable, Identifiable {
     public let overflowedOn: Set<String>
     public let isMantel: Bool
     /// The item is one of Mantel's two dots (• and ••), and not one of its other items (the wide spacer's invisible ones). Only the dots
-    /// are made room for, and only they say whether a dot is in the « menu.
+    /// are made room for, and only they say whether a dot is in the « menu. Whenever `ownKind` says what the item is, this follows it: a
+    /// dot for the two dots, and never for a spacer, the divider or a group's icon. With no kind it is as it was given.
     public let isDot: Bool
+    /// What the item is when it is one of Mantel's own (a dot, the divider, a spacer, a group's icon); nil for every other item, and for
+    /// the invisible items of Mantel's that the wide spacer uses.
+    public let ownKind: OwnItemKind?
     /// Where the item says it is on a display's bar when none of that bar's slots is there: wholly on the bar, and in no slot. MenuBarAgent
     /// draws an item in a slot, so an item that says it is somewhere else on the bar is not drawn where it says. An item that macOS has put
     /// out of the way (behind the notch, under the app's menus, in the « menu) reports the place it would have, which is such a place.
@@ -35,7 +39,8 @@ public struct MenuBarItem: Codable, Sendable, Equatable, Identifiable {
 
     public init(id: ItemID, ownerBundleID: String, appName: String?, label: String?, frames: [String: CGRect],
                 overflowedOn: Set<String>, isMantel: Bool, isDot: Bool = false, strayFrames: [String: CGRect] = [:],
-                inferredOverflowOn: Set<String> = [], sharesFrameOn: Set<String> = [], reportedWidth: CGFloat? = nil) {
+                inferredOverflowOn: Set<String> = [], sharesFrameOn: Set<String> = [], reportedWidth: CGFloat? = nil,
+                ownKind: OwnItemKind? = nil) {
         self.id = id
         self.ownerBundleID = ownerBundleID
         self.appName = appName
@@ -43,7 +48,8 @@ public struct MenuBarItem: Codable, Sendable, Equatable, Identifiable {
         self.frames = frames
         self.overflowedOn = overflowedOn
         self.isMantel = isMantel
-        self.isDot = isDot
+        self.isDot = ownKind.map(\.isDot) ?? isDot
+        self.ownKind = ownKind
         self.strayFrames = strayFrames
         self.inferredOverflowOn = inferredOverflowOn
         self.sharesFrameOn = sharesFrameOn
@@ -51,10 +57,10 @@ public struct MenuBarItem: Codable, Sendable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, ownerBundleID, appName, label, frames, overflowedOn, isMantel, isDot, strayFrames, inferredOverflowOn, sharesFrameOn, reportedWidth
+        case id, ownerBundleID, appName, label, frames, overflowedOn, isMantel, isDot, ownKind, strayFrames, inferredOverflowOn, sharesFrameOn, reportedWidth
     }
 
-    /// An item saved before the last five were kept has none of them.
+    /// An item saved before the last six were kept has none of them.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(ItemID.self, forKey: .id)
@@ -64,11 +70,34 @@ public struct MenuBarItem: Codable, Sendable, Equatable, Identifiable {
         frames = try container.decode([String: CGRect].self, forKey: .frames)
         overflowedOn = try container.decode(Set<String>.self, forKey: .overflowedOn)
         isMantel = try container.decode(Bool.self, forKey: .isMantel)
-        isDot = try container.decodeIfPresent(Bool.self, forKey: .isDot) ?? false
+        // A kind this version doesn't know is read as none, and said in the log, so one item can't fail the whole inventory.
+        let ownKind = container.decodeLeniently(OwnItemKind.self, forKey: .ownKind, category: "inventory")
+        self.ownKind = ownKind
+        let savedIsDot = try container.decodeIfPresent(Bool.self, forKey: .isDot) ?? false
+        isDot = ownKind.map(\.isDot) ?? savedIsDot
         strayFrames = try container.decodeIfPresent([String: CGRect].self, forKey: .strayFrames) ?? [:]
         inferredOverflowOn = try container.decodeIfPresent(Set<String>.self, forKey: .inferredOverflowOn) ?? []
         sharesFrameOn = try container.decodeIfPresent(Set<String>.self, forKey: .sharesFrameOn) ?? []
         reportedWidth = try container.decodeIfPresent(CGFloat.self, forKey: .reportedWidth)
+    }
+
+    /// What is saved is the same on every run: the sets of displays are written as lists in order (a set has no order of its own, and
+    /// would be written in a different one by every process).
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(ownerBundleID, forKey: .ownerBundleID)
+        try container.encodeIfPresent(appName, forKey: .appName)
+        try container.encodeIfPresent(label, forKey: .label)
+        try container.encode(frames, forKey: .frames)
+        try container.encode(overflowedOn.sorted(), forKey: .overflowedOn)
+        try container.encode(isMantel, forKey: .isMantel)
+        try container.encode(isDot, forKey: .isDot)
+        try container.encodeIfPresent(ownKind, forKey: .ownKind)
+        try container.encode(strayFrames, forKey: .strayFrames)
+        try container.encode(inferredOverflowOn.sorted(), forKey: .inferredOverflowOn)
+        try container.encode(sharesFrameOn.sorted(), forKey: .sharesFrameOn)
+        try container.encodeIfPresent(reportedWidth, forKey: .reportedWidth)
     }
 
     /// The item has no place on any bar: macOS isn't drawing it.
@@ -82,6 +111,6 @@ public struct MenuBarItem: Codable, Sendable, Equatable, Identifiable {
         MenuBarItem(id: id, ownerBundleID: ownerBundleID, appName: appName, label: label, frames: frames,
                     overflowedOn: overflowedOn.union(displays), isMantel: isMantel, isDot: isDot, strayFrames: strayFrames,
                     inferredOverflowOn: inferredOverflowOn.union(displays.subtracting(overflowedOn)), sharesFrameOn: sharesFrameOn,
-                    reportedWidth: reportedWidth)
+                    reportedWidth: reportedWidth, ownKind: ownKind)
     }
 }

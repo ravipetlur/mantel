@@ -138,10 +138,7 @@ public final class SystemClickTap: Sendable {
         }
         state.withLock { $0.handles.port = port }
 
-        let thread = Thread { [self] in runLoopMain() }
-        thread.name = "Mantel system clicks"
-        thread.qualityOfService = .userInteractive
-        thread.start()
+        TapThread.start(named: "Mantel system clicks") { [self] in runLoopMain() }
     }
 
     /// Removes the tap. It can be called more than once, and from any thread.
@@ -164,35 +161,20 @@ public final class SystemClickTap: Sendable {
     // MARK: The tap's thread
 
     private func runLoopMain() {
-        guard let port = state.withLock({ $0.handles.port }),
-              let source = CFMachPortCreateRunLoopSource(nil, port, 0) else {
-            Unmanaged.passUnretained(self).release()
-            return
-        }
-        let runLoop = CFRunLoopGetCurrent()!
-        CFRunLoopAddSource(runLoop, source, .commonModes)
-        // Published and switched on in one step, under the lock and only while the tap runs: a `stop()` that came before this has
-        // marked the phase, and finds nothing to switch off, and the tap is never switched on after it.
-        let switchedOn = state.withLock { state -> Bool in
-            state.handles.runLoop = runLoop
-            guard state.lifecycle.mayEnableTap else { return false }
-            CGEvent.tapEnable(tap: port, enable: true)
-            return true
-        }
-        if switchedOn {
-            // In slices, asking each time whether the tap is still wanted: `CFRunLoopStop` from `stop()` ends a slice, and a stop it
-            // couldn't deliver (the loop wasn't running yet) is seen at the end of the slice it fell in. The first slice is run because
-            // the tap runs; after each, the result says whether to go on (not when the loop has nothing to wait for: it would return
-            // at once, for ever).
-            var result = CFRunLoopRunResult.timedOut
-            while state.withLock({ $0.lifecycle.keepsRunLoopGoing(after: result) }) {
-                result = CFRunLoopRunInMode(.defaultMode, ClickReplayTap.runLoopSlice, true)
-            }
-        }
-        CFRunLoopRemoveSource(runLoop, source, .commonModes)
-        CFMachPortInvalidate(port)
-        // The reference `start()` took for the callback.
-        Unmanaged.passUnretained(self).release()
+        // The reference `start()` took for the callback, given back when the thread ends.
+        defer { Unmanaged.passUnretained(self).release() }
+        guard let port = state.withLock({ $0.handles.port }) else { return }
+        TapThread.run(
+            port: port,
+            publishAndEnable: { runLoop in
+                state.withLock { state -> Bool in
+                    state.handles.runLoop = runLoop
+                    guard state.lifecycle.mayEnableTap else { return false }
+                    CGEvent.tapEnable(tap: port, enable: true)
+                    return true
+                }
+            },
+            keepsGoing: { result in state.withLock { $0.lifecycle.keepsRunLoopGoing(after: result) } })
     }
 
     // MARK: Events

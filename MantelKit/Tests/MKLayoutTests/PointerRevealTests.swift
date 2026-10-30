@@ -136,34 +136,70 @@ struct PointerRevealTests {
         #expect(RevealEvent.forHotkey(.showAll) == .toggle(.all))
         #expect(RevealEvent.forHotkey(.focusMode) == .toggleFocusMode)
         #expect(RevealEvent.forHotkey(.openSettings) == nil)
+        #expect(RevealEvent.forHotkey(.mantelMenu) == nil)
+        #expect(RevealEvent.forHotkey(.commandBar) == nil)
         #expect(RevealEvent.forHotkey(HotkeyID(rawValue: "from-a-newer-mantel")) == nil)
     }
 
     @Test func everyHotkeyTheHotkeysPaneListsIsHandledByTheRevealOrSettings() {
-        // The pane lists `HotkeyAction.all`: an action that did nothing when pressed would be a shortcut that does nothing.
-        for action in HotkeyAction.all where action.id != .openSettings {
+        // The pane lists `HotkeyAction.all`: an action that did nothing when pressed would be a shortcut that does nothing. (Opening
+        // Mantel's menu is the dots' own: the reveal has nothing to do with it, and the second bar's is the second bar's: it opens or closes
+        // the bar, which is no plain event for the machine, so it has no event here.)
+        let others: [HotkeyID] = [.openSettings, .mantelMenu, .secondBar, .commandBar]
+        for action in HotkeyAction.all where !others.contains(action.id) {
             #expect(RevealEvent.forHotkey(action.id) != nil, "\(action.title)")
         }
+        #expect(RevealEvent.forHotkey(.secondBar) == nil)
     }
 
     // MARK: The dots
 
-    @Test func theDotsAreFilledWhileTheirSectionShows() {
-        let collapsed = DotAppearance(reveal: .collapsed, alwaysHiddenHasApps: true)
+    /// What is on the bar with the dots as the settings have them, Always Hidden holding an app or not.
+    private func shown(_ dots: DotSettings = DotSettings(), alwaysHiddenHasApps: Bool) -> OwnItemsShown {
+        OwnItemsVisibility.shown(sections: SectionModel(), plan: VisibilityPlan(visibleBundleIDs: [], concealedBundleIDs: [], visibleSystemItems: [], concealedSections: [], source: .sections),
+                                        dots: dots, alwaysHiddenHasApps: alwaysHiddenHasApps)
+    }
+
+    @Test func filledStatesUnchanged() {
+        let everything = shown(alwaysHiddenHasApps: true)
+        let collapsed = DotAppearance(reveal: .collapsed, shown: everything)
         #expect(!collapsed.hiddenDotFilled && !collapsed.alwaysDotFilled)
-        let hidden = DotAppearance(reveal: .hiddenShown, alwaysHiddenHasApps: true)
+        let hidden = DotAppearance(reveal: .hiddenShown, shown: everything)
         #expect(hidden.hiddenDotFilled && !hidden.alwaysDotFilled)
-        let all = DotAppearance(reveal: .allShown, alwaysHiddenHasApps: true)
+        let all = DotAppearance(reveal: .allShown, shown: everything)
         #expect(all.hiddenDotFilled && all.alwaysDotFilled)
         // Focus Mode puts both away.
-        let focus = DotAppearance(reveal: .focusMode, alwaysHiddenHasApps: true)
+        let focus = DotAppearance(reveal: .focusMode, shown: everything)
         #expect(!focus.hiddenDotFilled && !focus.alwaysDotFilled)
     }
 
-    @Test func theSecondDotIsThereOnlyWhileAlwaysHiddenHasApps() {
+    @Test func theSecondDotIsThereWhileAlwaysHiddenHasApps() {
         for state in [RevealState.collapsed, .hiddenShown, .allShown, .focusMode] {
-            #expect(DotAppearance(reveal: state, alwaysHiddenHasApps: true).alwaysDotVisible)
-            #expect(!DotAppearance(reveal: state, alwaysHiddenHasApps: false).alwaysDotVisible)
+            #expect(DotAppearance(reveal: state, shown: shown(alwaysHiddenHasApps: true)).alwaysDotVisible)
+            #expect(!DotAppearance(reveal: state, shown: shown(alwaysHiddenHasApps: false)).alwaysDotVisible)
+            #expect(DotAppearance(reveal: state, shown: shown(alwaysHiddenHasApps: false)).hiddenDotVisible)
+        }
+    }
+
+    @Test func alwaysSettingShowsDoubleDotWithNothingInAlwaysHidden() {
+        var dots = DotSettings()
+        dots.alwaysDot = .always
+        for state in [RevealState.collapsed, .hiddenShown, .allShown, .focusMode] {
+            let look = DotAppearance(reveal: state, shown: shown(dots, alwaysHiddenHasApps: false))
+            #expect(look.alwaysDotVisible, "\(state)")
+            #expect(look.hiddenDotVisible)
+        }
+    }
+
+    @Test func hideBothDotsTakesBothOff() {
+        var dots = DotSettings()
+        dots.hideBothDots = true
+        for always in [AlwaysDotVisibility.whenNeeded, .always] {
+            dots.alwaysDot = always
+            for hasApps in [true, false] {
+                let look = DotAppearance(reveal: .collapsed, shown: shown(dots, alwaysHiddenHasApps: hasApps))
+                #expect(!look.hiddenDotVisible && !look.alwaysDotVisible, "\(always), apps \(hasApps)")
+            }
         }
     }
 }

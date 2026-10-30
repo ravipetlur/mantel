@@ -10,21 +10,35 @@ struct NoRoomResponseTests {
         RoomCheck(overflowedRevealedApps: apps, neededWidth: needed, round: round)
     }
 
-    @Test func secondBarLeavesOverflowAndLogsOnce() {
-        // The first time it is logged; after that, the line has been said.
-        #expect(NoRoomResponse.decide(policy: .secondBar, check: check(), alreadyLogged: false, menuBarTakenOver: false)
-            == .leaveOverflow(logOnce: true))
-        #expect(NoRoomResponse.decide(policy: .secondBar, check: check(), alreadyLogged: true, menuBarTakenOver: false)
-            == .leaveOverflow(logOnce: false))
-        // However many apps, however many rounds, and whether or not the bar was taken over before.
-        for round in [0, 1, 3, 10] {
-            for taken in [false, true] {
-                let action = NoRoomResponse.decide(policy: .secondBar, check: check(["com.example.one", "com.example.two"], round: round),
-                                                   alreadyLogged: false, menuBarTakenOver: taken)
-                #expect(action == .leaveOverflow(logOnce: true), "round \(round), taken over \(taken)")
+    @Test func secondBarPolicyOpensSecondBar() {
+        // However many apps, however many rounds, whatever was logged, and whether or not the bar was taken over before: the revealed
+        // icons that have no room are shown in the second bar.
+        for apps in [["com.example.one"], ["com.example.one", "com.example.two"]] {
+            for round in [0, 1, 3, 10] {
+                for alreadyLogged in [false, true] {
+                    for taken in [false, true] {
+                        let action = NoRoomResponse.decide(policy: .secondBar, check: check(Set(apps), round: round),
+                                                           alreadyLogged: alreadyLogged, menuBarTakenOver: taken)
+                        #expect(action == .openSecondBar, "\(apps.count) apps, round \(round), logged \(alreadyLogged), taken over \(taken)")
+                    }
+                }
             }
         }
+    }
+
+    @Test func takeoverFallbackStillLeavesOverflow() {
+        // The line for icons left in the « menu is what is said when the menu bar was taken over and they still don't fit.
+        #expect(NoRoomResponse.decide(policy: .hideAppMenus, check: check(), alreadyLogged: false, menuBarTakenOver: true)
+            == .leaveOverflow(logOnce: true))
+        #expect(NoRoomResponse.decide(policy: .hideAppMenus, check: check(), alreadyLogged: true, menuBarTakenOver: true)
+            == .leaveOverflow(logOnce: false))
         #expect(NoRoomResponse.overflowLogLine == "no room for the revealed icons; macOS's « menu keeps them")
+        // And a swap and a takeover never open the second bar.
+        for policy in [NoRoomPolicy.swap, .hideAppMenus] {
+            for taken in [false, true] {
+                #expect(NoRoomResponse.decide(policy: policy, check: check(), alreadyLogged: false, menuBarTakenOver: taken) != .openSecondBar)
+            }
+        }
     }
 
     @Test func swapUpToThreeRoundsThenGivesUp() {

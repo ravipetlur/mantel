@@ -244,15 +244,25 @@ struct MenuBarAgentRestarterTests {
 struct ResetCopyTests {
     @Test func theQuestionIsAskedInTheWordsTheOwnerChose() {
         #expect(ResetCopy.alertTitle == "Reset the menu bar?")
-        #expect(ResetCopy.alertText == "Mantel shows every icon, puts back what it changed, and restarts macOS's menu bar. Your sections stay as they are.")
+        #expect(ResetCopy.alertText == "Mantel shows every icon, puts back its temporary changes, and restarts macOS's menu bar. Your sections and the order of your icons stay as they are.")
         #expect(ResetCopy.confirmButton == "Reset")
         #expect(ResetCopy.cancelButton == "Cancel")
     }
 
     @Test func theCommandLineAsksTheSameThing() {
-        // The tool's question is the alert's title and the first sentence of its text, and a prompt.
-        let firstSentence = "Mantel shows every icon, puts back what it changed, and restarts macOS's menu bar."
+        // The tool's question is the alert's title and the first sentence of its text, then that the order stays, and a prompt.
+        let firstSentence = "Mantel shows every icon, puts back its temporary changes, and restarts macOS's menu bar."
         #expect(ResetCopy.alertText.hasPrefix(firstSentence))
-        #expect(CLIConfirmation.resetQuestion == "\(ResetCopy.alertTitle) \(firstSentence) [y/N] ")
+        #expect(CLIConfirmation.resetQuestion == "\(ResetCopy.alertTitle) \(firstSentence) The order of your icons stays. [y/N] ")
+    }
+
+    @Test func bothTextsSayTheOrderStays() {
+        #expect(ResetCopy.alertText.contains("the order of your icons stay as they are"))
+        #expect(CLIConfirmation.resetQuestion.contains("The order of your icons stays."))
+        // What a reset puts back is the temporary changes only; the arrangement is kept (the person's, until Restore original layout).
+        #expect(ResetCopy.alertText.contains("its temporary changes"))
+        #expect(CLIConfirmation.resetQuestion.contains("its temporary changes"))
+        #expect(!ResetCopy.alertText.contains("what it changed"))
+        #expect(!CLIConfirmation.resetQuestion.contains("what it changed"))
     }
 }

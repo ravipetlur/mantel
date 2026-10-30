@@ -69,6 +69,9 @@ public enum BarRegion {
         guard changed else { return inventory }
         return Inventory(capturedAt: inventory.capturedAt, bars: inventory.bars, items: items, chevrons: inventory.chevrons,
                          reach: inventory.reach, problems: inventory.problems, unansweredApps: inventory.unansweredApps,
-                         untiedSlots: inventory.untiedSlots)
+                         untiedSlots: inventory.untiedSlots, activeDisplay: inventory.activeDisplay,
+                         barSlots: inventory.barSlots, contestedApps: inventory.contestedApps,
+                         incompleteApps: inventory.incompleteApps, appProcesses: inventory.appProcesses,
+                         agentReadCut: inventory.agentReadCut, runningApps: inventory.runningApps)
     }
 }

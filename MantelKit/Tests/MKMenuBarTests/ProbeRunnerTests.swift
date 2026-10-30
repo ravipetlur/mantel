@@ -114,9 +114,44 @@ struct ProbeRunnerTests {
         #expect(!report.errors.contains(ProbeRunner.platformTestOffMessage))
     }
 
-    @Test func theProbesThatChangeStateAreTheSixTheRunnerGates() {
+    @Test func theProbesThatChangeStateAreTheNineTheRunnerGates() {
         #expect(Set(ProbeRunner.stateChangingProbes)
-                == [.allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay, .revealLatency, .approvalsFlip])
+                == [.allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay, .revealLatency, .approvalsFlip,
+                    .clickPath, .layoutOrder, .spacing])
+    }
+
+    @Test func newStateChangingProbesAreGated() async throws {
+        let newOnes: [ProbeName] = [.clickPath, .layoutOrder, .spacing]
+        #expect(newOnes.allSatisfy(ProbeRunner.changesState))
+        #expect(!ProbeRunner.changesState(.iconCapture) && !ProbeRunner.changesState(.layoutMap), "these two only read")
+
+        for name in newOnes {
+            // Without "Enable platform test": refused, and nothing is clicked, written, relaunched or told.
+            let off = try ProbeHarness.make(platformTestEnabled: false)
+            let refused = await off.run(name)
+            #expect(refused.errors == [ProbeRunner.platformTestOffMessage], "\(name.rawValue)")
+            #expect(refused.restored)
+            #expect(refused.measurements.isEmpty)
+            #expect(off.allowlist.calls.isEmpty && off.poster.clicks.isEmpty && off.poster.keys.isEmpty)
+            #expect(off.presser.pressed.isEmpty && off.relauncher.asked.isEmpty && off.notifier.sent.isEmpty)
+            #expect(off.preferences.writes.isEmpty)
+            #expect(await off.journal.records().isEmpty)
+
+            // From a copy that isn't the one in /Applications.
+            let elsewhere = try ProbeHarness.make { platform in
+                platform.isInstalledCopy = false
+                platform.copyPath = Self.elsewhere
+            }
+            let other = await elsewhere.run(name)
+            #expect(other.errors == ["Run this probe from the copy in /Applications. This copy is at \(Self.elsewhere)."], "\(name.rawValue)")
+
+            // While a reset is under way.
+            let resetting = try ProbeHarness.make()
+            resetting.resetUnderWay.set(true)
+            let waiting = await resetting.run(name)
+            #expect(waiting.errors == [ProbeRunner.resetUnderWayMessage], "\(name.rawValue)")
+            #expect(await resetting.runner.isChangingMenuBar == false)
+        }
     }
 
     // MARK: Enable platform test

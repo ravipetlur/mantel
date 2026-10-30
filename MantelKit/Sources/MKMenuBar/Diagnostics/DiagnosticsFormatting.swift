@@ -36,6 +36,20 @@ public struct DiagnosticsCheck: Codable, Sendable, Equatable {
     }
 }
 
+/// The Diagnostics line about the journal: what quitting puts back, and what Mantel keeps.
+public enum JournalSummary {
+    /// "<n> to put back on quit, <m> kept." Both counts are always said, so that a journal that holds only what Mantel keeps reads as
+    /// "0 to put back on quit, 2 kept."
+    public static func detail(untilQuit: Int, kept: Int) -> String {
+        "\(untilQuit) to put back on quit, \(kept) kept."
+    }
+
+    /// The line: a temporary change that is waiting needs attention ("Replay now" is for it); what Mantel keeps is as it should be.
+    public static func check(untilQuit: Int, kept: Int) -> DiagnosticsCheck {
+        DiagnosticsCheck(title: "Journal", status: untilQuit == 0 ? .ok : .warning, detail: detail(untilQuit: untilQuit, kept: kept))
+    }
+}
+
 /// One line about a probe's last report: which, when, whether what it changed is back, and how many errors.
 public enum ProbeSummary {
     public static func line(for report: ProbeReport, timeZone: TimeZone = .current) -> String {

@@ -5,8 +5,9 @@ import Foundation
 /// macOS gives a quitting app little time, so the answer comes after `base` (one second): what must be done first (the settings
 /// written, the socket stopped) takes milliseconds. Putting back what Mantel changed in the system can take longer, and must not
 /// be cut short for no reason, so the wait is stretched to `extended` (three seconds in all), but only when that replay has to
-/// run: `extend()` is called by the cleanup when the journal holds changes, before the hiding method is taken down (its undoing and the
-/// replay after it share the three seconds), and counts only if the first second has not run out.
+/// run: `extend()` is called by the cleanup when the journal holds changes to put back (the temporary ones: what Mantel keeps stays
+/// across a quit and asks for no time), before the hiding method is taken down (its undoing and the replay after it share the three
+/// seconds), and counts only if the first second has not run out.
 ///
 /// `wait()` is started as quitting begins, next to the cleanup; the app answers the quit when the cleanup returns or when `wait()`
 /// does, whichever comes first.
@@ -32,6 +33,23 @@ public actor QuitTimer {
     public func extend() {
         if let startedAt, clock.now().timeIntervalSince(startedAt) >= Self.baseSeconds { return }
         isExtended = true
+    }
+
+    /// What the replay of the journal leaves of the wait to what comes after it: the socket stops, the hotkeys are let go and the
+    /// settings are written once more.
+    public static let replayMargin: Duration = .milliseconds(150)
+
+    /// Asks for the longer wait when the journal holds temporary changes to put back (`Journal.untilQuitRecords`). A journal that holds
+    /// only what Mantel keeps has nothing to put back at a quit, and the one second is all the quit needs.
+    public func extendForReplay(of journal: Journal) async {
+        guard await !journal.untilQuitRecords().isEmpty else { return }
+        extend()
+    }
+
+    /// How long the replay of the journal may take: what is left of the wait less `replayMargin`, never less than nothing. Cut short
+    /// by this, the replay says so, and the app doesn't quit in the middle of it or before the final steps have their time.
+    public func replayCap() -> Duration {
+        max(.zero, remaining() - Self.replayMargin)
     }
 
     /// How much of the wait is left, as the wait is now: what the cleanup has to finish what it is doing in. All of it before `wait()`

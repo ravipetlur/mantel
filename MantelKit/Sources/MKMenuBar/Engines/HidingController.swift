@@ -73,6 +73,7 @@ public actor HidingController {
         let method: HidingMethodChoice
         let callActive: Bool
         let keepMicVisibleDuringCalls: Bool
+        let unattachedShownApps: Set<String>
     }
 
     /// - Parameters:
@@ -117,12 +118,13 @@ public actor HidingController {
     /// Does nothing when the engines were taken down (`tearDown`) after `epoch` was read (`expectedEpoch`, which is the `epoch` of the call
     /// when none is given, so that a choice that waits for its turn through a teardown is dropped too), or after `shutDown`.
     public func choose(method: HidingMethodChoice, callActive: Bool = false, keepMicVisibleDuringCalls: Bool = false,
-                       expectedEpoch: Int? = nil) async {
+                       unattachedShownApps: Set<String> = [], expectedEpoch: Int? = nil) async {
         let asked = expectedEpoch ?? epoch
         await turnstile.enter()
         defer { turnstile.leave() }
         guard !isShutDown, epoch == asked else { return }
-        wanted = Wanted(method: method, callActive: callActive, keepMicVisibleDuringCalls: keepMicVisibleDuringCalls)
+        wanted = Wanted(method: method, callActive: callActive, keepMicVisibleDuringCalls: keepMicVisibleDuringCalls,
+                        unattachedShownApps: unattachedShownApps)
         availability = await currentAvailability()
         await decideAgain()
         // Only now, with the switch it asked for finished: the status says it settled.
@@ -143,7 +145,8 @@ public actor HidingController {
         guard let wanted else { return nil }
         return EngineChoice.decide(EngineChoiceInputs(method: wanted.method, callActive: wanted.callActive,
                                                       keepMicVisibleDuringCalls: wanted.keepMicVisibleDuringCalls,
-                                                      availability: availability, failedOut: failedOut))
+                                                      availability: availability, failedOut: failedOut,
+                                                      unattachedShownApps: wanted.unattachedShownApps))
     }
 
     private func currentAvailability() async -> [HidingEngineKind: EngineAvailability] {

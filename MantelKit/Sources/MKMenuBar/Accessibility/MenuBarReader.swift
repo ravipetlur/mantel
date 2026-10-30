@@ -26,8 +26,8 @@ public struct MenuBarReader: Sendable {
     /// How deep the raw dump of MenuBarAgent's tree goes, and how many elements it holds at most.
     static let rawTreeDepth = 6
     static let rawTreeNodeLimit = 2000
-    /// How many apps are asked at the same time.
-    static let concurrency = 8
+    /// How many apps are asked at the same time (`ReadConcurrency`).
+    static var concurrency: Int { ReadConcurrency.current }
 
     private let ax: any AXReading
     private let runningApps: @Sendable () -> [RunningApp]
@@ -113,7 +113,7 @@ public struct MenuBarReader: Sendable {
     private static func assemble(capturedAt: Date, layout: DisplayLayout, running: [RunningApp], agentIsRunning: Bool,
                                  agentResult: AgentRead, apps: [AppExtras], notTrusted: Bool) -> MenuBarSnapshot {
         var problems: [String] = []
-        if notTrusted || agentResult.notTrusted { problems.append("Accessibility isn't granted to Mantel.") }
+        if notTrusted || agentResult.notTrusted { problems.append("Device control and data access isn't granted to Mantel.") }
         if !agentIsRunning { problems.append("MenuBarAgent isn't running.") }
         else if agentResult.windows.isEmpty, !agentResult.notTrusted { problems.append("MenuBarAgent has no windows.") }
 

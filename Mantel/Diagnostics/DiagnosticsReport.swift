@@ -7,8 +7,14 @@ import MKMenuBar
 struct DiagnosticsRow: Identifiable {
     enum Kind: String {
         case accessibility, screenRecording, allowlist, layoutFile, approvalsFile, controlSocket, journal, logFile
+        /// The order of the menu bar, the pictures of its icons and the space between them.
+        case layoutWriter, iconImages, iconSpacing
         /// The rows that come from what the menu bar session last said (`MenuBarModel`), not from a read of their own.
         case hidingMethod, menuBar
+        /// An icon macOS doesn't tie to its app: a row for each such app.
+        case unattachedIcon
+        /// The menu bar was left stuck by a change of displays and restarting MenuBarAgent didn't put it right.
+        case stuckBar
     }
 
     let kind: Kind
@@ -24,9 +30,11 @@ struct DiagnosticsRow: Identifiable {
 @MainActor
 enum DiagnosticsReport {
     static func rows(for coordinator: AppCoordinator) async -> [DiagnosticsRow] {
-        [
-            await accessibility(coordinator),
-            await screenRecording(coordinator),
+        // Asked once, for the two rows that say what Screen Recording is.
+        let recording = await coordinator.permissionChecker.state(of: .screenRecording) == .granted
+        var rows = [await accessibility(coordinator), screenRecording(granted: recording)]
+        rows += await layoutRows(coordinator, screenRecording: recording)
+        rows += [
             allowlist(),
             await file(.menuBarLayout, kind: .layoutFile, title: "Layout file", coordinator),
             await file(.controlCenterApprovals, kind: .approvalsFile, title: "“Allow in the Menu Bar” file", coordinator),
@@ -34,6 +42,7 @@ enum DiagnosticsReport {
             await journal(coordinator),
             logFile(coordinator),
         ]
+        return rows
     }
 
     /// The rows that come from what the menu bar session last said: how icons are hidden, and how much of the menu bar was read. They are
@@ -42,12 +51,20 @@ enum DiagnosticsReport {
     ///
     /// `forPane` is for the pane's own rows: a problem that Refresh puts right says so ("Try Refresh menu bar below."), as the button is
     /// under the checks. The copied report and `mantel diagnostics` have no button, and carry the message alone.
-    static func liveRows(state: MenuBarState?, forPane: Bool = false) -> [DiagnosticsRow] {
+    /// `names` are what the pane calls the apps by; the report has none, and names them by their bundle ID.
+    static func liveRows(state: MenuBarState?, forPane: Bool = false, names: [String: String] = [:]) -> [DiagnosticsRow] {
         let method = DiagnosticsRow(kind: .hidingMethod, check: HidingDiagnostics.hidingMethodCheck(state?.engine))
         let menuBar = HidingDiagnostics.menuBarChecks(state?.inventory, suggestingRefresh: forPane).enumerated().map { index, check in
             DiagnosticsRow(kind: .menuBar, check: check, index: index)
         }
-        return [method] + menuBar
+        let unattached = HidingDiagnostics.unattachedIconChecks(state?.unattachedApps ?? [], engine: state?.engine, names: names,
+                                                                suggestingRefresh: forPane).enumerated().map { index, check in
+            DiagnosticsRow(kind: .unattachedIcon, check: check, index: index)
+        }
+        let stuck = HidingDiagnostics.stuckBarChecks(notRecovered: state?.stuckBarNotRecovered ?? false).map {
+            DiagnosticsRow(kind: .stuckBar, check: $0)
+        }
+        return [method] + menuBar + stuck + unattached
     }
 
     /// Every row, in the order the pane and the report show them: the permission checks first, then what the menu bar says, then the files.
@@ -81,17 +98,28 @@ enum DiagnosticsReport {
     private static func accessibility(_ coordinator: AppCoordinator) async -> DiagnosticsRow {
         let granted = await coordinator.permissionChecker.state(of: .accessibility) == .granted
         return DiagnosticsRow(kind: .accessibility, check: DiagnosticsCheck(
-            title: "Accessibility", status: granted ? .ok : .problem,
+            title: "Device control and data access", status: granted ? .ok : .problem,
             detail: granted ? "Granted. Mantel can read the menu bar."
                 : "Not granted. Mantel can't read the menu bar. Allow it in Settings › Permissions."))
     }
 
-    private static func screenRecording(_ coordinator: AppCoordinator) async -> DiagnosticsRow {
-        let granted = await coordinator.permissionChecker.state(of: .screenRecording) == .granted
-        return DiagnosticsRow(kind: .screenRecording, check: DiagnosticsCheck(
+    private static func screenRecording(granted: Bool) -> DiagnosticsRow {
+        DiagnosticsRow(kind: .screenRecording, check: DiagnosticsCheck(
             title: "Screen Recording", status: granted ? .ok : .warning,
             detail: granted ? "Granted. Mantel can take pictures of the menu bar items."
                 : "Not granted. It is optional: without it, items are shown by their app's icon."))
+    }
+
+    /// "Menu bar layout", "Icon images" and "Icon spacing": what the layout writer last said, what has been captured, and the spacing keys.
+    /// (Nothing in them names an app, so the copied report has them as they are.)
+    private static func layoutRows(_ coordinator: AppCoordinator, screenRecording recording: Bool) async -> [DiagnosticsRow] {
+        let menuBar = coordinator.menuBar
+        let images = LayoutDiagnostics.imageSummary(captured: menuBar?.itemImages.capturedDates ?? [])
+        let checks = LayoutDiagnostics.rows(
+            layout: menuBar?.model.state?.layout, images: (images.count, images.last, recording),
+            spacing: await coordinator.spacingWriter.current(), spacingWorks: IconSpacing.macOSApplies)
+        let kinds: [DiagnosticsRow.Kind] = [.layoutWriter, .iconImages, .iconSpacing]
+        return zip(kinds, checks).map { DiagnosticsRow(kind: $0, check: $1) }
     }
 
     private static func allowlist() -> DiagnosticsRow {
@@ -142,13 +170,9 @@ enum DiagnosticsReport {
             return DiagnosticsRow(kind: .journal, check: DiagnosticsCheck(
                 title: "Journal", status: .problem, detail: JournalError.unreadable(path: path).errorDescription ?? path))
         }
-        let waiting = await coordinator.journal.records().count
-        let detail = switch waiting {
-        case 0: "No change is waiting to be put back."
-        case 1: "1 change is waiting to be put back."
-        case let count: "\(count) changes are waiting to be put back."
-        }
-        return DiagnosticsRow(kind: .journal, check: DiagnosticsCheck(title: "Journal", status: waiting == 0 ? .ok : .warning, detail: detail))
+        let check = JournalSummary.check(untilQuit: await coordinator.journal.untilQuitRecords().count,
+                                         kept: await coordinator.journal.keptRecords().count)
+        return DiagnosticsRow(kind: .journal, check: check)
     }
 
     private static func logFile(_ coordinator: AppCoordinator) -> DiagnosticsRow {

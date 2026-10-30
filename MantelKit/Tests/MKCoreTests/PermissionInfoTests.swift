@@ -8,7 +8,7 @@ struct PermissionInfoTests {
     /// The copy of the permissions table, word for word.
     private static let reasons: [PermissionKind: String] = [
         .accessibility: "Mantel reads your menu bar and clicks its icons for you.",
-        .screenRecording: "Shows real icon pictures instead of app icons.",
+        .screenRecording: "Real pictures of your menu bar icons in the second bar, the command bar and Layout. Without it, app icons stand in.",
         .inputMonitoring: "Lets a modifier key on its own work as push-to-talk.",
         .microphone: "Needed for the AirPods squeeze and the level meter.",
         .calendars: "Shows your next meetings in the top shelf.",
@@ -20,7 +20,7 @@ struct PermissionInfoTests {
     ]
 
     private static let titles: [PermissionKind: String] = [
-        .accessibility: "Accessibility",
+        .accessibility: "Device control and data access",
         .screenRecording: "Screen Recording",
         .inputMonitoring: "Input Monitoring",
         .microphone: "Microphone",
@@ -64,6 +64,11 @@ struct PermissionInfoTests {
         let info = PermissionInfo.info(for: kind)
         #expect(info.reason == Self.reasons[kind])
         #expect(info.title == Self.titles[kind])
+    }
+
+    @Test func screenRecordingPurpose() {
+        #expect(PermissionInfo.info(for: .screenRecording).reason
+            == "Real pictures of your menu bar icons in the second bar, the command bar and Layout. Without it, app icons stand in.")
     }
 
     @Test func everyTitleIsDifferent() {

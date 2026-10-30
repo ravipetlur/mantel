@@ -178,6 +178,8 @@ struct MenuBarTakeoverPolicyTests {
         // It never became the front app: the takeover is undone, and the icons are left in the « menu, said once.
         #expect(MenuBarTakeoverPolicy.afterBegin(activated: false, overflowAlreadyLogged: false) == .undo(.leaveOverflow(logOnce: true)))
         #expect(MenuBarTakeoverPolicy.afterBegin(activated: false, overflowAlreadyLogged: true) == .undo(.leaveOverflow(logOnce: false)))
+        // Ended while it was being begun: nothing to look at again, and nothing to undo or log.
+        #expect(MenuBarTakeoverPolicy.afterBegin(activated: nil, overflowAlreadyLogged: false) == .endedMeanwhile)
     }
 
     @Test func mantelIsTheFrontAppOnlyWhileItHasTheMenuBar() {
@@ -198,6 +200,33 @@ struct DotsCopyTests {
         #expect(DotsCopy.alwaysDotDescription == "Show all icons")
     }
 
+    @Test func reexportsOwnItemsNames() {
+        // The dots' words are the layout's: what names an item and what finds it are one set of words.
+        #expect(DotsCopy.hiddenDotName == OwnItems.hiddenDotName)
+        #expect(DotsCopy.alwaysDotName == OwnItems.alwaysDotName)
+        #expect(DotsCopy.hiddenDotDescription == OwnItems.hiddenDotDescription)
+        #expect(DotsCopy.alwaysDotDescription == OwnItems.alwaysDotDescription)
+        // And they are still the words the dots are found by in the live menu bar.
+        #expect(DotsCopy.hiddenDotName == "mantel.dot.hidden")
+        #expect(DotsCopy.alwaysDotName == "mantel.dot.always")
+    }
+
+    @Test func isDotReadsTheOwnItemKind() {
+        // By the name, by the description, or by either; nothing else of Mantel's own is a dot.
+        #expect(DotsCopy.isDot(name: DotsCopy.hiddenDotName, description: nil))
+        #expect(DotsCopy.isDot(name: DotsCopy.alwaysDotName, description: nil))
+        #expect(DotsCopy.isDot(name: nil, description: DotsCopy.hiddenDotDescription))
+        #expect(DotsCopy.isDot(name: nil, description: DotsCopy.alwaysDotDescription))
+        #expect(DotsCopy.isDot(name: "other", description: DotsCopy.alwaysDotDescription))
+        for other in [OwnItems.dividerName, "mantel.spacer.1a2b3c4d", "mantel.group.5e6f7a8b", "mantel.spacer.divider", "mantel.spacer.always"] {
+            #expect(!DotsCopy.isDot(name: other, description: nil), "\(other)")
+        }
+        for other in [OwnItems.dividerDescription, OwnItems.spacerDescription, OwnItems.groupDescription(title: "Show all icons"), "Weather"] {
+            #expect(!DotsCopy.isDot(name: nil, description: other), "\(other)")
+        }
+        #expect(!DotsCopy.isDot(name: nil, description: nil))
+    }
+
     @Test func theTooltipSaysWhichWayOfHidingAndWhy() {
         let status = EngineStatus(kind: .allowlist, reason: "Chosen automatically: macOS's allowlist works.", degraded: false,
                                   availability: [:], lastError: nil)
@@ -211,6 +240,7 @@ struct DotsCopyTests {
 
     @Test func theMenuUsesTitleCase() {
         #expect(DotsCopy.settingsItem == "Settings…")
+        #expect(DotsCopy.commandBarItem == "Command Bar…")
         #expect(DotsCopy.focusModeItem == "Focus Mode")
         #expect(DotsCopy.refreshItem == "Refresh Menu Bar")
         #expect(DotsCopy.diagnosticsItem == "Diagnostics…")

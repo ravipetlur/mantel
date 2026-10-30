@@ -23,14 +23,14 @@ final class LiveSpacers: SpacerControlling {
     private var always: NSStatusItem?
 
     /// A picture of nothing: the item has an image, so that it has a button and a place, and nothing is drawn in it.
-    private static let emptyImage: NSImage = {
+    static let emptyImage: NSImage = {
         let image = NSImage(size: NSSize(width: 1, height: 1))
         image.isTemplate = true
         return image
     }()
 
     /// The divider's line while it takes no room: 1 point by 14, a template, so that the menu bar colours it.
-    private static let lineImage: NSImage = {
+    static let lineImage: NSImage = {
         let image = NSImage(size: NSSize(width: 1, height: 14), flipped: false) { rect in
             NSColor.black.setFill()
             rect.fill()
@@ -63,6 +63,8 @@ final class LiveSpacers: SpacerControlling {
     private func makeItem(named name: String) -> NSStatusItem {
         let item = NSStatusBar.system.statusItem(withLength: 0)
         item.autosaveName = name
+        // Accessibility isn't given the autosave name on macOS 27; the identifier is how a read of the menu bar tells the spacers apart.
+        item.button?.setAccessibilityIdentifier(name)
         item.button?.image = Self.emptyImage
         item.button?.imagePosition = .imageOnly
         item.button?.imageScaling = .scaleNone

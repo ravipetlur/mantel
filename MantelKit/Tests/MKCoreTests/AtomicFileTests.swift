@@ -235,6 +235,58 @@ struct AtomicFileTests {
         #expect(try names() == ["target.plist"], "and no temporary file is left")
     }
 
+    @Test func fullSyncFailureFallsBackToFsync() throws {
+        // A drive or a file system that refuses F_FULLFSYNC gets a plain fsync: the write succeeds, and the file is the new one.
+        try Data("old".utf8).write(to: target)
+        let events = Events()
+        let syncing = FileSyncing.systemCalls(
+            fullSync: { _ in
+                events.add("full")
+                return -1
+            },
+            fallbackSync: { _ in
+                events.add("fsync")
+                return 0
+            })
+
+        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, syncing: syncing)
+
+        #expect(events.all == ["full", "fsync"], "the full sync was tried first, and the plain one made when it failed")
+        #expect(try Data(contentsOf: target) == Data("new".utf8))
+        #expect(try names() == ["target.plist"])
+    }
+
+    @Test func aFullSyncThatWorksIsNotFollowedByAnFsync() throws {
+        let events = Events()
+        let syncing = FileSyncing.systemCalls(
+            fullSync: { _ in
+                events.add("full")
+                return 0
+            },
+            fallbackSync: { _ in
+                events.add("fsync")
+                return 0
+            })
+        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, syncing: syncing)
+        #expect(events.all == ["full"])
+    }
+
+    @Test func whenNeitherSyncWorksTheWriteFailsAndTheOldFileStays() throws {
+        try Data("old".utf8).write(to: target)
+        let syncing = FileSyncing.systemCalls(
+            fullSync: { _ in -1 },
+            fallbackSync: { _ in
+                errno = ENOSPC
+                return -1
+            })
+
+        #expect(throws: POSIXError(.ENOSPC)) {
+            try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, syncing: syncing)
+        }
+        #expect(try Data(contentsOf: target) == Data("old".utf8), "the file was never replaced")
+        #expect(try names() == ["target.plist"], "and no temporary file is left")
+    }
+
     @Test func theSystemsSyncingWorksOnARealFileAndFolder() throws {
         // Not a way to see that F_FULLFSYNC was used, only that the real calls succeed where a write is made.
         try AtomicFile.write(Data("durable".utf8), to: target, synchronize: true, syncing: .system)

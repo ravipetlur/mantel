@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import MKCore
+import MKLayout
 
 /// A display's menu bar as MenuBarAgent's chosen window gives it.
 struct MatchBar: Sendable, Equatable {
@@ -24,19 +25,39 @@ struct MatchInput: Sendable {
     /// frames often stay where they were when it is hidden, or are the last x at a place that can be on another display's bar): its frames
     /// claim a slot only when no app that isn't concealed has it, and are not judged as places (`BarRegion`).
     var concealedApps: Set<String> = []
+    /// The apps whose frames don't count when the active display is told: the ones the plan before this one concealed. They have just been
+    /// drawn again, and some report frames from the bar they were last on, before the person went to the other display.
+    var notVoting: Set<String> = []
 }
 
 /// What the matcher remembers between reads, so that an item keeps its ID while it can't be seen.
 ///
 /// - **Order:** an item with no name of its own is told by its place among its app's items from left to right. That is only
 ///   known while they are all on a bar, so the order is kept by the item's position in its app's list of items, and used while the
-///   app is concealed.
-/// - **Slot names:** the name an item had on its slot when its app's own list didn't give one.
+///   app is concealed. It is kept when the app is started again: it is what names the items that have no name, and an app that makes
+///   the same number of items again most likely makes them in the same order.
+/// - **Places:** where each of an app's items is among all of them from left to right, as it was when they were all on a bar. An app
+///   doesn't list its items in the order they are in, so what a concealed item's place is can only be known from when it was drawn.
+///
+/// The places are of one run of the app: the position in its list is of the items it made then, and an app that is started again may make
+/// them in another order, so they are learned again (`noteProcesses`).
 struct IndexMemory: Sendable, Equatable {
     private var orders: [String: [Int: Int]] = [:]
-    private var slotNames: [String: [Int: String]] = [:]
+    private var places: [String: [Int: Int]] = [:]
+    private var processes: [String: Set<pid_t>] = [:]
 
     init() {}
+
+    /// The processes that list an app's items now. When they aren't the ones that listed them when the places were learned, the app has
+    /// been started again (or is another process of it), and the places are of another run: they are forgotten, and learned again when
+    /// the items are drawn. (The order is kept: it names the items that have no name of their own, and an app that makes the same number
+    /// of items again most likely makes them in the same order.)
+    mutating func noteProcesses(_ pids: Set<pid_t>, ofApp bundleID: String) {
+        if let before = processes[bundleID], before != pids {
+            places[bundleID] = nil
+        }
+        processes[bundleID] = pids
+    }
 
     /// The remembered order of an app's items, when it covers exactly these positions in the app's list.
     func order(ofApp bundleID: String, covering positions: Set<Int>) -> [Int: Int]? {
@@ -48,12 +69,21 @@ struct IndexMemory: Sendable, Equatable {
         orders[bundleID] = order
     }
 
-    func slotName(ofApp bundleID: String, at position: Int) -> String? {
-        slotNames[bundleID]?[position]
+    /// The place of each of an app's items from left to right (the position in the app's list to the place, from 0), when what was
+    /// remembered covers exactly these positions: the app's items as they are now.
+    func places(ofApp bundleID: String, covering positions: Set<Int>) -> [Int: Int]? {
+        guard let places = places[bundleID], Set(places.keys) == positions else { return nil }
+        return places
     }
 
-    mutating func remember(slotName: String, ofApp bundleID: String, at position: Int) {
-        slotNames[bundleID, default: [:]][position] = slotName
+    mutating func remember(places: [Int: Int], ofApp bundleID: String) {
+        self.places[bundleID] = places
+    }
+
+    /// Forgets where an app's items sat from left to right: Mantel changed the order of its items, so what was learned is of the old one.
+    /// It is learned again when the items are drawn.
+    mutating func forgetPlaces(ofApp bundleID: String) {
+        places[bundleID] = nil
     }
 }
 
@@ -61,7 +91,7 @@ struct IndexMemory: Sendable, Equatable {
 ///
 /// - **Slots** (MenuBarAgent's, per display) are sorted by where they are; the order Accessibility lists them in means nothing.
 /// - **An app's item** belongs to the slot its frame is in (the frame is about 6 points inside the slot, so the center is inside
-///   it; a frame can be a few points wider than the slot, `widthTolerance`). The closest pairs of frame and slot are made first, and no
+///   it; a frame can be a few points wider than the slot, `frameWidthTolerance`). The closest pairs of frame and slot are made first, and no
 ///   app's frame claims the slot of a system module. A frame that is in no slot is concealed, and isn't kept: macOS reports a stale
 ///   one for an item it isn't drawing.
 /// - **System items** are told by their identifier (`com.apple.menuextra.<module>`), on the slot or on the app's own item.
@@ -86,7 +116,7 @@ struct IndexMemory: Sendable, Equatable {
 ///   icon that is drawn, though no « is listed (macOS 27 never lists it); that one is told by a place, and is `inferred`.
 enum InventoryMatcher {
     /// How far outside a slot an app's frame may be centered and still belong to it.
-    private static let slotOutset: CGFloat = 1
+    static let slotOutset: CGFloat = 1
 
     static func match(_ input: MatchInput, memory: inout IndexMemory) -> Inventory {
         matchCounting(input, memory: &memory).inventory
@@ -99,53 +129,59 @@ enum InventoryMatcher {
         let unmatchedSlots: Int
         /// How many stretches of a bar couldn't be lined up with the same stretch of the reference bar, and were left untied.
         let segmentsNotAligned: Int
+        /// Where each item that an app (or a system module's app) lists is in its app's list: what the item's ID is for when the item is to be
+        /// asked something (pressed). An item that is only a slot has no entry.
+        let listed: [ItemID: ListedItem]
+    }
+
+    /// An item's place in the list its app gives of its items: the process, and the position in that process's list (`ExtraItem.index`).
+    struct ListedItem: Sendable, Equatable {
+        let pid: pid_t
+        let index: Int
     }
 
     static func matchCounting(_ input: MatchInput, memory: inout IndexMemory) -> MatchResult {
         let bars = input.bars.map { prepare($0, layout: input.layout) }
         let entries = entries(of: input.apps)
 
-        // First, an app's frame goes to the slot it is inside, one slot to one frame.
+        // First, a slot that carries the name an item's own app gives it is that item's, whatever frame lies in it.
         var claimed: [SlotRef: Int] = [:]  // slot → position in `entries`
+        let namedSlots = slotsNamedByTheirItem(entries: entries, bars: bars)
+        for (slot, entryIndex) in namedSlots { claimed[slot] = entryIndex }
+        // Then an app's frame goes to the slot it is inside, one slot to one frame. (Not on a bar where the item has its slot by its name.)
+        var namedBars: Set<EntryBar> = []
+        for (slot, entryIndex) in namedSlots { namedBars.insert(EntryBar(entry: entryIndex, bar: slot.bar)) }
         // The frames of the apps that aren't concealed claim first: a concealed app's frame can lie in a slot of someone else's.
         let isConcealed: (Int) -> Bool = { input.concealedApps.contains(entries[$0].bundleID) }
+        var contestedApps: Set<String> = []
         for group in [entries.indices.filter { !isConcealed($0) }, entries.indices.filter(isConcealed)] {
-            claimSlots(for: group, entries: entries, bars: bars, claimed: &claimed)
+            contestedApps.formUnion(claimSlots(for: group, entries: entries, bars: bars, claimed: &claimed, namedBars: namedBars))
         }
+        // What the frames matched: the slots that are named by their items aren't counted (every display has them).
         var claimsOnBar = Array(repeating: 0, count: bars.count)
-        for slot in claimed.keys { claimsOnBar[slot.bar] += 1 }
+        for slot in claimed.keys where namedSlots[slot] == nil { claimsOnBar[slot.bar] += 1 }
+        // The bar that holds the frames of the apps that aren't concealed is the active display's: macOS reports them there. An app votes
+        // only if it was drawn under the plan before this one too.
+        var framesOnBar = Array(repeating: 0, count: bars.count)
+        var voted: Set<Int> = []
+        let votes: (Int) -> Bool = { !isConcealed($0) && !input.notVoting.contains(entries[$0].bundleID) }
+        for (slot, entryIndex) in claimed where namedSlots[slot] == nil && votes(entryIndex) {
+            framesOnBar[slot.bar] += 1
+            voted.insert(entryIndex)
+        }
+        // An item that has its slot by its name doesn't claim by frame on that bar, but its frame still says which bar is the active one: it
+        // votes for the bar its frame lies in, without a slot.
+        for entryIndex in entries.indices where !voted.contains(entryIndex) && votes(entryIndex) {
+            guard let frame = entries[entryIndex].item.frame, !frame.isEmpty else { continue }
+            let named = slotsHolding(frame, in: bars).filter { namedBars.contains(EntryBar(entry: entryIndex, bar: $0.slot.bar)) }
+            if let nearest = named.min(by: { $0.distance < $1.distance }) { framesOnBar[nearest.slot.bar] += 1 }
+        }
+        let mostFrames = framesOnBar.max() ?? 0
+        let leaders = framesOnBar.indices.filter { framesOnBar[$0] == mostFrames }
+        let activeDisplay = mostFrames > 0 && leaders.count == 1 ? bars[leaders[0]].geometry.displayUUID : nil
 
-        // Then the same item on another display, told by the slot's own identifier. A name that is on one bar twice, or that two
-        // apps' slots share (AppKit gives every app's first item the same one), says nothing of whose it is, and ties nothing.
-        var namesOnBar: [Int: [String: Int]] = [:]
-        for (barIndex, bar) in bars.enumerated() {
-            for slot in bar.slots {
-                if let name = ItemID.usableIdentifier(slot.identifier) { namesOnBar[barIndex, default: [:]][name, default: 0] += 1 }
-            }
-        }
-        let repeatedNames = Set(namesOnBar.values.flatMap { $0.filter { $0.value > 1 }.keys })
-        var entryOfSlotName: [String: Int] = [:]
-        var sharedNames: Set<String> = []
-        for slot in claimed.keys.sorted() {
-            guard let name = ItemID.usableIdentifier(bars[slot.bar].slots[slot.position].identifier),
-                  ItemID.systemModule(ofIdentifier: name) == nil, !repeatedNames.contains(name), let entryIndex = claimed[slot] else { continue }
-            if let known = entryOfSlotName[name], known != entryIndex, entries[known].bundleID != entries[entryIndex].bundleID {
-                sharedNames.insert(name)
-            } else {
-                entryOfSlotName[name] = entryOfSlotName[name] ?? entryIndex
-            }
-        }
-        for name in sharedNames { entryOfSlotName[name] = nil }
-        for (barIndex, bar) in bars.enumerated() {
-            for (position, slot) in bar.slots.enumerated() {
-                let ref = SlotRef(bar: barIndex, position: position)
-                guard claimed[ref] == nil, let name = ItemID.usableIdentifier(slot.identifier), let entryIndex = entryOfSlotName[name],
-                      !claimed.contains(where: { $0.value == entryIndex && $0.key.bar == barIndex }) else { continue }
-                claimed[ref] = entryIndex
-            }
-        }
-
-        // Last, what is left, by where it is: the same items are in the same order on every display.
+        // Last, what is left, by where it is: the same items are in the same order on every display. (An item's own name on a slot of another
+        // display has tied it already, `slotsNamedByTheirItem`.)
         let alignment = align(bars, claimsOnBar: claimsOnBar, claimed: &claimed)
 
         var systemSlots: [SlotRef] = []
@@ -187,6 +223,7 @@ enum InventoryMatcher {
             systemEntries.insert(entryIndex)
             let id = ItemID.system(module)
             ensure(id, owner: ItemID.systemBundleID, appName: nil, isMantel: false, into: &built)
+            if built[id.string]?.listed == nil { built[id.string]?.listed = ListedItem(pid: entry.pid, index: entry.item.index) }
             for ref in slots { place(id, at: ref, in: bars, owner: ItemID.systemBundleID, appName: nil, isMantel: false, into: &built) }
         }
 
@@ -216,10 +253,17 @@ enum InventoryMatcher {
         let items = ordered(built.values.map(\.item), mainUUID: mainUUID, displayOrder: bars.map(\.geometry.displayUUID))
         var chevrons: [String: CGRect] = [:]
         for bar in bars { chevrons[bar.geometry.displayUUID] = bar.chevron }
-        let unanswered = Set(input.reach.filter { $0.status == .timedOut || $0.status == .skipped }.map(\.bundleID))
+        let unanswered = Set(input.reach.filter { $0.status == .timedOut || $0.status == .skipped || $0.status == .refused }.map(\.bundleID))
+        var barSlots: [String: [BarSlot]] = [:]
+        for bar in input.bars {
+            barSlots[bar.displayUUID] = ItemLocator.drawnSlotsNamed(of: bar).map { BarSlot(frame: $0.frame, name: $0.name) }
+        }
         let inventory = Inventory(capturedAt: input.capturedAt, bars: bars.map(\.geometry), items: items, chevrons: chevrons,
-                                  reach: input.reach, problems: input.problems, unansweredApps: unanswered, untiedSlots: untied)
-        return MatchResult(inventory: inventory, unmatchedSlots: unmatched, segmentsNotAligned: alignment.segmentsNotAligned)
+                                  reach: input.reach, problems: input.problems, unansweredApps: unanswered, untiedSlots: untied,
+                                  activeDisplay: activeDisplay, barSlots: barSlots, contestedApps: contestedApps,
+                                  incompleteApps: incompleteApps(of: input.apps), appProcesses: processes(of: input.apps))
+        let listed = Dictionary(built.values.compactMap { item in item.listed.map { (item.id, $0) } }, uniquingKeysWith: { first, _ in first })
+        return MatchResult(inventory: inventory, unmatchedSlots: unmatched, segmentsNotAligned: alignment.segmentsNotAligned, listed: listed)
     }
 
     // MARK: Entries
@@ -228,11 +272,12 @@ enum InventoryMatcher {
     /// An app that runs as several processes is one app, and its items follow one another.
     private static func entries(of apps: [AppExtras]) -> [Entry] {
         var entries: [Entry] = []
-        for (bundleID, group) in Dictionary(grouping: apps.filter { $0.bundleID != nil }, by: { $0.bundleID ?? "" }) {
+        // An app with no bundle ID, or an empty one, can't be told from another that has none: it has no items here.
+        for (bundleID, group) in Dictionary(grouping: apps.filter { !($0.bundleID ?? "").isEmpty }, by: { $0.bundleID ?? "" }) {
             var position = 0
             for app in group.sorted(by: { $0.pid < $1.pid }) {
                 for item in app.items.sorted(by: { $0.index < $1.index }) {
-                    entries.append(Entry(bundleID: bundleID, appName: app.name, position: position, item: item))
+                    entries.append(Entry(bundleID: bundleID, appName: app.name, pid: app.pid, position: position, item: item))
                     position += 1
                 }
             }
@@ -269,18 +314,14 @@ enum InventoryMatcher {
             (slotsOfEntry[entryIndex] ?? []).contains { bars[$0.bar].slots[$0.position].frame != nil }
         }
 
-        // What each item is called: by its app, else by its slot, else by what its slot was called when it was last seen.
+        // What was learned of the app's items is of the run of the app that listed them.
+        memory.noteProcesses(Set(entryIndices.map { entries[$0].pid }), ofApp: bundleID)
+
+        // What each item is called: by its app's own list, and by nothing else. The name of a slot is another's as often as it is the
+        // item's (a view inside the item, a name that other items have, one that an old frame took from its owner), so it names no one.
         var names: [Int: String] = [:]
         for index in entryIndices {
-            let entry = entries[index]
-            if let own = ItemID.usableIdentifier(unprefixed(entry.item.identifier, bundleID: bundleID)) {
-                names[index] = own
-            } else if let slotName = slotName(of: slotsOfEntry[index] ?? [], bundleID: bundleID, in: bars) {
-                names[index] = slotName
-                memory.remember(slotName: slotName, ofApp: bundleID, at: entry.position)
-            } else if let remembered = memory.slotName(ofApp: bundleID, at: entry.position) {
-                names[index] = remembered
-            }
+            if let own = ownName(of: entries[index], bundleID: bundleID) { names[index] = own }
         }
         // A name that two of an app's items share names neither of them.
         let counts = Dictionary(names.values.map { ($0, 1) }, uniquingKeysWith: +)
@@ -308,6 +349,15 @@ enum InventoryMatcher {
             }
         }
 
+        // Where each of the app's items is among all of them, remembered while they are all on a bar (an item that is concealed has no place
+        // to be told by, and an app lists its items in an order of its own).
+        if entryIndices.count > 1, entryIndices.allSatisfy(isShown) {
+            var places: [Int: Int] = [:]
+            let byPlace = entryIndices.sorted { placeKey(of: $0, slotsOfEntry, bars, entries) < placeKey(of: $1, slotsOfEntry, bars, entries) }
+            for (rank, entryIndex) in byPlace.enumerated() { places[entries[entryIndex].position] = rank }
+            memory.remember(places: places, ofApp: bundleID)
+        }
+
         // Dots that report one and the same frame: a frame is one icon's, so they are out of date (a display change moves the icons, and
         // what they say of where they are is for a moment what it was). Nothing is made of the places of either.
         let dots = entryIndices.filter { bundleID == ownBundleID && DotsCopy.isDot(name: names[$0], description: entries[$0].item.description) }
@@ -326,13 +376,16 @@ enum InventoryMatcher {
             let label = nonEmpty(entry.item.title) ?? nonEmpty(entry.item.description)
             let isMantel = bundleID == ownBundleID
             ensure(id, owner: bundleID, appName: entry.appName, isMantel: isMantel, into: &built)
+            built[id.string]?.listed = ListedItem(pid: entry.pid, index: entry.item.index)
             if let label, built[id.string]?.label == nil { built[id.string]?.label = label }
             for ref in slotsOfEntry[entryIndex] ?? [] {
                 place(id, at: ref, in: bars, owner: bundleID, appName: entry.appName, isMantel: isMantel, label: label, into: &built)
             }
             if let marked = overflowedOnBar[entryIndex] { built[id.string]?.overflowedOn.formUnion(marked) }
-            let isDot = isMantel && DotsCopy.isDot(name: names[entryIndex], description: entry.item.description)
-            built[id.string]?.isDot = isDot
+            // What an item of Mantel's own is, by its name or by what it is called for the accessibility tools.
+            let ownKind = isMantel ? OwnItems.kind(name: names[entryIndex], description: entry.item.description) : nil
+            built[id.string]?.ownKind = ownKind
+            let isDot = ownKind?.isDot == true
             if let frame = entry.item.frame, frame.width > 0 { built[id.string]?.reportedWidth = frame.width }
             if sharing.contains(entryIndex), let frame = entry.item.frame {
                 built[id.string]?.sharesFrameOn = Set(bars.filter { $0.geometry.rect.insetBy(dx: -barOutset, dy: -barOutset).contains(frame) }
@@ -359,14 +412,50 @@ enum InventoryMatcher {
         return name
     }
 
-    /// The name an item has on its slot, when its app's own list gives it none.
-    private static func slotName(of slots: [SlotRef], bundleID: String, in bars: [PreparedBar]) -> String? {
-        for slot in slots {
-            if let usable = ItemID.usableIdentifier(unprefixed(bars[slot.bar].slots[slot.position].identifier, bundleID: bundleID)) {
-                return usable
+    /// The name an app's own list gives an item, when it gives a usable one.
+    private static func ownName(of entry: Entry, bundleID: String) -> String? {
+        ItemID.usableIdentifier(unprefixed(entry.item.identifier, bundleID: bundleID))
+    }
+
+    /// The apps whose read doesn't say for certain which icons they have: an item's name didn't come (`AppExtras.namesIncomplete`), or the
+    /// list was read only as far as its last item before a stop (`AppExtras.listCut`).
+    private static func incompleteApps(of apps: [AppExtras]) -> Set<String> {
+        Set(apps.filter { $0.namesIncomplete || $0.listCut }.compactMap(\.bundleID).filter { !$0.isEmpty })
+    }
+
+    /// The processes that listed each app's items.
+    private static func processes(of apps: [AppExtras]) -> [String: Set<Int32>] {
+        var processes: [String: Set<Int32>] = [:]
+        for app in apps {
+            guard let bundleID = app.bundleID, !bundleID.isEmpty else { continue }
+            processes[bundleID, default: []].insert(app.pid)
+        }
+        return processes
+    }
+
+    /// The slots that carry the name an item's own app gives it, on every bar: the item's own name on a slot says whose it is, and that
+    /// is all a name says. Not the name of a slot that another slot of its bar carries too (a window that lags names slots after the one
+    /// before), not a name that two of the items give (the apps' reads say nothing of whose it is), and not a system module's.
+    private static func slotsNamedByTheirItem(entries: [Entry], bars: [PreparedBar]) -> [SlotRef: Int] {
+        var entriesOfName: [String: [Int]] = [:]
+        for (entryIndex, entry) in entries.enumerated() {
+            guard let name = ownName(of: entry, bundleID: entry.bundleID), ItemID.systemModule(ofIdentifier: name) == nil else { continue }
+            // A slot carries the name as the app gave it, or with the layout's key in front of it.
+            entriesOfName[name, default: []].append(entryIndex)
+            entriesOfName[entry.bundleID + "::" + name, default: []].append(entryIndex)
+        }
+        var tied: [SlotRef: Int] = [:]
+        for (barIndex, bar) in bars.enumerated() {
+            var onBar: [String: [Int]] = [:]
+            for (position, slot) in bar.slots.enumerated() {
+                if let name = ItemID.usableIdentifier(slot.identifier) { onBar[name, default: []].append(position) }
+            }
+            for (name, positions) in onBar where positions.count == 1 {
+                guard let owners = entriesOfName[name], owners.count == 1 else { continue }
+                tied[SlotRef(bar: barIndex, position: positions[0])] = owners[0]
             }
         }
-        return nil
+        return tied
     }
 
     /// Where an item is, for putting an app's items in order: the display it is on (in the order of the bars), then its x, then
@@ -427,6 +516,12 @@ enum InventoryMatcher {
 
     // MARK: Slots
 
+    /// An item and a bar.
+    struct EntryBar: Hashable {
+        let entry: Int
+        let bar: Int
+    }
+
     /// A slot's place among the slots of every bar.
     struct SlotRef: Hashable, Comparable {
         let bar: Int
@@ -456,6 +551,8 @@ enum InventoryMatcher {
     private struct Entry {
         let bundleID: String
         let appName: String?
+        /// The process that listed the item.
+        let pid: pid_t
         /// The position among all the items the app lists.
         let position: Int
         let item: ExtraItem
@@ -473,8 +570,12 @@ enum InventoryMatcher {
         var displays: Set<String> = []
         /// Where the item says it is on a bar where none of the slots is (`isStray`).
         var strays: [String: CGRect] = [:]
+        /// Where the item's app lists it.
+        var listed: ListedItem?
+        /// What the item is when it is one of Mantel's own (a dot, the divider, a spacer, a group's icon).
+        var ownKind: OwnItemKind?
         /// Whether the item is one of Mantel's two dots.
-        var isDot = false
+        var isDot: Bool { ownKind?.isDot == true }
         /// The width of the frame its app reports for it.
         var reportedWidth: CGFloat?
         /// The displays whose bar holds the frame that the item reports and another dot reports too.
@@ -496,7 +597,7 @@ enum InventoryMatcher {
         var item: MenuBarItem {
             MenuBarItem(id: id, ownerBundleID: ownerBundleID, appName: appName, label: label, frames: frames,
                         overflowedOn: overflowedOn, isMantel: isMantel, isDot: isDot, strayFrames: strays, inferredOverflowOn: inferredOn, sharesFrameOn: sharesFrameOn,
-                        reportedWidth: reportedWidth)
+                        reportedWidth: reportedWidth, ownKind: ownKind)
         }
     }
 
@@ -521,23 +622,24 @@ enum InventoryMatcher {
 
     /// How much wider than its slot an icon's frame may be and still be the slot's. A frame is the icon's own size (the app draws it, and
     /// the slot is the bar's room for it): real ones are two to five points wider than the slot (40 in 38, 91 in 89, 34 in 29).
-    private static let widthTolerance: CGFloat = 6
+    static let frameWidthTolerance: CGFloat = 6
 
-    /// The slots an app's frame could be in, with how far the frame's center is from each slot's: the ones that are no one else's yet,
-    /// hold the frame's center (a point or so outside will do) and are no more than `widthTolerance` narrower than the frame. A slot that
+    /// The slots an app's frame could be in, with how far the frame's center is from each slot's: the ones that hold the frame's center (a
+    /// point or so outside will do) and are no more than `frameWidthTolerance` narrower than the frame. The slots that are someone's
+    /// already (claimed by an earlier group of apps, or earlier in the same one) are listed too, for `claimSlots` to see that a frame whose
+    /// nearest slot is taken is a stale one, and not to let it go on to the neighbour's. A slot that
     /// names a system module is the system's: no app's frame is its (the clock and Control Center are where their clicks are replayed, and
     /// an app that hides in the place of one is not it).
-    private static func slotsHolding(_ frame: CGRect, in bars: [PreparedBar], excluding claimed: [SlotRef: Int])
-        -> [(slot: SlotRef, distance: CGFloat)] {
+    private static func slotsHolding(_ frame: CGRect, in bars: [PreparedBar]) -> [(slot: SlotRef, distance: CGFloat)] {
         let center = CGPoint(x: frame.midX, y: frame.midY)
         var found: [(slot: SlotRef, distance: CGFloat)] = []
         for (barIndex, bar) in bars.enumerated() {
             for (position, slot) in bar.slots.enumerated() {
                 let ref = SlotRef(bar: barIndex, position: position)
-                guard claimed[ref] == nil, let slotFrame = slot.frame, !slotFrame.isEmpty,
+                guard let slotFrame = slot.frame, !slotFrame.isEmpty,
                       ItemID.systemModule(ofIdentifier: slot.identifier ?? "") == nil,
                       slotFrame.insetBy(dx: -slotOutset, dy: -slotOutset).contains(center),
-                      frame.width <= slotFrame.width + widthTolerance
+                      frame.width <= slotFrame.width + frameWidthTolerance
                 else { continue }
                 found.append((ref, abs(slotFrame.midX - center.x)))
             }
@@ -548,19 +650,47 @@ enum InventoryMatcher {
     /// Gives each of these entries' frames the slot that fits it best. Every (frame, slot) pair is looked at, the closest first, and a pair
     /// is made when neither has been given: so a frame that is nearly in a slot doesn't take it from the one whose slot it is, whatever
     /// order the apps are listed in.
-    private static func claimSlots(for indices: [Int], entries: [Entry], bars: [PreparedBar], claimed: inout [SlotRef: Int]) {
+    ///
+    /// Returns the apps in a near tie: when a slot goes to one app's frame and another app's frame, not yet placed, was no more than
+    /// `contestMargin` further from it, both apps are named. (An unattached icon's stale frame can lie in its neighbour's new slot; a
+    /// clear win isn't a contest.)
+    @discardableResult
+    private static func claimSlots(for indices: [Int], entries: [Entry], bars: [PreparedBar], claimed: inout [SlotRef: Int],
+                                   namedBars: Set<EntryBar>) -> Set<String> {
         var pairs: [(distance: CGFloat, entry: Int, slot: SlotRef)] = []
         for entryIndex in indices {
             guard let frame = entries[entryIndex].item.frame, !frame.isEmpty else { continue }
-            for candidate in slotsHolding(frame, in: bars, excluding: claimed) { pairs.append((candidate.distance, entryIndex, candidate.slot)) }
+            for candidate in slotsHolding(frame, in: bars) where !namedBars.contains(EntryBar(entry: entryIndex, bar: candidate.slot.bar)) {
+                pairs.append((candidate.distance, entryIndex, candidate.slot))
+            }
         }
         pairs.sort { ($0.distance, $0.entry, $0.slot) < ($1.distance, $1.entry, $1.slot) }
         var placed: Set<Int> = []
-        for pair in pairs where !placed.contains(pair.entry) && claimed[pair.slot] == nil {
+        var contested: Set<String> = []
+        // A frame whose center lies in a slot that a frame nearer the slot's center has already won, in this group or an earlier one, is a stale
+        // one (it is where another icon is drawn): it has no slot, and doesn't go on to the neighbour's that its outset reaches (the
+        // alignment spreads the rest).
+        var lost: Set<Int> = []
+        for (index, pair) in pairs.enumerated() where !placed.contains(pair.entry) && !lost.contains(pair.entry) {
+            guard claimed[pair.slot] == nil else {
+                lost.insert(pair.entry)
+                continue
+            }
             claimed[pair.slot] = pair.entry
             placed.insert(pair.entry)
+            // The pairs are in order of distance: the ones after this that want the same slot are the ones it beat.
+            for rival in pairs[(index + 1)...].prefix(while: { $0.distance - pair.distance <= contestMargin }) {
+                guard rival.slot == pair.slot, !placed.contains(rival.entry),
+                      entries[rival.entry].bundleID != entries[pair.entry].bundleID else { continue }
+                contested.insert(entries[pair.entry].bundleID)
+                contested.insert(entries[rival.entry].bundleID)
+            }
         }
+        return contested
     }
+
+    /// How much further from a slot than the app that won it a frame may be and still have lost it by a near tie, in points.
+    static let contestMargin: CGFloat = 2
 
     /// Whether a dot's place is in the gap on a notched display between the notch's right edge and the left-most icon that is drawn: where
     /// the « sits when something has overflowed, and where nothing is drawn. The dots are never concealed and never hide themselves, so a

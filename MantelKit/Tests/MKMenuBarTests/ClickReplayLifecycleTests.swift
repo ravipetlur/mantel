@@ -120,6 +120,6 @@ struct ClickReplayLifecycleTests {
     }
 
     @Test func theLoopIsRunInSlicesSoAStopIsSeenWithinOne() {
-        #expect(ClickReplayTap.runLoopSlice == 0.25)
+        #expect(TapThread.runLoopSlice == 0.25)
     }
 }

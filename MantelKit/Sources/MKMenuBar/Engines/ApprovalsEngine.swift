@@ -278,7 +278,7 @@ public actor ApprovalsEngine: HidingEngine {
     /// The apps that are shown again have their flags back: nothing is held for them any more. (A crash before this leaves records
     /// that put the same flags back, which does no harm.)
     private func removeRecords(of places: [PlistKeyPath], in url: URL) async {
-        let identity = url.resolvingSymlinksInPath().path(percentEncoded: false)
+        let identity = CanonicalPath.of(url)
         for path in places {
             let entry = JournalEntry.plistPath(filePath: identity, key: ApprovalsCodec.key, path: path, original: nil,
                                                strategy: .cfPreferences, codec: ApprovalsCodec.id)

@@ -4,7 +4,7 @@ import Foundation
 /// Settings to switch it on.
 public struct PermissionInfo: Sendable, Equatable {
     public let kind: PermissionKind
-    /// The name of the row, such as "Accessibility".
+    /// The name of the row, such as "Device control and data access".
     public let title: String
     /// One sentence on what the person gets from allowing it.
     public let reason: String
@@ -14,9 +14,9 @@ public struct PermissionInfo: Sendable, Equatable {
     public static func info(for kind: PermissionKind) -> PermissionInfo {
         let (title, reason): (String, String) = switch kind {
         case .accessibility:
-            ("Accessibility", "Mantel reads your menu bar and clicks its icons for you.")
+            ("Device control and data access", "Mantel reads your menu bar and clicks its icons for you.")
         case .screenRecording:
-            ("Screen Recording", "Shows real icon pictures instead of app icons.")
+            ("Screen Recording", "Real pictures of your menu bar icons in the second bar, the command bar and Layout. Without it, app icons stand in.")
         case .inputMonitoring:
             ("Input Monitoring", "Lets a modifier key on its own work as push-to-talk.")
         case .microphone:

@@ -10,15 +10,17 @@ struct AgentWindowRead: Sendable, Equatable {
     let frame: CGRect?
     /// Where each of its slots is (nil for a slot with no frame), in the order they are listed. Empty when the slots weren't read.
     let slotFrames: [CGRect?]
+    /// How many of its slots have a name no other slot of it has (`AgentWindowReader.identifierCount`); nil when the names weren't read.
+    var uniqueNameCount: Int? = nil
 }
 
 /// The windows that make up a display's menu bar.
 struct ChosenWindow: Sendable, Equatable {
     let displayUUID: String
-    /// The first of the display's windows: its `AgentWindowRead.index`.
+    /// The display's window that is used: its `AgentWindowRead.index`.
     let index: Int
     let frame: CGRect
-    /// The `AgentWindowRead.index` of each of the display's windows, in the order Accessibility lists them (the first is `index`).
+    /// The `AgentWindowRead.index` of each of the display's windows: `index` first, then the others in the order Accessibility lists them.
     let candidates: [Int]
     /// The display has windows that show different slots. It is told only when the slots' frames were read.
     let isAmbiguous: Bool
@@ -26,10 +28,12 @@ struct ChosenWindow: Sendable, Equatable {
 
 /// Picks MenuBarAgent's windows for each display.
 ///
-/// MenuBarAgent keeps a window per display for every Space, and the count changes as Spaces are visited. Nothing tells the active
-/// Space's apart (no attribute differs, and none is in the window list), but they all show the same slots at the same places, so
-/// any one of them will do and the first in Accessibility's order is the one. Which of them has the identifiers of the slots is a
-/// different question: some lack them (`AgentWindowReader` looks for the one that has the most).
+/// MenuBarAgent keeps a window per display for every Space, and the count changes as Spaces are visited. No attribute tells the active
+/// Space's apart, and none is in the window list. Mostly they all show the same slots at the same places, and the first in
+/// Accessibility's order will do. But the windows of the Spaces that aren't on screen can lag behind the bar (after a change of
+/// displays they keep the slots they had), and can give every slot of an app its first item's name, while the window that is on screen
+/// names each slot its own. So when the names were read, the window whose slots have the most names of their own (a name that repeats in
+/// a window names none of its slots) is the one, and the first in Accessibility's order of those that have as many.
 ///
 /// Only when the windows of one display don't agree (their slots differ in where they are and how wide) is the choice in doubt.
 enum AgentWindowChooser {
@@ -37,8 +41,9 @@ enum AgentWindowChooser {
     private static let tolerance: CGFloat = 0.5
 
     /// - Parameter windows: every window MenuBarAgent has, in Accessibility's order.
-    /// - Returns: the first window of each display that has one, in the order of the layout's displays. A window that is on no
-    ///   display, or whose frame is unknown, is left out, and a display without a window has no bar.
+    /// - Returns: a window for each display that has one, in the order of the layout's displays: the one with the most names of its own
+    ///   when the names were read, else the first. A window that is on no display, or whose frame is unknown, is left out, and a display
+    ///   without a window has no bar.
     static func choose(_ windows: [AgentWindowRead], layout: DisplayLayout) -> [ChosenWindow] {
         var byDisplay: [String: [(read: AgentWindowRead, frame: CGRect)]] = [:]
         for window in windows {
@@ -49,10 +54,14 @@ enum AgentWindowChooser {
 
         var chosen: [ChosenWindow] = []
         for uuid in layout.displays.map(\.uuid) {
-            guard let candidates = byDisplay[uuid], let first = candidates.first else { continue }
-            let signature = Self.signature(of: first.read)
+            guard let candidates = byDisplay[uuid], var best = candidates.first else { continue }
+            for candidate in candidates.dropFirst() where (candidate.read.uniqueNameCount ?? -1) > (best.read.uniqueNameCount ?? -1) {
+                best = candidate
+            }
+            let signature = Self.signature(of: best.read)
             let agree = candidates.allSatisfy { Self.sameSignature(Self.signature(of: $0.read), signature) }
-            chosen.append(ChosenWindow(displayUUID: uuid, index: first.read.index, frame: first.frame, candidates: candidates.map(\.read.index),
+            let others = candidates.map(\.read.index).filter { $0 != best.read.index }
+            chosen.append(ChosenWindow(displayUUID: uuid, index: best.read.index, frame: best.frame, candidates: [best.read.index] + others,
                                        isAmbiguous: !agree))
         }
         return chosen

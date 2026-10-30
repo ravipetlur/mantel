@@ -196,7 +196,7 @@ struct PlistFileAccessSafetyTests {
         let access = makeAccess(journal, service: ScriptedService(.followsTheFile))
         try await access.write(.integer(9), key: "alpha", in: plist, strategy: .cfPreferences)
         #expect(await journal.records().map(\.entry) == [
-            .plistKey(filePath: plist.resolvingSymlinksInPath().path, key: "alpha", original: nil, strategy: .cfPreferences),
+            .plistKey(filePath: CanonicalPath.of(plist), key: "alpha", original: nil, strategy: .cfPreferences),
         ])
     }
 
@@ -242,7 +242,7 @@ struct PlistFileAccessSafetyTests {
         try await access.write(.integer(9), key: "alpha", in: plist, strategy: .atomicFile)
 
         #expect(await journal.records().map(\.entry) == [
-            .plistKey(filePath: plist.resolvingSymlinksInPath().path, key: "alpha", original: .integer(1), strategy: .atomicFile),
+            .plistKey(filePath: CanonicalPath.of(plist), key: "alpha", original: .integer(1), strategy: .atomicFile),
         ])
     }
 
@@ -272,7 +272,7 @@ struct PlistFileAccessSafetyTests {
         try await access.write(.integer(3), key: "alpha", in: plist, strategy: .cfPreferences)
         try await access.write(.integer(4), key: "beta", in: plist, strategy: .atomicFile)
 
-        let expected = "sample-\(AtomicFile.timestamp(for: clock.now())).plist"
+        let expected = "sample-\(BackupPruner.stamp(for: clock.now())).plist"
         #expect(backupFiles() == [expected], "one copy, in the Backups folder, named for the file and the time")
         #expect(try Data(contentsOf: paths.backups.appending(path: expected)) == original, "byte for byte, as the file was before the first write")
         #expect(try Data(contentsOf: plist) != original, "and the file itself has been changed since")
@@ -284,7 +284,7 @@ struct PlistFileAccessSafetyTests {
         try await access.write(.integer(2), key: "alpha", in: plist, strategy: .atomicFile)
 
         let name = try #require(backupFiles().first)
-        #expect(name.wholeMatch(of: #/sample-\d{8}-\d{6}\.plist/#) != nil)
+        #expect(name.wholeMatch(of: #/sample-\d{8}-\d{6}Z\.plist/#) != nil)
         let attributes = try FileManager.default.attributesOfItem(atPath: paths.backups.appending(path: name).path)
         #expect(attributes[.posixPermissions] as? Int == 0o600)
     }
@@ -299,7 +299,7 @@ struct PlistFileAccessSafetyTests {
         try await access.write(.integer(6), key: "beta", in: otherURL, strategy: .atomicFile)
         try await access.write(.integer(7), key: "alpha", in: plist, strategy: .atomicFile)
 
-        let stamp = AtomicFile.timestamp(for: clock.now())
+        let stamp = BackupPruner.stamp(for: clock.now())
         #expect(backupFiles() == ["other-\(stamp).plist", "sample-\(stamp).plist"])
         #expect(try Data(contentsOf: paths.backups.appending(path: "sample-\(stamp).plist")) == one)
         #expect(try Data(contentsOf: paths.backups.appending(path: "other-\(stamp).plist")) == two)

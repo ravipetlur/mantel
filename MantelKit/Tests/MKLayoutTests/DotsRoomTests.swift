@@ -36,6 +36,17 @@ struct DotsRoomTests {
                     frames: frames, overflowedOn: overflowedOn, isMantel: false)
     }
 
+    @Test func theDotsArePlacedWhenARealReadHasThemAllOnABar() {
+        let placed = [dot("mantel.dot.hidden", frames: [desk: frame(10)]), dot("mantel.dot.always", frames: [laptop: frame(10)])]
+        #expect(DotsRoom.dotsArePlaced(in: inventory(placed, bars: [desk, laptop])))
+        #expect(!DotsRoom.dotsArePlaced(in: inventory([], bars: [desk])), "no dots in the read")
+        #expect(!DotsRoom.dotsArePlaced(in: inventory([spacer(frames: [desk: frame(10)])], bars: [desk])), "an item that isn't a dot is none")
+        #expect(!DotsRoom.dotsArePlaced(in: inventory([dot("mantel.dot.hidden", frames: [desk: frame(10)]), dot("mantel.dot.always")], bars: [desk])),
+                "one of the two has no slot on any bar")
+        #expect(!DotsRoom.dotsArePlaced(in: inventory([dot("mantel.dot.hidden", overflowedOn: [desk])], bars: [desk])),
+                "a dot that is in the « menu has no slot")
+    }
+
     private func inventory(_ items: [MenuBarItem], bars: [String] = [], chevrons: [String] = [], unanswered: Set<String> = []) -> Inventory {
         Inventory(capturedAt: Fixtures.date(0), bars: bars.map { bar($0) }, items: items,
                   chevrons: Dictionary(uniqueKeysWithValues: chevrons.map { ($0, CGRect(x: 100, y: 1, width: 17.5, height: 30)) }),

@@ -24,7 +24,7 @@ struct ProfilesDocumentTests {
     @Test func defaultsToOneDefaultProfile() {
         let document = ProfilesDocument()
         #expect(ProfilesDocument.fileName == "profiles.json")
-        #expect(ProfilesDocument.currentVersion == 1)
+        #expect(ProfilesDocument.currentVersion == 2)
         #expect(ProfilesDocument.defaultName == "Default")
         #expect(document.profiles == [Profile(name: "Default", sections: SectionModel())])
         #expect(document.activeProfileName == "Default")
@@ -48,7 +48,7 @@ struct ProfilesDocumentTests {
 
         let file = try Data(contentsOf: paths.settings.appending(path: "profiles.json"))
         let root = try #require(try JSONSerialization.jsonObject(with: file) as? [String: Any])
-        #expect(root["version"] as? Int == 1)
+        #expect(root["version"] as? Int == 2)
         let stored = try #require(root["document"] as? [String: Any])
         #expect(stored["activeProfileName"] as? String == "Default")
         let profiles = try #require(stored["profiles"] as? [[String: Any]])

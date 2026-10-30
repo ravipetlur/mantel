@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "MKCommands", targets: ["MKCommands"]),
         .library(name: "MKLayout", targets: ["MKLayout"]),
         .library(name: "MKMenuBar", targets: ["MKMenuBar"]),
+        .library(name: "MKSearch", targets: ["MKSearch"]),
     ],
     // No `dependencies:`: Mantel uses no third-party code.
     targets: [
@@ -30,11 +31,16 @@ let package = Package(
         // journal, the strip capture, the click-replay tap, the three ways of hiding icons and the controller that keeps one in
         // charge, the session that turns events into plans for it, and the probes that exercise each of them.
         .target(name: "MKMenuBar", dependencies: ["MKCore", "MKCommands", "MKLayout", "MKPrivateShims"]),
+        // The command bar's brain: the fuzzy matcher, the candidates it searches and where they come from (the icons and Mantel's own
+        // actions, behind a protocol later providers join), the ranked search over what the providers offered when the bar opened, and the
+        // resolver that turns an icon named in words into the one icon. It reads no Accessibility and draws nothing.
+        .target(name: "MKSearch", dependencies: ["MKCore", "MKLayout"]),
         // What every test target shares: throwaway folders.
         .target(name: "MKTestSupport", dependencies: ["MKCore"], path: "Tests/MKTestSupport"),
         .testTarget(name: "MKCoreTests", dependencies: ["MKCore", "MKTestSupport"]),
         .testTarget(name: "MKCommandsTests", dependencies: ["MKCommands", "MKCore", "MKTestSupport"]),
         .testTarget(name: "MKLayoutTests", dependencies: ["MKLayout", "MKCore", "MKTestSupport"]),
         .testTarget(name: "MKMenuBarTests", dependencies: ["MKMenuBar", "MKCore", "MKCommands", "MKLayout", "MKTestSupport"]),
+        .testTarget(name: "MKSearchTests", dependencies: ["MKSearch", "MKCore", "MKLayout", "MKTestSupport"]),
     ]
 )

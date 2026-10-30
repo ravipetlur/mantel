@@ -324,23 +324,67 @@ final class ClickDeliveryClock: Clock {
     }
 }
 
-/// A capture that makes a flat image of the strip's size, and notes which displays it was asked for.
+/// A capture that makes a flat image of the strip's size, and notes which displays it was asked for. A test can have it paint discs in
+/// rectangles (CoreGraphics global points) on a bar of another gray, and hang or be slow (on a clock) before it answers.
 final class FakeCapture: StripCapturing {
+    private struct Look {
+        var paint: [CGRect] = []
+        var colour = CGColor(colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, components: [1, 0, 0, 1])!
+        var level: CGFloat?
+        var hangs = false
+        var delay: Duration?
+        var held: Gate?
+        var entered: Gate?
+    }
+
     private let asked = Mutex<[String]>([])
     private let failure = Mutex<StripCaptureError?>(nil)
+    private let look = Mutex(Look())
+    private let clock: (any Clock)?
+
+    init(clock: (any Clock)? = nil) { self.clock = clock }
 
     var displays: [String] { asked.withLock { $0 } }
     func fail(with error: StripCaptureError?) { failure.withLock { $0 = error } }
+    func paint(_ rects: [CGRect]) { look.withLock { $0.paint = rects } }
+    func setColour(_ colour: CGColor) { look.withLock { $0.colour = colour } }
+    func setLevel(_ level: CGFloat?) { look.withLock { $0.level = level } }
+    func hang(_ hangs: Bool) { look.withLock { $0.hangs = hangs } }
+    /// Answers after this long on the clock, taking the picture when it comes back, as a capture that can't be cancelled does: a caller
+    /// that gives up on it doesn't stop it.
+    func delay(_ delay: Duration?) { look.withLock { $0.delay = delay } }
+    /// Waits at the gate before it answers, until a test lets it through: a slow capture that the test can change the bar during.
+    /// `entered` is opened when a capture has come to the gate.
+    func hold(at gate: Gate?, entered: Gate? = nil) { look.withLock { $0.held = gate; $0.entered = entered } }
 
     func capture(bar: MenuBarGeometry, display: DisplayInfo, layout: DisplayLayout) async throws -> CGImage {
         asked.withLock { $0.append(display.uuid) }
         if let error = failure.withLock({ $0 }) { throw error }
+        let now = look.withLock { $0 }
+        if now.hangs, let clock { try await clock.sleep(for: .seconds(10)) }
+        if let delay = now.delay, let clock { try await Task.detached { try await clock.sleep(for: delay) }.value }
+        if let gate = now.held {
+            now.entered?.open()
+            await Task.detached { await gate.wait() }.value
+        }
         let geometry = try StripGeometry.of(bar, display: display, layout: layout)
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
         let context = CGContext(data: nil, width: Int(geometry.pixelSize.width), height: Int(geometry.pixelSize.height),
-                                bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitsPerComponent: 8, bytesPerRow: 0, space: space,
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        context.setFillColor(CGColor(colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, components: [0.2, 0.4, 0.6, 1])!)
+        let components: [CGFloat] = now.level.map { [$0, $0, $0, 1] } ?? [0.2, 0.4, 0.6, 1]
+        context.setFillColor(CGColor(colorSpace: space, components: components)!)
         context.fill(CGRect(origin: .zero, size: geometry.pixelSize))
+        context.setFillColor(now.colour)
+        for rect in now.paint {
+            // Pixels from the strip's top-left; CoreGraphics draws from the bottom-left. The disc is 6 points inside the rectangle.
+            let x = (rect.minX - bar.rect.minX) * display.scale
+            let yFromTop = (rect.minY - bar.rect.minY) * display.scale
+            let inset = 6 * display.scale
+            let height = rect.height * display.scale
+            context.fillEllipse(in: CGRect(x: x + inset, y: geometry.pixelSize.height - yFromTop - height + inset,
+                                           width: rect.width * display.scale - inset * 2, height: height - inset * 2))
+        }
         return context.makeImage()!
     }
 }
@@ -376,6 +420,18 @@ struct ProbeHarness: Sendable {
     let windows: FakeWindows
     let taps: FakeTapFactory
     let capture: FakeCapture
+    /// What a click on an icon reaches, all fakes: the poster, the locator, the presser, the preferences the icon spacing is kept in, the
+    /// relauncher, what the test item is told by notification, and where the pointer is.
+    let poster: FakeClickPoster
+    let locator: FakeItemLocator
+    let presser: FakeItemPresser
+    let preferences: FakePreferences
+    let relauncher: FakeRelauncher
+    let notifier: FakeTestItemNotifier
+    let pointer: FakePointer
+    /// The folder the test item's click log is read from, in the test's own folder.
+    let testItemFolder: URL
+    let defaults: DefaultsAccess
     let runner: ProbeRunner
     /// The slot nodes of each app, by bundle ID.
     let slotOwners: [Int: String]
@@ -394,6 +450,8 @@ struct ProbeHarness: Sendable {
     /// The test item's two items in its own extras menu bar, which are where they were while nothing hides it and are somewhere else
     /// while something does.
     let fixtureExtras: [Int]
+    /// The element of the other app's one item in its own list.
+    let otherExtra: Int
 
     var approvalsURL: URL {
         home.appending(path: "Library/Group Containers/group.com.apple.controlcenter/Library/Preferences/group.com.apple.controlcenter.plist")
@@ -414,7 +472,9 @@ struct ProbeHarness: Sendable {
     static let runningApps: [RunningApp] = [
         .fake(agentPID, "com.apple.MenuBarAgent", "MenuBarAgent"),
         .fake(100, ownBundleID, "Mantel"),
-        .fake(300, fixtureID, "MantelTestItem"),
+        // The test item has an app to open again, which is how it is relaunched.
+        RunningApp(pid: 300, bundleID: fixtureID, name: "MantelTestItem",
+                   bundleURL: URL(filePath: "/Applications/MantelTestItem.app", directoryHint: .isDirectory), isBackgroundOnly: false),
         .fake(301, otherID, "Other"),
     ]
 
@@ -455,10 +515,10 @@ struct ProbeHarness: Sendable {
         owners[ax.addSlot(in: window, identifier: "\(otherID).item", frame: CGRect(x: 3200, y: 0, width: 40, height: 31))] = otherID
         ax.addSlot(in: window, identifier: "com.apple.menuextra.controlcenter", frame: CGRect(x: 3250, y: 0, width: 40, height: 31))
         let clockSlot = ax.addSlot(in: window, identifier: "com.apple.menuextra.clock", frame: CGRect(x: 3300, y: 0, width: 50, height: 31))
-        ax.addApp(pid: 100, extras: [.init(title: "Mantel", frame: CGRect(x: 3000, y: 0, width: 30, height: 31))])
-        let fixtureExtras = ax.addApp(pid: 300, extras: [.init(title: "one", frame: CGRect(x: 3100, y: 0, width: 40, height: 31)),
-                                                         .init(title: "two", frame: CGRect(x: 3150, y: 0, width: 40, height: 31))])
-        ax.addApp(pid: 301, extras: [.init(title: "other", frame: CGRect(x: 3200, y: 0, width: 40, height: 31))])
+        ax.addApp(pid: 100, extras: [.init(title: "Mantel", identifier: "\(ownBundleID).dot", frame: CGRect(x: 3000, y: 0, width: 30, height: 31))])
+        let fixtureExtras = ax.addApp(pid: 300, extras: [.init(title: "one", identifier: "\(fixtureID)::one", frame: CGRect(x: 3100, y: 0, width: 40, height: 31)),
+                                                         .init(title: "two", identifier: "\(fixtureID)::two", frame: CGRect(x: 3150, y: 0, width: 40, height: 31))])
+        let otherExtras = ax.addApp(pid: 301, extras: [.init(title: "other", identifier: "\(otherID).item", frame: CGRect(x: 3200, y: 0, width: 40, height: 31))])
 
         // A slot of a hidden app has no frame, nor has one of an app that has quit.
         let hidden = HiddenApps(now: { clock.now() })
@@ -485,6 +545,15 @@ struct ProbeHarness: Sendable {
         let taps = FakeTapFactory(clicks: clicks, liftCount: { allowlist.invalidations })
         let capture = FakeCapture()
         let screenRecording = Switch(true)
+        let poster = FakeClickPoster()
+        let locator = FakeItemLocator()
+        let presser = FakeItemPresser()
+        let preferences = FakePreferences()
+        let relauncher = FakeRelauncher()
+        let notifier = FakeTestItemNotifier()
+        let pointer = FakePointer()
+        let testItemFolder = folder.url.appending(path: "TestItemSupport", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: testItemFolder, withIntermediateDirectories: true)
 
         var platform = ProbePlatform(
             allowlist: allowlist, capture: capture, windowList: windows,
@@ -496,7 +565,9 @@ struct ProbeHarness: Sendable {
             statusBarThickness: { 31 },
             screens: { ProbeHarness.screens },
             screenRecordingGranted: { screenRecording.isOn },
-            ownBundleID: ownBundleID, isInstalledCopy: true, copyPath: "/Applications/Mantel.app")
+            ownBundleID: ownBundleID, isInstalledCopy: true, copyPath: "/Applications/Mantel.app",
+            poster: poster, locator: locator, presser: presser, preferences: preferences, relauncher: relauncher,
+            testItemSupportFolder: testItemFolder, notifyTestItem: { notifier.notify($0) }, pointerLocation: { pointer.current })
         configure(&platform)
 
         if let delivering = clock as? ClickDeliveryClock {
@@ -509,14 +580,17 @@ struct ProbeHarness: Sendable {
         let reader = MenuBarReader(ax: ax, runningApps: running, clock: clock)
         let platformTest = Switch(platformTestEnabled)
         let resetUnderWay = Switch(false)
-        let runner = ProbeRunner(paths: paths, reader: reader, plist: plist, grants: grants,
+        let defaults = DefaultsAccess(journal: journal, preferences: preferences)
+        let runner = ProbeRunner(paths: paths, reader: reader, plist: plist, grants: grants, journal: journal, defaults: defaults,
                                  layoutProvider: { .desk }, clock: clock, platform: platform,
                                  stateChangingAllowed: { platformTest.isOn }, resetUnderWay: { resetUnderWay.isOn })
         return ProbeHarness(folder: folder, paths: paths, home: home, journal: journal, settings: settings, grants: grants, plist: plist, ax: ax,
                             clock: clock, hidden: hidden, allowlist: allowlist, windows: windows, taps: taps, capture: capture,
-                            runner: runner, slotOwners: owners, window: window, clockSlot: clockSlot, fixtureOneSlot: fixtureOneSlot,
+                            poster: poster, locator: locator, presser: presser, preferences: preferences, relauncher: relauncher,
+                            notifier: notifier, pointer: pointer, testItemFolder: testItemFolder, defaults: defaults, runner: runner,
+                            slotOwners: owners, window: window, clockSlot: clockSlot, fixtureOneSlot: fixtureOneSlot,
                             screenRecording: screenRecording, otherQuit: otherQuit, platformTest: platformTest,
-                            resetUnderWay: resetUnderWay, fixtureExtras: fixtureExtras)
+                            resetUnderWay: resetUnderWay, fixtureExtras: fixtureExtras, otherExtra: otherExtras[0])
     }
 
     // MARK: Files

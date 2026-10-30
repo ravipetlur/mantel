@@ -220,4 +220,68 @@ struct EngineChoiceTests {
         #expect((object["availability"] as? [String: String])?["allowlist"] == "available", "a dictionary keyed by engine is an object")
         #expect(try JSONDecoder().decode(EngineStatus.self, from: data) == status)
     }
+
+    // MARK: An icon macOS doesn't tie to its app
+
+    private static func unattached(_ apps: Set<String>, _ method: HidingMethodChoice = .automatic, call: Bool = false, keepMic: Bool = false,
+                                   availability: [HidingEngineKind: EngineAvailability] = everythingWorks,
+                                   failedOut: Set<HidingEngineKind> = []) -> EngineChoice {
+        EngineChoice.decide(EngineChoiceInputs(method: method, callActive: call, keepMicVisibleDuringCalls: keepMic,
+                                               availability: availability, failedOut: failedOut, unattachedShownApps: apps))
+    }
+
+    @Test func automaticUsesSwitchesWhileAShownAppIsUnattached() {
+        let one = Self.unattached(["com.example.one"])
+        #expect(one.kind == .approvals)
+        #expect(one.reason == "1 app in Shown has an icon macOS can't tie to it, so Mantel uses System Settings switches, which keep it shown.")
+        let two = Self.unattached(["com.example.one", "com.example.two"])
+        #expect(two.kind == .approvals)
+        #expect(two.reason == "2 apps in Shown have icons macOS can't tie to them, so Mantel uses System Settings switches, which keep them shown.")
+        // Nothing unattached: the allowlist, as before.
+        #expect(Self.unattached([]).kind == .allowlist)
+    }
+
+    @Test func explicitChoicesAreNeverChanged() {
+        let apps: Set<String> = ["com.example.one"]
+        #expect(Self.unattached(apps, .wideSpacer).kind == .spacer)
+        #expect(Self.unattached(apps, .wideSpacer).reason == "Chosen in Settings › Advanced.")
+        #expect(Self.unattached(apps, .systemSettingsSwitches).reason == "Chosen in Settings › Advanced.")
+        // The switches chosen and broken: Automatic's chain, as without any unattached app.
+        let broken = Self.available([.approvals: Self.changed])
+        #expect(Self.unattached(apps, .systemSettingsSwitches, availability: broken)
+            == EngineChoice.decide(Self.inputs(.systemSettingsSwitches, availability: broken)))
+    }
+
+    @Test func switchesUnusableKeepTheAllowlistNotTheSpacer() {
+        let apps: Set<String> = ["com.example.one"]
+        // Unavailable: Automatic's own chain decides, and the allowlist stays in charge.
+        let unavailable = Self.available([.approvals: Self.needsFile])
+        #expect(Self.unattached(apps, availability: unavailable) == EngineChoice.decide(Self.inputs(availability: unavailable)))
+        #expect(Self.unattached(apps, availability: unavailable).kind == .allowlist)
+        // With the allowlist unusable too, the chain reaches the spacer only as it does without the unattached app.
+        let neither = Self.available([.allowlist: Self.appsFolder, .approvals: Self.needsFile])
+        #expect(Self.unattached(apps, availability: neither) == EngineChoice.decide(Self.inputs(availability: neither)))
+    }
+
+    @Test func failedOutSwitchesFallBackToTheAllowlist() {
+        let apps: Set<String> = ["com.example.one"]
+        let choice = Self.unattached(apps, failedOut: [.approvals])
+        #expect(choice.kind == .allowlist)
+        #expect(choice == EngineChoice.decide(Self.inputs(failedOut: [.approvals])))
+    }
+
+    @Test func callRowWinsOverUnattached() {
+        let choice = Self.unattached(["com.example.one"], call: true, keepMic: true)
+        #expect(choice.kind == .approvals)
+        #expect(choice.reason == "A call is active, so the mic indicator stays visible.")
+    }
+
+    @Test func reasonCountsAppsAndNamesNone() {
+        for count in 1...4 {
+            let apps = Set((0..<count).map { "com.example.secret\($0)" })
+            let reason = Self.unattached(apps).reason
+            #expect(!reason.contains("com.example"), "\(reason)")
+            #expect(reason.hasPrefix(count == 1 ? "1 app in Shown has" : "\(count) apps in Shown have"))
+        }
+    }
 }

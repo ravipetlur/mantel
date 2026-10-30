@@ -7,8 +7,9 @@ import MKCore
 /// - **Reports.** Each probe's report goes to `<root>/Probes/<name>-<yyyyMMdd-HHmmss>.json` and comes back from `run`. A
 ///   probe that wasn't run (Mantel is quitting, another probe is busy changing the menu bar, a safety rule said no) comes
 ///   back as a report with its reason in `errors`, and isn't written.
-/// - **The probes that change things.** `allowlist-activate`, `approvals-toggle`, `layout-move`, `click-replay`, `reveal-latency`
-///   and `approvals-flip` change the person's menu bar for a while (`changesState`, `stateChangingProbes`). Each one:
+/// - **The probes that change things.** `allowlist-activate`, `approvals-toggle`, `layout-move`, `click-replay`, `reveal-latency`,
+///   `approvals-flip`, `click-path`, `layout-order` and `spacing` change the person's menu bar for a while (`changesState`,
+///   `stateChangingProbes`). Each one:
 ///   - runs only from the copy in `/Applications` (macOS honours the allowlist for no other copy);
 ///   - runs only while the person has turned on "Enable platform test" in Settings › Diagnostics (`stateChangingAllowed`; the
 ///     switch is off at every launch and isn't saved), also when it is asked for from the command line;
@@ -24,6 +25,8 @@ public actor ProbeRunner {
     private let reader: MenuBarReader
     private let plist: PlistFileAccess
     private let grants: FileGrantStore
+    private let journal: Journal
+    private let defaults: DefaultsAccess
     private let layoutProvider: @Sendable () async -> DisplayLayout
     private let clock: any Clock
     private let platform: ProbePlatform
@@ -37,20 +40,25 @@ public actor ProbeRunner {
     private var running: [UUID: Task<ProbeReport, Never>] = [:]
 
     /// - Parameters:
+    ///   - journal: the journal `plist` and `defaults` record their changes in, which the probes that write files or preferences also ask
+    ///     what Mantel keeps in it.
+    ///   - defaults: changes preferences with the journal behind each change; the probe that changes the icon spacing goes through it.
     ///   - platform: everything a probe reaches the system through. There is no default: the app passes `.live`, and a
     ///     test passes its fakes, so that a test that forgets one doesn't run against the real system.
     ///   - stateChangingAllowed: whether the person has turned on "Enable platform test". Asked each time a probe that changes
     ///     the menu bar is about to run. There is no default either: the app passes what its switch says.
     ///   - resetUnderWay: whether a reset of the menu bar is under way (`ResetActivity.isUnderWay`), asked at the same moment. The app
     ///     passes what its reset says; the default is that none is.
-    public init(paths: MantelPaths, reader: MenuBarReader, plist: PlistFileAccess, grants: FileGrantStore,
-                layoutProvider: @escaping @Sendable () async -> DisplayLayout, clock: any Clock = SystemClock(),
-                platform: ProbePlatform, stateChangingAllowed: @escaping @Sendable () -> Bool,
+    public init(paths: MantelPaths, reader: MenuBarReader, plist: PlistFileAccess, grants: FileGrantStore, journal: Journal,
+                defaults: DefaultsAccess, layoutProvider: @escaping @Sendable () async -> DisplayLayout,
+                clock: any Clock = SystemClock(), platform: ProbePlatform, stateChangingAllowed: @escaping @Sendable () -> Bool,
                 resetUnderWay: @escaping @Sendable () -> Bool = { false }) {
         self.paths = paths
         self.reader = reader
         self.plist = plist
         self.grants = grants
+        self.journal = journal
+        self.defaults = defaults
         self.layoutProvider = layoutProvider
         self.clock = clock
         self.platform = platform
@@ -68,9 +76,10 @@ public actor ProbeRunner {
     /// Whether the probe changes the person's menu bar while it runs.
     public static func changesState(_ name: ProbeName) -> Bool {
         switch name {
-        case .allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay, .revealLatency, .approvalsFlip: true
+        case .allowlistActivate, .approvalsToggle, .layoutMove, .clickReplay, .revealLatency, .approvalsFlip, .clickPath,
+             .layoutOrder, .spacing: true
         case .allowlistInfo, .inventory, .approvalsRead, .layoutRead, .capture, .overflow, .screenShare, .menuBarHeight,
-             .grantPersistence, .approvalsDecode, .notchCoordinates: false
+             .grantPersistence, .approvalsDecode, .notchCoordinates, .iconCapture, .layoutMap: false
         }
     }
 
@@ -104,8 +113,8 @@ public actor ProbeRunner {
         }
         defer { if changes { changing = nil } }
 
-        let work = Work(paths: paths, reader: reader, plist: plist, grants: grants, layoutProvider: layoutProvider,
-                        clock: clock, platform: platform, store: store, options: options)
+        let work = Work(paths: paths, reader: reader, plist: plist, grants: grants, journal: journal, defaults: defaults,
+                        layoutProvider: layoutProvider, clock: clock, platform: platform, store: store, options: options)
         let id = UUID()
         let task = Task { await Self.execute(name, work) }
         running[id] = task
@@ -159,6 +168,8 @@ public actor ProbeRunner {
         let reader: MenuBarReader
         let plist: PlistFileAccess
         let grants: FileGrantStore
+        let journal: Journal
+        let defaults: DefaultsAccess
         let layoutProvider: @Sendable () async -> DisplayLayout
         let clock: any Clock
         let platform: ProbePlatform
@@ -173,7 +184,8 @@ public actor ProbeRunner {
         let started = work.clock.now()
         let context = ProbeContext(paths: work.paths, reader: work.reader, plist: work.plist, grants: work.grants,
                                    layoutProvider: work.layoutProvider, clock: work.clock, platform: work.platform,
-                                   options: work.options, store: work.store, startedAt: started)
+                                   options: work.options, store: work.store, startedAt: started, journal: work.journal,
+                                   defaults: work.defaults)
         var recorder = ProbeRecorder()
         Log.info("probes", "\(name.rawValue) starting")
         do {
@@ -214,6 +226,11 @@ public actor ProbeRunner {
         case .approvalsDecode: ApprovalsDecodeProbe.run
         case .approvalsFlip: ApprovalsFlipProbe.run
         case .notchCoordinates: NotchCoordinatesProbe.run
+        case .clickPath: ClickPathProbe.run
+        case .iconCapture: IconCaptureProbe.run
+        case .layoutMap: LayoutMapProbe.run
+        case .layoutOrder: LayoutOrderProbe.run
+        case .spacing: SpacingProbe.run
         }
     }
 }

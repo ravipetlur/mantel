@@ -16,20 +16,27 @@ package struct FileSyncing: Sendable {
 
     /// What the system does: `fcntl(F_FULLFSYNC)` for the file, which asks the drive to empty its cache too (a plain `fsync`
     /// doesn't on macOS), and `fsync` where a drive or a file system refuses that; `fsync` for the folder.
-    package static let system = FileSyncing(
-        syncFile: { descriptor in
-            if fcntl(descriptor, F_FULLFSYNC) == 0 { return }
-            guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        },
-        syncFolder: { folder in
-            let descriptor = open(folder.path(percentEncoded: false), O_RDONLY | O_DIRECTORY)
-            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            defer { close(descriptor) }
-            // A file system that can't sync a folder has nothing to say about the file: it is not a failure to write.
-            if fsync(descriptor) != 0, errno != EINVAL, errno != ENOTSUP {
-                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            }
-        })
+    package static let system = systemCalls()
+
+    /// What `system` does, with the two calls it makes on a file given: `fullSync` (a result of 0 is success), and `fallbackSync`, the
+    /// plain `fsync` that is made when the full one fails. A failure of both throws, with `errno` as the fallback left it.
+    package static func systemCalls(fullSync: @escaping @Sendable (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) },
+                                    fallbackSync: @escaping @Sendable (Int32) -> Int32 = { fsync($0) }) -> FileSyncing {
+        FileSyncing(
+            syncFile: { descriptor in
+                if fullSync(descriptor) == 0 { return }
+                guard fallbackSync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            },
+            syncFolder: { folder in
+                let descriptor = open(folder.path(percentEncoded: false), O_RDONLY | O_DIRECTORY)
+                guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                defer { close(descriptor) }
+                // A file system that can't sync a folder has nothing to say about the file: it is not a failure to write.
+                if fsync(descriptor) != 0, errno != EINVAL, errno != ENOTSUP {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            })
+    }
 }
 
 /// Writing a file so that a reader, or a crash, finds the old file or the new one whole and never half of one, and so that
@@ -154,7 +161,8 @@ package enum AtomicFile {
         return candidate
     }
 
-    /// `yyyyMMdd-HHmmss` in the local time zone, for the names of files kept in the Backups folder.
+    /// `yyyyMMdd-HHmmss` in the local time zone, for the name of a journal that couldn't be read and was set aside. (The copies kept in
+    /// the Backups folder, which are pruned by their time, are named with `BackupPruner.stamp(for:)`.)
     package static func timestamp(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

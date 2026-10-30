@@ -1,5 +1,6 @@
 import Foundation
 import MKCommands
+import MKCore
 import Testing
 
 @Suite("Commands and results as JSON")
@@ -9,6 +10,18 @@ struct CommandCodableTests {
         all += SettingsPage.allCases.map { .openSettings($0) }
         all += ShowTarget.allCases.map { .show($0) }
         all += FocusChange.allCases.map { .focus($0) }
+        all.append(.icons(nil))
+        all += IconListFilter.allCases.map { .icons($0) }
+        for kind in ClickKind.allCases {
+            all.append(.icon(.show, query: "Notes", kind: kind))
+            all.append(.icon(.click, query: "com.example.notes::main", kind: kind))
+        }
+        all.append(.icon(.click, query: "A name with “quotes”, spaces and é", kind: .left))
+        for change in BarChange.allCases {
+            all.append(.bar(change, all: false))
+            all.append(.bar(change, all: true))
+        }
+        all += [.recapture, .restoreLayout]
         for name in ProbeName.allCases {
             all.append(.probe(name, options: [:]))
             all.append(.probe(name, options: ["bundle-id": "com.example.item", "allow-any": "true"]))
@@ -159,6 +172,8 @@ struct CommandCodableTests {
             .grantPersistence: "grant-persistence",
             .revealLatency: "reveal-latency", .approvalsDecode: "approvals-decode", .approvalsFlip: "approvals-flip",
             .notchCoordinates: "notch-coordinates",
+            .clickPath: "click-path", .iconCapture: "icon-capture", .layoutMap: "layout-map", .layoutOrder: "layout-order",
+            .spacing: "spacing",
         ]
         #expect(spellings.count == ProbeName.allCases.count, "every probe has a spelling here")
         for (name, spelling) in spellings {
@@ -178,7 +193,8 @@ struct CommandCodableTests {
     }
 
     @Test func settingsPagesAreSpelledInLowerCase() {
-        #expect(SettingsPage.allCases.map(\.rawValue) == ["general", "layout", "hotkeys", "permissions", "advanced", "diagnostics", "about"])
+        #expect(SettingsPage.allCases.map(\.rawValue)
+            == ["general", "layout", "second-bar", "hotkeys", "cosmetics", "permissions", "advanced", "diagnostics", "about"])
     }
 
     // MARK: JSON values
@@ -216,5 +232,19 @@ struct CommandCodableTests {
         #expect(MantelCommand.engine.name == "engine")
         // The probe's name, never its options, which are the caller's words.
         #expect(MantelCommand.probe(.layoutMove, options: ["secret": "x"]).name == "probe layout-move")
+    }
+
+    @Test func theIconCommandsAreWrittenWithTheirNameAndTheirArguments() throws {
+        #expect(try json(MantelCommand.icons(nil)) == #"{"command":"icons"}"#)
+        #expect(try json(MantelCommand.icons(.always)) == #"{"command":"icons","filter":"always"}"#)
+        #expect(try json(MantelCommand.icon(.click, query: "Notes", kind: .right))
+                == #"{"action":"click","command":"icon","kind":"right","query":"Notes"}"#)
+        #expect(try json(MantelCommand.bar(.toggle, all: true)) == #"{"all":true,"change":"toggle","command":"bar"}"#)
+        #expect(try json(MantelCommand.recapture) == #"{"command":"recapture"}"#)
+        #expect(try json(MantelCommand.restoreLayout) == #"{"command":"restoreLayout"}"#)
+        // What was left out is what is usual: every icon, a plain click, the bar with what is in Hidden.
+        #expect(try decode(MantelCommand.self, from: #"{"command":"icons"}"#) == .icons(nil))
+        #expect(try decode(MantelCommand.self, from: #"{"command":"icon","action":"show","query":"x"}"#) == .icon(.show, query: "x", kind: .left))
+        #expect(try decode(MantelCommand.self, from: #"{"command":"bar","change":"open"}"#) == .bar(.open, all: false))
     }
 }

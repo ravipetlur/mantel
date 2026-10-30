@@ -28,6 +28,22 @@ public enum CLIOutput {
     /// The person was asked (`CLIInvocation.confirmation`) and didn't say yes: nothing was sent.
     public static let declined = CLIOutcome(stdout: "", stderr: "mantel: Not reset.", exitCode: 1)
 
+    /// The person was asked to put the icons' order back (`CLIConfirmation.layoutRestoreQuestion`) and didn't say yes: nothing was sent.
+    public static let restoreDeclined = CLIOutcome(stdout: "", stderr: "mantel: Not restored.", exitCode: 1)
+
+    /// `layout restore` has to ask and there is nobody to ask: as for `reset`.
+    public static let restoreNeedsAnswerBeforehand = CLIOutcome(stdout: "", stderr: "mantel: Add --yes to restore without being asked.", exitCode: 2)
+
+    /// What is printed when the person's answer to the question of `command` isn't a yes.
+    public static func declined(_ command: MantelCommand) -> CLIOutcome {
+        command == .restoreLayout ? restoreDeclined : declined
+    }
+
+    /// What is printed when `command` has to ask and the input isn't a terminal.
+    public static func needsAnswerBeforehand(_ command: MantelCommand) -> CLIOutcome {
+        command == .restoreLayout ? restoreNeedsAnswerBeforehand : needsAnswerBeforehand
+    }
+
     /// A question has to be asked and there is nobody to ask (the input isn't a terminal): nothing was sent. This is the wrong
     /// arguments for where the tool is run, so it exits like them.
     public static let needsAnswerBeforehand = CLIOutcome(stdout: "", stderr: "mantel: Add --yes to reset without being asked.", exitCode: 2)

@@ -10,6 +10,7 @@ import Testing
 
 private let weather = SessionWorld.weather
 private let notes = SessionWorld.notes
+private let vpn = SessionWorld.vpn
 
 /// A reveal is applied at once, and followed up (looked for on the bar, and the room read) apart from the next change.
 @Suite("Menu bar session: reveals", .timeLimit(.minutes(1)))
@@ -386,5 +387,209 @@ struct MenuBarSessionRevealTests {
         #expect(await rig.session.lookForHiding(of: plan) == .seen)
         rig.world.fixture().ax.setOverride { _, name in name == AXName.role ? .failure(.timeout) : nil }
         #expect(await rig.session.lookForHiding(of: plan) == .cantTell)
+    }
+
+    // MARK: The second bar
+
+    /// The laptop's full bar, which has room for five of the third-party icons: Hidden holds the weather app (two icons) and the notes
+    /// app (one), whose icons were piled 24 points wide when the bar was first read (72 points in all); Shown holds the VPN app and the
+    /// sync app. Left of the VPN app's icon, the bar is free from the notch (956.5) to 1154. The policy is the second bar.
+    private func laptop() -> SessionRig {
+        var settings = HidingSettings()
+        settings.automaticOverflow = false
+        settings.noRoomPolicy = .secondBar
+        return SessionRig.withAllowlist(shape: .laptop, capacity: 5,
+                                        sections: sections(shown: [vpn, SessionWorld.sync], hidden: [weather, notes]), settings: settings)
+    }
+
+    /// Gives an app menus that run from the left edge to `right`, as an app that is in front has, and has the session told it is in front.
+    private func bringToFront(_ app: String, menusTo right: CGFloat, in rig: SessionRig) async throws {
+        let pid = try #require(rig.world.fixture().pid(of: app))
+        let ax = rig.world.fixture().ax
+        let bar = ax.addNode(attributes: [AXName.role: .string("AXMenuBar")])
+        ax.addNode(attributes: FakeAX.frameAttributes(CGRect(x: 0, y: 0, width: right, height: 30)), under: bar)
+        ax.setAttribute(AXName.menuBar, .elements([ax.ref(bar)]), on: ax.root(ofApp: pid))
+        await rig.session.frontAppChanged(pid: pid, activeScreenWidth: 1728)
+    }
+
+    @Test func predictedNoRoomOpensSecondBarAtOnce() async throws {
+        let rig = laptop()
+        await rig.session.start()
+        #expect(await rig.session.predictedFits(.hiddenShown), "197 points are free, and the three icons took 72")
+        let roomy = await rig.session.predictedFits(.hiddenShown)
+        #expect(RevealPresentationPolicy.presentation(opens: .whenNoRoom, trigger: .dot, predictedFits: roomy) == .inline)
+
+        // The front app's menus run on to 1100: 54 points are free, and the revealed icons don't fit.
+        try await bringToFront(vpn, menusTo: 1100, in: rig)
+        let fits = await rig.session.predictedFits(.hiddenShown)
+        #expect(!fits)
+        let presentation = RevealPresentationPolicy.presentation(opens: .whenNoRoom, trigger: .dot, predictedFits: fits)
+        #expect(presentation == .secondBar)
+
+        // The reveal goes to the second bar at once: nothing is put on the menu bar, nothing is looked at, nothing is read and no time
+        // goes by, so there is no moment when the icons are piled in the « menu.
+        let events = rig.events.all
+        let reads = await rig.session.scansIngested
+        let started = rig.clock.now()
+        let applied = await rig.session.applyReveal(.hiddenShown, presentation: presentation)
+        let answer = await withinTimeLimit(.seconds(5)) { await rig.session.followUp(applied) }
+        #expect(answer == NoRoomAction.none)
+        #expect(rig.events.all == events, "no apply, no look, no read")
+        #expect(await rig.session.scansIngested == reads)
+        #expect(rig.clock.now() == started)
+        #expect(rig.world.concealed == [weather, notes], "the bar is as the sections make it")
+        let state = try #require(await rig.state)
+        #expect(state.plan.source == .sections)
+        #expect(state.lists.overflow.isEmpty, "the « menu holds nothing of Mantel's")
+    }
+
+    @Test func predictionReadsNothingAndIsTrueForAStateThatRevealsNothing() async throws {
+        let rig = laptop()
+        await rig.session.start()
+        try await bringToFront(vpn, menusTo: 1100, in: rig)
+        let events = rig.events.all
+        let reads = await rig.session.scansIngested
+        #expect(await rig.session.predictedFits(.collapsed))
+        #expect(await rig.session.predictedFits(.focusMode))
+        #expect(!(await rig.session.predictedFits(.allShown)))
+        #expect(rig.events.all == events, "nothing is looked at")
+        #expect(await rig.session.scansIngested == reads, "and nothing is read")
+    }
+
+    @Test func predictionLeavesOutAppsMacOSHasTurnedOff() async throws {
+        let rig = laptop()
+        await rig.session.start()
+        try await bringToFront(vpn, menusTo: 1100, in: rig)
+        #expect(!(await rig.session.predictedFits(.hiddenShown)))
+        // The weather app's switch is off in System Settings: its icons take no room, and the notes app's (24 points) fit in 54.
+        rig.turnedOff.set(.apps([weather]))
+        await rig.session.setSettingsOpen(true)
+        #expect(await rig.session.predictedFits(.hiddenShown))
+    }
+
+    @Test func widthsArePublishedWithTheState() async throws {
+        let rig = SessionRig.withAllowlist(sections: sections(hidden: [weather]))
+        await rig.session.start()
+        let state = try #require(await rig.state)
+        // The weather app is concealed in the read that was last, and its icons' widths are what they were when they were on the bar.
+        let icons = state.inventory.items(ofApp: weather)
+        #expect(icons.count == 2 && icons.allSatisfy(\.isConcealed))
+        #expect(icons.map { state.widths.slotWidth(of: $0.id) } == [36, 36])
+        #expect(state.widths.slotWidth(of: ItemID.system("wifi")) == 36)
+        // And a new state is published when they change: the state is what the panels and the layout editor read.
+        let notesIcon = try #require(state.inventory.items(ofApp: notes).first)
+        #expect(state.widths.slotWidth(of: notesIcon.id) == 36)
+        #expect(try #require(await rig.session.lastPublished).widths == state.widths)
+    }
+
+    @Test func secondBarPresentationAppliesCollapsedPlan() async throws {
+        let rig = SessionRig.withAllowlist(sections: sections(hidden: [weather], alwaysHidden: [notes]))
+        await rig.session.start()
+        let before = rig.events.all.count
+
+        let applied = await rig.session.applyReveal(.hiddenShown, presentation: .secondBar)
+        #expect(applied.state == .hiddenShown)
+        #expect(applied.presentation == .secondBar)
+        // The plan is the sections' plan, which is the plan that is applied: nothing is made live, and the bar is as it was.
+        #expect(Array(rig.events.all.dropFirst(before)).isEmpty)
+        #expect(rig.world.concealed == [weather, notes])
+        let state = try #require(await rig.state)
+        #expect(state.plan.source == .sections)
+        #expect(state.plan.concealedBundleIDs == [weather, notes])
+        #expect(state.plan.concealedSections == [.hidden, .alwaysHidden])
+
+        // Everything and a second look are the same; the reveal in the second bar is the state's, though, and not the plan's.
+        let all = await rig.session.applyReveal(.allShown, presentation: .secondBar)
+        #expect(all.presentation == .secondBar)
+        #expect(try #require(await rig.state).plan.source == .sections)
+        #expect(Array(rig.events.all.dropFirst(before)).isEmpty)
+
+        // The next reveal is its own: inline, it is on the bar, and what is shown in no second bar isn't any more.
+        let inline = await rig.session.applyReveal(.hiddenShown)
+        #expect(inline.presentation == .inline)
+        #expect(try #require(await rig.state).plan.source == .reveal(.hidden))
+        #expect(rig.world.concealed == [notes])
+
+        // A state that reveals nothing has no second bar, whatever it is asked for.
+        let focus = await rig.session.applyReveal(.focusMode, presentation: .secondBar)
+        #expect(focus.presentation == .inline)
+        #expect(try #require(await rig.state).plan.source == .focusMode)
+        let collapsed = await rig.session.applyReveal(.collapsed, presentation: .secondBar)
+        #expect(collapsed.presentation == .inline)
+        #expect(try #require(await rig.state).plan.source == .sections)
+    }
+
+    @Test func secondBarPresentationFollowUpIsNone() async throws {
+        // On the laptop's full bar the revealed icons wouldn't fit inline: shown in the second bar, nothing is looked for.
+        let rig = laptop()
+        await rig.session.start()
+        let events = rig.events.all
+        let reads = await rig.session.scansIngested
+        let started = rig.clock.now()
+
+        let applied = await rig.session.applyReveal(.hiddenShown, presentation: .secondBar)
+        let answer = await withinTimeLimit(.seconds(5)) { await rig.session.followUp(applied) }
+        #expect(answer == NoRoomAction.none)
+        #expect(await rig.session.recheckRoom(menuBarTakenOver: false) == .none)
+        #expect(await rig.session.setReveal(.allShown, presentation: .secondBar) == .none)
+        #expect(rig.events.all == events, "no look, no read")
+        #expect(await rig.session.scansIngested == reads)
+        #expect(rig.clock.now() == started, "and no waiting")
+        #expect(try #require(await rig.state).lists.overflow.isEmpty)
+    }
+
+    @Test func wrongPredictionIsCorrectedByTheFollowUp() async throws {
+        // Nothing is in the way of the revealed icons that the prediction knows of, so it says they fit, and they are revealed inline...
+        let rig = laptop()
+        await rig.session.start()
+        let fits = await rig.session.predictedFits(.hiddenShown)
+        #expect(fits)
+        let presentation = RevealPresentationPolicy.presentation(opens: .whenNoRoom, trigger: .dot, predictedFits: fits)
+        #expect(presentation == .inline)
+
+        // ...but the bar has room for five icons, and the follow-up finds the revealed ones piled in the « menu: it corrects the
+        // prediction by answering that the second bar is to open.
+        let applied = await rig.session.applyReveal(.hiddenShown, presentation: presentation)
+        #expect(await rig.session.followUp(applied) == .openSecondBar)
+        let piled = try #require(await rig.state).lists.overflow.map(\.bundleID).sorted()
+        #expect(piled == [notes, weather, weather].sorted())
+
+        // The app answers it by showing the same reveal in the second bar: the menu bar is put back as the sections make it, and the
+        // icons leave the « menu.
+        let corrected = await rig.session.applyReveal(.hiddenShown, presentation: .secondBar)
+        #expect(await rig.session.followUp(corrected) == .none)
+        #expect(rig.world.concealed == [weather, notes])
+        #expect(try #require(await rig.state).plan.source == .sections)
+        await rig.session.refresh()
+        #expect(try #require(await rig.state).lists.overflow.isEmpty)
+    }
+
+    @Test func secondBarPresentationReadsAreJudged() async throws {
+        // The VPN, notes and weather apps are Shown and the sync app is Hidden. The bar has room for four icons: Mantel's two and two more,
+        // so with the sync app concealed the weather app's icons don't fit.
+        func rig() -> SessionRig {
+            SessionRig.withAllowlist(shape: .laptop, capacity: nil,
+                                     sections: sections(shown: [weather, notes, vpn], hidden: [SessionWorld.sync]))
+        }
+        let kept = AppPlacement(section: .shown, isAuto: false)
+
+        // The reveal is on the bar: what a read finds is for the reveal's sake, and nothing is moved (the sync app takes the room).
+        let inline = rig()
+        await inline.session.start()
+        inline.world.setCapacity(4)
+        _ = await inline.session.applyReveal(.hiddenShown)
+        await inline.session.refresh()
+        #expect(await inline.session.sections.apps[weather] == kept)
+
+        // The reveal is in the second bar: the menu bar is as the sections make it, and a read of it is judged as a collapsed bar's is.
+        // The weather app doesn't fit, and moves to Hidden.
+        let second = rig()
+        await second.session.start()
+        second.world.setCapacity(4)
+        _ = await second.session.applyReveal(.hiddenShown, presentation: .secondBar)
+        await second.session.refresh()
+        #expect(await second.session.sections.apps[weather] == AppPlacement(section: .hidden, isAuto: true))
+        #expect(await second.session.sections.apps[notes] == kept)
+        #expect(await second.session.sections.apps[vpn] == kept)
     }
 }

@@ -84,7 +84,7 @@ struct OnboardingFlowTests {
         let inputs = OnboardingInputs(accessibilityGranted: false, install: .elsewhere("/tmp"))
         let expected: [(OnboardingStep, String, String)] = [
             (.welcome, "Welcome to Mantel", "Continue"),
-            (.accessibility, "Allow Accessibility", "Open System Settings"),
+            (.accessibility, "Allow Device control and data access", "Open System Settings"),
             (.location, "Move Mantel to Applications", "Move to Applications"),
             (.dots, "The dots", "Continue"),
             (.done, "You're set", "Done"),

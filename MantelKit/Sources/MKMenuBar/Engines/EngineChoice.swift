@@ -12,14 +12,18 @@ public struct EngineChoiceInputs: Sendable, Equatable {
     public var availability: [HidingEngineKind: EngineAvailability]
     /// The engines that threw three times in a row and are not tried again until Refresh or the next launch.
     public var failedOut: Set<HidingEngineKind>
+    /// The running apps in Shown whose icons macOS doesn't tie to them, so that the allowlist can't keep them shown (`UnattachedIconTracker`).
+    public var unattachedShownApps: Set<String>
 
     public init(method: HidingMethodChoice, callActive: Bool = false, keepMicVisibleDuringCalls: Bool = false,
-                availability: [HidingEngineKind: EngineAvailability], failedOut: Set<HidingEngineKind> = []) {
+                availability: [HidingEngineKind: EngineAvailability], failedOut: Set<HidingEngineKind> = [],
+                unattachedShownApps: Set<String> = []) {
         self.method = method
         self.callActive = callActive
         self.keepMicVisibleDuringCalls = keepMicVisibleDuringCalls
         self.availability = availability
         self.failedOut = failedOut
+        self.unattachedShownApps = unattachedShownApps
     }
 }
 
@@ -45,9 +49,13 @@ public struct EngineChoice: Sendable, Equatable {
     /// | Situation | Engine |
     /// |---|---|
     /// | a call is active, the mic indicator is to stay visible, and the switches can be used | System Settings switches |
+    /// | automatic, an app in Shown has an icon macOS doesn't tie to it, and the switches can be used | System Settings switches |
     /// | the person chose System Settings switches | System Settings switches |
     /// | the wide spacer (no longer offered in Settings, and never read from a saved file) | Wide spacer |
     /// | automatic | Allowlist |
+    ///
+    /// **The unattached-icon row applies to Automatic only,** and only when the switches can be used: otherwise Automatic's own chain
+    /// decides, so the allowlist stays in charge and the spacer is never reached for this (it hides worse than one hidden icon does).
     ///
     /// **A method the person chose that can't be used** (its engine isn't available, or is in `failedOut`) is never a silent fall
     /// through to a worse engine: Automatic's chain decides instead (the allowlist, then the switches, then the spacer, skipping any
@@ -58,6 +66,9 @@ public struct EngineChoice: Sendable, Equatable {
     public static func decide(_ inputs: EngineChoiceInputs) -> EngineChoice {
         if inputs.callActive, inputs.keepMicVisibleDuringCalls, usable(.approvals, inputs) {
             return EngineChoice(kind: .approvals, reason: "A call is active, so the mic indicator stays visible.")
+        }
+        if inputs.method == .automatic, !inputs.unattachedShownApps.isEmpty, usable(.approvals, inputs) {
+            return EngineChoice(kind: .approvals, reason: unattachedReason(count: inputs.unattachedShownApps.count))
         }
         let chosen: HidingEngineKind
         let reason: String
@@ -77,6 +88,15 @@ public struct EngineChoice: Sendable, Equatable {
         // Nothing works: the last resort stays in charge, and is tried again with the next plan.
         let last = automaticChain.last ?? .spacer
         return EngineChoice(kind: last, reason: "\(last.title) can't be used (\(unusableReason(last, inputs))), and nothing else can hide icons, so Mantel keeps trying it.")
+    }
+
+    /// Why the switches are used for icons macOS doesn't tie to their apps. It counts the apps and names none: the reasons go into the
+    /// copied report.
+    static func unattachedReason(count: Int) -> String {
+        if count == 1 {
+            return "1 app in Shown has an icon macOS can't tie to it, so Mantel uses System Settings switches, which keep it shown."
+        }
+        return "\(count) apps in Shown have icons macOS can't tie to them, so Mantel uses System Settings switches, which keep them shown."
     }
 
     /// Whether Mantel may use the engine now: it is available, and hasn't failed out.

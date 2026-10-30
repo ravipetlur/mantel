@@ -48,3 +48,12 @@ public enum LaunchSequence {
         }
     }
 }
+
+extension LaunchSequence {
+    /// Whether the launch opens Settings › Cosmetics. It does when both dots are hidden: nothing of Mantel is then in the menu bar, and
+    /// the window is where the person finds it again (and turns a dot back on). A person who hasn't been through onboarding gets that
+    /// instead, so this is for the launches after it.
+    public static func opensSettingsForHiddenDots(onboardingCompleted: Bool, dots: DotSettings) -> Bool {
+        onboardingCompleted && dots.hideBothDots
+    }
+}

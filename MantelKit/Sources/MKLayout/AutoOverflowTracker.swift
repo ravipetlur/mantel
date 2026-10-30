@@ -11,8 +11,9 @@ import Foundation
 ///   that overflowed again goes back to Hidden and isn't tried for a minute, unless the displays change. That is one flap, and no
 ///   more, for each trigger. An app that passed a trial and overflows within the minute after it is treated the same way: it goes
 ///   back to Hidden, and cools.
-/// - **The person has the last word.** A move by the person (`SectionModel.move`) clears `isAuto`, so the tracker never moves that
-///   app again, and a trial the person moves an app out of is let go.
+/// - **The person's moves.** A move by the person (`SectionModel.move`) clears `isAuto`, so the tracker never tries that app back in
+///   Shown by itself, and a trial the person moves an app out of is let go. An app the person put in Shown is still moved to Hidden when
+///   its icons don't fit, as any Shown app is (and is then tried back like the others).
 /// - **Room for Mantel's dots.** macOS puts the left-most icons in the « first, and Mantel's dots sit left of every Shown app, so on a bar
 ///   that is a little too narrow it is the dots that go (a Shown app is never the one to overflow). When a read says a dot is in the « of
 ///   a bar that is shown, the left-most Shown apps on that bar go to Hidden as automatic moves, as many as the dots are wide, and the

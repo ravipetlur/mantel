@@ -46,6 +46,31 @@ public struct ProbePlatform: Sendable {
     public var copyPath: String
     /// The process ID of the app that is in front, if there is one: the inventory records where its menus are.
     public var frontAppPID: @Sendable () -> pid_t? = { nil }
+    /// Posts clicks and keys, which moves the real pointer (and puts it back).
+    public var poster: any ClickPosting
+    /// Says where an item is in the menu bar now. The scanner of the running app, which has learned where each app's items are while they
+    /// were all drawn; a test gives its own.
+    public var locator: any ItemLocating
+    /// Presses an item or opens its menu through Accessibility (the scanner too).
+    public var presser: any ItemPressing
+    /// The preferences the icon spacing is kept in.
+    public var preferences: any PreferencesService
+    /// Quits an app and opens it again. The probes use it for the test item and nothing else.
+    public var relauncher: any AppRelaunching
+    /// Where the test item keeps what it writes (its click log): its folder in Application Support. A probe reads it and nothing more.
+    public var testItemSupportFolder: URL
+    /// Where Mantel's own items' buttons are, by the name the system keeps their place under (the status item's autosave name), in
+    /// CoreGraphics global points. Read in the app, on the main actor.
+    public var ownItemFrames: @Sendable () async -> [String: CGRect] = { [:] }
+    /// How many keys of the form `NSStatusItem Preferred Position …` Mantel's own preferences hold.
+    public var ownPreferredPositionKeyCount: @Sendable () -> Int = { 0 }
+    /// The same in the test item's preferences, which are another app's: a read.
+    public var testItemPreferredPositionKeyCount: @Sendable () -> Int = { 0 }
+    /// Tells the test item to do something, by a notification only it listens for: `toggle-extra-1` hides its first extra item, or shows
+    /// it again (`TestItemCommands`).
+    public var notifyTestItem: @Sendable (String) -> Void = { _ in }
+    /// Where the pointer is now, in CoreGraphics global points: a posted click moves it and puts it back.
+    public var pointerLocation: @Sendable () -> CGPoint? = { nil }
 
     public init(allowlist: any AllowlistControlling, capture: any StripCapturing, windowList: any WindowListReading,
                 makeClickTap: @escaping MakeClickTap, runningApps: @escaping @Sendable () -> [RunningApp],
@@ -53,7 +78,14 @@ public struct ProbePlatform: Sendable {
                 statusBarThickness: @escaping @Sendable () async -> Double,
                 screens: @escaping @Sendable () async -> [ScreenFacts],
                 screenRecordingGranted: @escaping @Sendable () -> Bool, ownBundleID: String, isInstalledCopy: Bool,
-                copyPath: String, frontAppPID: @escaping @Sendable () -> pid_t? = { nil }) {
+                copyPath: String, poster: any ClickPosting, locator: any ItemLocating, presser: any ItemPressing,
+                preferences: any PreferencesService, relauncher: any AppRelaunching, testItemSupportFolder: URL,
+                frontAppPID: @escaping @Sendable () -> pid_t? = { nil },
+                ownItemFrames: @escaping @Sendable () async -> [String: CGRect] = { [:] },
+                ownPreferredPositionKeyCount: @escaping @Sendable () -> Int = { 0 },
+                testItemPreferredPositionKeyCount: @escaping @Sendable () -> Int = { 0 },
+                notifyTestItem: @escaping @Sendable (String) -> Void = { _ in },
+                pointerLocation: @escaping @Sendable () -> CGPoint? = { nil }) {
         self.allowlist = allowlist
         self.capture = capture
         self.windowList = windowList
@@ -66,7 +98,18 @@ public struct ProbePlatform: Sendable {
         self.ownBundleID = ownBundleID
         self.isInstalledCopy = isInstalledCopy
         self.copyPath = copyPath
+        self.poster = poster
+        self.locator = locator
+        self.presser = presser
+        self.preferences = preferences
+        self.relauncher = relauncher
+        self.testItemSupportFolder = testItemSupportFolder
         self.frontAppPID = frontAppPID
+        self.ownItemFrames = ownItemFrames
+        self.ownPreferredPositionKeyCount = ownPreferredPositionKeyCount
+        self.testItemPreferredPositionKeyCount = testItemPreferredPositionKeyCount
+        self.notifyTestItem = notifyTestItem
+        self.pointerLocation = pointerLocation
     }
 
     /// Whether the app at `bundleURL` is the copy macOS honours the allowlist for: directly in `/Applications`, not in the
@@ -79,8 +122,19 @@ public struct ProbePlatform: Sendable {
     }
 
     /// The real system, with the running apps from the one source the app keeps.
-    public static func live(runningApps: RunningAppsSource) -> ProbePlatform {
-        ProbePlatform(
+    ///
+    /// - Parameters:
+    ///   - scanner: the app's own scanner, which finds an item in the menu bar and presses it. It has to be the one that scans: what it
+    ///     learned of where each app's items are, while they were all drawn, is what lets it say which slot is an item's once the item
+    ///     has been concealed.
+    ///   - ownItemFrames: where Mantel's own items' buttons are (it reads them on the main actor).
+    public static func live(runningApps: RunningAppsSource, scanner: MenuBarScanner,
+                            ownItemFrames: @escaping @Sendable () async -> [String: CGRect]) -> ProbePlatform {
+        let ownBundleID = Bundle.main.bundleIdentifier ?? "com.example.mantel"
+        let fixtureBundleID = ownBundleID + ProbeSafety.fixtureBundleIDSuffix
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support", directoryHint: .isDirectory)
+        return ProbePlatform(
             allowlist: LiveAllowlist(),
             capture: StripCapture(),
             windowList: LiveWindowList(),
@@ -92,10 +146,52 @@ public struct ProbePlatform: Sendable {
             statusBarThickness: { await MainActor.run { NSStatusBar.system.thickness } },
             screens: { await MainActor.run { NSScreen.screens.compactMap(ScreenFacts.init(screen:)) } },
             screenRecordingGranted: { CGPreflightScreenCaptureAccess() },
-            ownBundleID: Bundle.main.bundleIdentifier ?? "com.example.mantel",
+            ownBundleID: ownBundleID,
             isInstalledCopy: isInstalledCopy(at: Bundle.main.bundleURL),
             copyPath: Bundle.main.bundleURL.path(percentEncoded: false),
-            frontAppPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier })
+            poster: LiveClickPoster(), locator: scanner, presser: scanner, preferences: LivePreferences(),
+            relauncher: LiveAppRelauncher(runningApps: { runningApps.all }),
+            testItemSupportFolder: support.appending(path: "MantelTestItem", directoryHint: .isDirectory),
+            frontAppPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+            ownItemFrames: ownItemFrames,
+            ownPreferredPositionKeyCount: { PreferredPositionKeys.count(inDomain: ownBundleID) },
+            testItemPreferredPositionKeyCount: { PreferredPositionKeys.count(inDomain: fixtureBundleID) },
+            notifyTestItem: { command in
+                DistributedNotificationCenter.default().postNotificationName(
+                    TestItemCommands.notificationName(command, fixtureBundleID: fixtureBundleID), object: nil, userInfo: nil,
+                    deliverImmediately: true)
+            },
+            pointerLocation: { CGEvent(source: nil)?.location })
+    }
+}
+
+/// What the test item listens for. It is told what to do by a notification of the system's that carries its own bundle ID, so that no
+/// other app has the name.
+public enum TestItemCommands {
+    /// Hides the test item's first extra item, or shows it again.
+    public static let toggleExtraOne = "toggle-extra-1"
+
+    /// `<the test item's bundle ID>.<command>`: the name the test item listens for.
+    public static func notificationName(_ command: String, fixtureBundleID: String) -> Notification.Name {
+        Notification.Name("\(fixtureBundleID).\(command)")
+    }
+}
+
+/// The keys AppKit keeps an app's status items' places under in the app's own preferences: `NSStatusItem Preferred Position <name>`.
+public enum PreferredPositionKeys {
+    public static let prefix = "NSStatusItem Preferred Position"
+
+    /// How many of `keys` are such keys.
+    public static func count(in keys: [String]) -> Int {
+        keys.filter { $0.hasPrefix(prefix) }.count
+    }
+
+    /// How many such keys the app with this bundle ID has now, read afresh through the preferences service (a read of another app's
+    /// domain). Zero when it has none, or the domain can't be read.
+    public static func count(inDomain bundleID: String) -> Int {
+        CFPreferencesAppSynchronize(bundleID as CFString)
+        let keys = CFPreferencesCopyKeyList(bundleID as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? [String]
+        return count(in: keys ?? [])
     }
 }
 

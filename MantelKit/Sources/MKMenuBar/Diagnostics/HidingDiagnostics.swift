@@ -95,6 +95,46 @@ public enum HidingDiagnostics {
         return [DiagnosticsCheck(title: title, status: .ok, detail: "Read \(icons) on \(displays).")]
     }
 
+    /// The "Menu bar icon" rows: one for each running app whose icon macOS doesn't tie to the app, by name. The first case that applies:
+    /// 1. The allowlist is in use and the switches can be used: a warning that says how to have the icon shown.
+    /// 2. The allowlist is in use and the switches can't be used: a warning that says why.
+    /// 3. The switches are in use: fine, and says that Refresh puts it right once the app is fixed.
+    /// 4. The wide spacer is in use: no row.
+    ///
+    /// `names` are what the pane knows the apps by; the copied report gives none, so it has the bundle ID. `suggestingRefresh` is for the
+    /// pane's own rows, as `menuBarChecks`' is: the button is under the checks.
+    public static func unattachedIconChecks(_ apps: Set<String>, engine: EngineStatus?, names: [String: String],
+                                            suggestingRefresh: Bool = false) -> [DiagnosticsCheck] {
+        guard let engine, !apps.isEmpty else { return [] }
+        let title = "Menu bar icon"
+        let cantTell = "macOS can't tell which app this icon belongs to"
+        let named = apps.map { (id: $0, name: names[$0] ?? $0) }
+        return NameOrdering.sorted(named, name: \.name, tiebreak: \.id).compactMap { app -> DiagnosticsCheck? in
+            switch engine.kind {
+            case .allowlist:
+                if let reason = engine.unavailableReasons[.approvals] {
+                    return DiagnosticsCheck(title: title, status: .warning, detail: "\(app.name): \(cantTell), so it's hidden whenever anything is hidden. System Settings switches would show and hide it with its section, but can't be used now. \(HidingMethodRows.sentence(reason))")
+                }
+                return DiagnosticsCheck(title: title, status: .warning, detail: "\(app.name): \(cantTell), so it's hidden whenever anything is hidden. To have it shown and hidden with its section, choose System Settings switches in Settings › Advanced › Hiding method.")
+            case .approvals:
+                let fixed = suggestingRefresh ? "If you've fixed the app, try Refresh menu bar below." : "If you've fixed the app, choose Refresh Menu Bar."
+                return DiagnosticsCheck(title: title, status: .ok, detail: "\(app.name): \(cantTell). System Settings switches are in use, so it's shown and hidden with its section. \(fixed)")
+            case .spacer:
+                return nil
+            }
+        }
+    }
+
+    /// What the "Menu bar" row says when MenuBarAgent was restarted for a menu bar a change of displays left stuck, and the bar still
+    /// wasn't whole (or couldn't be restarted).
+    public static let stuckBarText = "The menu bar didn't come back after a change of displays. Choose Reset."
+
+    /// The row for a menu bar that restarting didn't put right: a warning, until the bar is whole again or a Reset is done. None otherwise.
+    public static func stuckBarChecks(notRecovered: Bool) -> [DiagnosticsCheck] {
+        guard notRecovered else { return [] }
+        return [DiagnosticsCheck(title: "Menu bar", status: .warning, detail: stuckBarText)]
+    }
+
     // MARK: Written out
 
     /// How each engine stands, one line each, as the engine says it (`available`, `needs permission: …`, `broken: …`). An engine the
@@ -128,13 +168,14 @@ public enum HidingDiagnostics {
         return NameOrdering.sorted(rows, name: \.name, tiebreak: \.bundleID)
     }
 
-    /// How badly an answer went: fine, slow, left alone, no answer.
+    /// How badly an answer went: fine, slow, left alone, refused, no answer.
     private static func severity(of status: ReachStatus) -> Int {
         switch status {
         case .fine: 0
         case .slow: 1
         case .skipped: 2
-        case .timedOut: 3
+        case .refused: 3
+        case .timedOut: 4
         }
     }
 
@@ -144,6 +185,7 @@ public enum HidingDiagnostics {
         case .slow: "Slow (\(Int(reach.readMs.rounded())) ms)"
         case .timedOut: "Timed out; asked again in 30 seconds"
         case .skipped: "Skipped"
+        case .refused: "Refuses to answer"
         }
     }
 
@@ -157,7 +199,7 @@ public enum HidingDiagnostics {
         return [
             DiagnosticsBlock(title: "Ways of hiding", lines: engineLines(engine)),
             DiagnosticsBlock(title: "What hiding changes", lines: whatHidingChanges),
-            DiagnosticsBlock(title: "Accessibility reach", lines: reach.isEmpty ? [noReachText] : reach),
+            DiagnosticsBlock(title: "How apps answer Mantel", lines: reach.isEmpty ? [noReachText] : reach),
         ]
     }
 

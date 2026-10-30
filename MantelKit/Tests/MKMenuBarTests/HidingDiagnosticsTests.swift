@@ -93,9 +93,16 @@ struct HidingDiagnosticsTests {
         #expect(HidingDiagnostics.suggestsRefresh(.agentHasNoWindows))
         #expect(!HidingDiagnostics.suggestsRefresh(.accessibilityNotGranted))
         #expect(!HidingDiagnostics.suggestsRefresh(.ambiguousSpace))
-        // Every kind of problem is decided one way or the other (a new one has to be thought about).
+        // Every kind of problem is decided one way or the other: the switch has no `default`, so a new kind doesn't build until it has been
+        // thought about here, and each answer is compared with the one the function gives.
+        func refreshHelps(_ problem: InventoryProblem) -> Bool {
+            switch problem {
+            case .agentNotRunning, .agentHasNoWindows: true
+            case .accessibilityNotGranted, .ambiguousSpace: false
+            }
+        }
         for problem in [InventoryProblem.accessibilityNotGranted, .agentNotRunning, .agentHasNoWindows, .ambiguousSpace] {
-            _ = HidingDiagnostics.suggestsRefresh(problem)
+            #expect(HidingDiagnostics.suggestsRefresh(problem) == refreshHelps(problem), "\(problem)")
         }
     }
 
@@ -109,6 +116,29 @@ struct HidingDiagnosticsTests {
         let json = DiagnosticsText.json(checks: checks, probes: [:], home: "/Users/someone")
         let encoded = String(decoding: try JSONEncoder().encode(json), as: UTF8.self)
         #expect(!encoded.contains("below"))
+        for problem in everyProblem {
+            #expect(text.contains(problem.message))
+        }
+    }
+
+    @Test func theAppsCopiedReportNeverSaysBelow() throws {
+        // What the app's "Copy diagnostics" puts together: the same rows and blocks, through `DiagnosticsText.render`, which it calls
+        // (the rows of the layout, the pictures and the spacing are among them).
+        let everyProblem: [InventoryProblem] = [.accessibilityNotGranted, .agentNotRunning, .agentHasNoWindows, .ambiguousSpace]
+        let state = inventory(items: 1, displays: 1, problems: everyProblem)
+        let layout = LayoutDiagnostics.rows(
+            layout: nil, images: (count: 0, last: nil, screenRecording: false),
+            spacing: SpacingState(spacing: nil, padding: nil, preset: .macOSDefault, original: nil), spacingWorks: false)
+        let checks = HidingDiagnostics.menuBarChecks(state) + layout
+            + HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: status(), names: [:])
+            + HidingDiagnostics.stuckBarChecks(notRecovered: true)
+        let blocks = HidingDiagnostics.blocks(engine: status(), inventory: state)
+        let text = DiagnosticsText.render(checks: checks, blocks: blocks, probes: [:], home: "/Users/someone",
+                                          timeZone: TimeZone(identifier: "UTC")!)
+        #expect(!text.contains("below"))
+        #expect(!text.contains("Try Refresh menu bar"))
+        let json = DiagnosticsText.json(checks: checks, blocks: blocks, probes: [:], home: "/Users/someone")
+        #expect(!String(decoding: try JSONEncoder().encode(json), as: UTF8.self).contains("below"))
         for problem in everyProblem {
             #expect(text.contains(problem.message))
         }
@@ -136,5 +166,62 @@ struct HidingDiagnosticsTests {
 
     @Test func whatHidingChangesIsTheThreeNotes() {
         #expect(HidingDiagnostics.whatHidingChanges == [EngineNotes.sideEffects, EngineNotes.clockNote, EngineNotes.crashNote])
+    }
+
+    // MARK: An icon macOS doesn't tie to its app
+
+    private let cantTell = "macOS can't tell which app this icon belongs to"
+    private let switchesUsable = [HidingEngineKind.approvals: "available"]
+
+    @Test func unattachedRowNamesTheAppWithTheWorkaround() {
+        let checks = HidingDiagnostics.unattachedIconChecks(["com.example.one", "com.example.two"], engine: status(),
+                                                            names: ["com.example.one": "Zed", "com.example.two": "Alpha"])
+        // By name, not by bundle ID: Alpha before Zed.
+        #expect(checks.map(\.title) == ["Menu bar icon", "Menu bar icon"])
+        #expect(checks.map(\.status) == [.warning, .warning])
+        #expect(checks.map(\.detail) == [
+            "Alpha: \(cantTell), so it's hidden whenever anything is hidden. To have it shown and hidden with its section, choose System Settings switches in Settings › Advanced › Hiding method.",
+            "Zed: \(cantTell), so it's hidden whenever anything is hidden. To have it shown and hidden with its section, choose System Settings switches in Settings › Advanced › Hiding method.",
+        ])
+    }
+
+    @Test func copiedReportUsesTheBundleID() {
+        let checks = HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: status(), names: [:])
+        #expect(checks.first?.detail.hasPrefix("com.example.one: \(cantTell)") == true)
+        // A name the pane knows is never in what the report copies, which passes none.
+        #expect(checks.first?.detail.contains("Zed") == false)
+    }
+
+    @Test func switchesUnusableSaysWhy() {
+        let engine = status(unavailable: [.approvals: "Choose the “Allow in the Menu Bar” file in Settings › Permissions"])
+        let checks = HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: engine, names: ["com.example.one": "One"])
+        #expect(checks.map(\.status) == [.warning])
+        #expect(checks.first?.detail == "One: \(cantTell), so it's hidden whenever anything is hidden. System Settings switches would show and hide it with its section, but can't be used now. Choose the “Allow in the Menu Bar” file in Settings › Permissions.")
+    }
+
+    @Test func switchesInUseIsOkAndSaysRefreshClearsIt() {
+        let engine = status(kind: .approvals, reason: "x")
+        let report = HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: engine, names: ["com.example.one": "One"])
+        #expect(report.map(\.status) == [.ok])
+        #expect(report.first?.detail == "One: \(cantTell). System Settings switches are in use, so it's shown and hidden with its section. If you've fixed the app, choose Refresh Menu Bar.")
+        let pane = HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: engine, names: ["com.example.one": "One"],
+                                                          suggestingRefresh: true)
+        #expect(pane.first?.detail == "One: \(cantTell). System Settings switches are in use, so it's shown and hidden with its section. If you've fixed the app, try Refresh menu bar below.")
+    }
+
+    @Test func noRowUnderTheSpacer() {
+        let spacer = status(kind: .spacer, reason: "x", degraded: true)
+        #expect(HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: spacer, names: [:]).isEmpty)
+        // Nor with nothing to say, or nothing known of the engine.
+        #expect(HidingDiagnostics.unattachedIconChecks([], engine: status(), names: [:]).isEmpty)
+        #expect(HidingDiagnostics.unattachedIconChecks(["com.example.one"], engine: nil, names: [:]).isEmpty)
+    }
+
+    @Test func stuckBarRowIsAWarningUntilTheBarIsWholeOrAResetIsDone() {
+        #expect(HidingDiagnostics.stuckBarChecks(notRecovered: false).isEmpty)
+        let checks = HidingDiagnostics.stuckBarChecks(notRecovered: true)
+        #expect(checks.map(\.title) == ["Menu bar"])
+        #expect(checks.map(\.status) == [.warning])
+        #expect(checks.map(\.detail) == ["The menu bar didn't come back after a change of displays. Choose Reset."])
     }
 }

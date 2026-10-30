@@ -27,6 +27,8 @@ public struct MantelPaths: Sendable, Equatable {
     public var probes: URL { root.appending(path: "Probes", directoryHint: .isDirectory) }
     /// The menu bar item images Mantel caches.
     public var itemImages: URL { root.appending(path: "ItemImages", directoryHint: .isDirectory) }
+    /// The pictures the person chose for the dots and for groups (`ImageImport` copies them here).
+    public var ownImages: URL { root.appending(path: "OwnImages", directoryHint: .isDirectory) }
     /// The journal of changes Mantel makes to the system.
     public var journalFile: URL { root.appending(path: "journal.json", directoryHint: .notDirectory) }
     /// The Unix socket the command-line tool talks to.
@@ -36,7 +38,7 @@ public struct MantelPaths: Sendable, Equatable {
     /// there already with looser permissions.
     public func createDirectories() throws {
         let fileManager = FileManager.default
-        for folder in [root, logs, backups, probes, itemImages] {
+        for folder in [root, logs, backups, probes, itemImages, ownImages] {
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true,
                                             attributes: [.posixPermissions: 0o700])
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)

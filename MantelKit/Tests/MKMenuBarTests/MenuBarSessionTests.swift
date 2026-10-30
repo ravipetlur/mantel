@@ -265,23 +265,21 @@ struct MenuBarSessionTests {
                                         settings: configured)
     }
 
-    @Test func secondBarLeavesOverflowAndLogsOnce() async throws {
+    @Test func secondBarPolicyAnswersOpenSecondBarWhenRevealedIconsOverflow() async throws {
         let rig = laptop(policy: .secondBar)
         await rig.session.start()
         #expect(rig.world.concealed == [weather, notes])
 
-        // Three icons are revealed and the bar has room for five: the revealed apps are piled in the « overflow. Policy: leave them
-        // there, and say so in the log the first time.
+        // Three icons are revealed and the bar has room for five: the revealed apps are piled in the « overflow. Policy: show them in the
+        // second bar, every time, with nothing to say in the log of icons left in the « menu.
         let first = await rig.session.setReveal(.hiddenShown)
-        #expect(first == .leaveOverflow(logOnce: true))
+        #expect(first == .openSecondBar)
         let state = try #require(await rig.state)
         #expect(state.lists.overflow.map(\.bundleID).sorted() == [notes, weather, weather].sorted())
 
         #expect(await rig.session.setReveal(.collapsed) == .none)
-        // The second time, the line is not said again.
-        let second = await rig.session.setReveal(.hiddenShown)
-        #expect(second == .leaveOverflow(logOnce: false))
-        #expect(await rig.session.setReveal(.allShown) == .leaveOverflow(logOnce: false))
+        #expect(await rig.session.setReveal(.hiddenShown) == .openSecondBar)
+        #expect(await rig.session.setReveal(.allShown) == .openSecondBar)
     }
 
     @Test func swapConcealsRightMostShownWithinThreeRounds() async throws {

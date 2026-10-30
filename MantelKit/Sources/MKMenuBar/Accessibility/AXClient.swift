@@ -74,14 +74,37 @@ public protocol AXReading: Sendable {
     func press(_ element: AXElementRef) throws(AXReadError)
     /// The names of the attributes the element has, for the raw dump of a tree. A reader that can't say gives none.
     func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String]
+    /// The names of the actions the element offers (`AXPress`, `AXShowMenu`). A reader that can't say gives none.
+    func actionNames(of element: AXElementRef) throws(AXReadError) -> [String]
+    /// Performs one of the element's actions, by name. A reader that can't throws `noValue`.
+    func perform(_ action: String, on element: AXElementRef) throws(AXReadError)
+    /// `attribute(_:of:)`, waiting up to `wait` seconds for the app to answer instead of the reader's own wait. A reader that has no
+    /// wait of its own (a fake tree) answers as `attribute(_:of:)` does.
+    func attribute(_ name: String, of element: AXElementRef, wait: TimeInterval) throws(AXReadError) -> AXValueBox
+    /// Quitting has begun: from now on, no call waits for an app any longer than it must. A reader that doesn't wait ignores it.
+    func stopWaiting()
+    /// The processes that are running now: a reader that remembers what apps have done forgets the others.
+    func keep(onlyProcesses pids: Set<pid_t>)
+    /// This process answers, however late a busy Mac makes it (MenuBarAgent, which the bar is read from): a reader that remembers what apps
+    /// have done never takes it for one that doesn't.
+    func expectAnswers(fromProcess pid: pid_t)
 }
 
 extension AXReading {
+    public func attribute(_ name: String, of element: AXElementRef, wait: TimeInterval) throws(AXReadError) -> AXValueBox {
+        try attribute(name, of: element)
+    }
+    public func stopWaiting() {}
+    public func keep(onlyProcesses pids: Set<pid_t>) {}
+    public func expectAnswers(fromProcess pid: pid_t) {}
     public func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { [] }
+    public func actionNames(of element: AXElementRef) throws(AXReadError) -> [String] { [] }
+    public func perform(_ action: String, on element: AXElementRef) throws(AXReadError) { throw .noValue }
 }
 
-/// The real Accessibility API. Every call has a messaging timeout (`timeout`, in seconds), so that one app that doesn't
-/// answer can't hold the whole read: it is `AXReadError.timeout`.
+/// The real Accessibility API. Every call has a messaging timeout (`timeout`, in seconds, unless the caller gives another with `wait`),
+/// so that one app that doesn't answer can't hold the whole read: it is `AXReadError.timeout`. Waiting longer for a busy Mac is
+/// `PatientAX`'s: it asks again with longer waits.
 ///
 /// It is for any thread. **Calls about Mantel's own process are made on the main thread** (`OwnProcessAccess`): AppKit answers them on
 /// the calling thread, and wants the main one. They are answered in the process itself, so the messaging timeout doesn't apply to them.
@@ -95,7 +118,11 @@ public struct AXClient: AXReading {
     }
 
     public func attribute(_ name: String, of element: AXElementRef) throws(AXReadError) -> AXValueBox {
-        let timeout = timeout
+        try attribute(name, of: element, wait: TimeInterval(timeout))
+    }
+
+    public func attribute(_ name: String, of element: AXElementRef, wait: TimeInterval) throws(AXReadError) -> AXValueBox {
+        let timeout = Float(wait)
         return try ownProcess.call(about: element) { () throws(AXReadError) -> AXValueBox in
             AXUIElementSetMessagingTimeout(element.element, timeout)
             var value: CFTypeRef?
@@ -138,6 +165,26 @@ public struct AXClient: AXReading {
             let result = AXUIElementCopyAttributeNames(element.element, &names)
             guard result == .success else { throw Self.map(result) }
             return (names as? [String]) ?? []
+        }
+    }
+
+    public func actionNames(of element: AXElementRef) throws(AXReadError) -> [String] {
+        let timeout = timeout
+        return try ownProcess.call(about: element) { () throws(AXReadError) -> [String] in
+            AXUIElementSetMessagingTimeout(element.element, timeout)
+            var names: CFArray?
+            let result = AXUIElementCopyActionNames(element.element, &names)
+            guard result == .success else { throw Self.map(result) }
+            return (names as? [String]) ?? []
+        }
+    }
+
+    public func perform(_ action: String, on element: AXElementRef) throws(AXReadError) {
+        let timeout = timeout
+        try ownProcess.call(about: element) { () throws(AXReadError) in
+            AXUIElementSetMessagingTimeout(element.element, timeout)
+            let result = AXUIElementPerformAction(element.element, action as CFString)
+            guard result == .success else { throw Self.map(result) }
         }
     }
 

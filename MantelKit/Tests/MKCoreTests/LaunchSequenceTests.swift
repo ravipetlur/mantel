@@ -90,4 +90,25 @@ struct LaunchSequenceTests {
         #expect(Set(all).count == all.count)
         #expect(Set(all) == Set(LaunchStep.allCases))
     }
+
+    @Test func opensSettingsForHiddenDots() {
+        var hidden = DotSettings()
+        hidden.hideBothDots = true
+        let shown = DotSettings()
+
+        // Both dots are off the bar, and the person has been through onboarding: Settings opens, so that Mantel can be found again.
+        #expect(LaunchSequence.opensSettingsForHiddenDots(onboardingCompleted: true, dots: hidden))
+        // A dot is on the bar, so it is there to be clicked.
+        #expect(!LaunchSequence.opensSettingsForHiddenDots(onboardingCompleted: true, dots: shown))
+        // Onboarding has its own window, which comes first.
+        #expect(!LaunchSequence.opensSettingsForHiddenDots(onboardingCompleted: false, dots: hidden))
+        #expect(!LaunchSequence.opensSettingsForHiddenDots(onboardingCompleted: false, dots: shown))
+
+        // Only hiding both dots counts: a style, •• visibility or the divider is no reason.
+        var styled = DotSettings()
+        styled.style = .chevrons
+        styled.alwaysDot = .always
+        styled.showsDivider = true
+        #expect(!LaunchSequence.opensSettingsForHiddenDots(onboardingCompleted: true, dots: styled))
+    }
 }

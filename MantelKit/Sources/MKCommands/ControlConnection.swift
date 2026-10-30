@@ -48,8 +48,11 @@ final class ControlConnection: Sendable {
 
     private let continuation: AsyncStream<LineCodecOutput>.Continuation
     private let state: Mutex<State>
+    /// What `writeTimeout` is counted on.
+    private let clock: any Clock
 
-    init(fd: Int32) {
+    init(fd: Int32, clock: any Clock = SystemClock()) {
+        self.clock = clock
         state = Mutex(State(fd: fd))
         // The oldest lines are kept: what a client asked first is what it is answered first.
         (inbound, continuation) = AsyncStream.makeStream(of: LineCodecOutput.self,
@@ -144,7 +147,7 @@ final class ControlConnection: Sendable {
     private func write(_ data: Data) -> Bool {
         let bytes = [UInt8](data)
         var offset = 0
-        let deadline = ContinuousClock.now.advanced(by: Self.writeTimeout)
+        let deadline = clock.now().addingTimeInterval(Double(Self.writeTimeout.components.seconds))
         while offset < bytes.count {
             enum Step { case wrote(Int), wait(Int32), failed }
             let step: Step = state.withLock { state in
@@ -161,7 +164,7 @@ final class ControlConnection: Sendable {
             case .wrote(let count):
                 offset += count
             case .wait(let fd):
-                guard ContinuousClock.now < deadline else { return false }
+                guard clock.now() < deadline else { return false }
                 // Wakes when there is room, or when the descriptor is shut or closed under it; the next turn of the loop
                 // finds out which, with the lock.
                 var entry = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)

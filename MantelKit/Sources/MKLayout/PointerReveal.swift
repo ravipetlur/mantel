@@ -86,18 +86,23 @@ extension RevealEvent {
     }
 }
 
-/// How the two dots are drawn for what the reveal shows: each filled while its section is on the bar, outlined while it is put away.
+/// How the two dots are drawn for what the reveal shows: each filled while its section is on the bar, outlined while it is put away; and
+/// whether each is on the bar at all.
 public struct DotAppearance: Sendable, Equatable {
     /// • is filled while Hidden shows (a reveal of Hidden, or of everything).
     public let hiddenDotFilled: Bool
     /// •• is filled while Always Hidden shows.
     public let alwaysDotFilled: Bool
-    /// •• is on the bar only while something that is running is in Always Hidden.
+    /// • is on the bar unless both dots are hidden (`OwnItemsShown.hiddenDot`).
+    public let hiddenDotVisible: Bool
+    /// •• is on the bar when it is set to always, or something that is running is in Always Hidden, unless both are hidden
+    /// (`OwnItemsShown.alwaysDot`).
     public let alwaysDotVisible: Bool
 
-    public init(reveal: RevealState, alwaysHiddenHasApps: Bool) {
+    public init(reveal: RevealState, shown: OwnItemsShown) {
         hiddenDotFilled = reveal == .hiddenShown || reveal == .allShown
         alwaysDotFilled = reveal == .allShown
-        alwaysDotVisible = alwaysHiddenHasApps
+        hiddenDotVisible = shown.hiddenDot
+        alwaysDotVisible = shown.alwaysDot
     }
 }

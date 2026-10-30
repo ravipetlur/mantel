@@ -5,10 +5,11 @@ import MKCore
 /// What the probes read with `MenuBarReader` (every window MenuBarAgent has, every app's items) is put through the same choosing and
 /// matching the scanner uses, so that a probe and the product see one menu bar.
 extension MenuBarSnapshot {
-    /// The first window of each display, as the scanner would choose it.
+    /// The window of each display the scanner would use: of those whose slots were all read, the one with the most names of its own.
     func chosenWindows() -> [ChosenWindow] {
         let reads = agentWindows.enumerated().map { index, window in
-            AgentWindowRead(index: index, frame: window.frame, slotFrames: window.slots.map(\.frame))
+            AgentWindowRead(index: index, frame: window.frame, slotFrames: window.slots.map(\.frame),
+                            uniqueNameCount: AgentWindowReader.identifierCount(window.slots))
         }
         return AgentWindowChooser.choose(reads, layout: layout)
     }

@@ -21,8 +21,12 @@ public struct RoomCheck: Sendable, Equatable {
 public enum NoRoomAction: Sendable, Equatable {
     /// They fit, or there is nothing to do.
     case none
-    /// Leave them in the « menu, and log it (`NoRoomResponse.overflowLogLine`) if `logOnce` says nobody has yet.
+    /// Leave them in the « menu, and log it (`NoRoomResponse.overflowLogLine`) if `logOnce` says nobody has yet. What is left to do once
+    /// the menu bar was taken over and the icons still don't fit.
     case leaveOverflow(logOnce: Bool)
+    /// Show the revealed icons in the second bar instead, and put the menu bar back to what the sections say. Said of a reveal that was
+    /// shown inline and didn't fit: the prediction that it would (`RoomPrediction`) was wrong, and this corrects it.
+    case openSecondBar
     /// Conceal Shown apps, right-most first, to make room; this is the round that is about to be tried.
     case swap(round: Int)
     /// Stop trying. The text is for the log, it is never shown.
@@ -33,7 +37,7 @@ public enum NoRoomAction: Sendable, Equatable {
 
 /// Chooses what to do when revealed icons don't fit on the bar, by the person's no-room policy.
 public enum NoRoomResponse {
-    /// The log line for revealed icons that are left in the « menu.
+    /// The log line for revealed icons that are left in the « menu: what is said when the menu bar was taken over and they still don't fit.
     public static let overflowLogLine = "no room for the revealed icons; macOS's « menu keeps them"
     /// The log line for a swap that has tried as often as it may.
     public static let giveUpText = "Couldn't make room for every hidden icon."
@@ -45,7 +49,7 @@ public enum NoRoomResponse {
         guard !check.overflowedRevealedApps.isEmpty else { return .none }
         switch policy {
         case .secondBar:
-            return .leaveOverflow(logOnce: !alreadyLogged)
+            return .openSecondBar
         case .swap:
             return check.round < SwapCalculator.maximumRounds ? .swap(round: check.round) : .giveUp(giveUpText)
         case .hideAppMenus:

@@ -78,7 +78,7 @@ struct OnboardingView: View {
         case .location:
             if model.inputs.install == .translocated {
                 // It can't be moved, so the person drags it in by hand, and this copy has to be gone first.
-                NSApp.terminate(nil)
+                AppQuit.request()
             } else {
                 Task { await model.moveToApplications() }
             }

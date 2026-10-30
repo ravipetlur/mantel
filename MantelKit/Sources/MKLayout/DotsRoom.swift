@@ -41,6 +41,13 @@ public enum DotsRoom {
         }
     }
 
+    /// Whether the read has Mantel's dots on a bar: it lists them, and each has a slot on at least one bar. At the launch macOS hasn't
+    /// always placed them when the bar is first read; until a read has them, where a dot has no place says nothing yet.
+    public static func dotsArePlaced(in inventory: Inventory) -> Bool {
+        let dots = inventory.items.filter(\.isDot)
+        return !dots.isEmpty && dots.allSatisfy { !$0.frames.isEmpty }
+    }
+
     /// What a read says of the dots on each shown bar.
     public struct Verdict: Sendable, Equatable {
         /// The displays whose bar is shown and has a dot in its « menu, in the order of the bars.

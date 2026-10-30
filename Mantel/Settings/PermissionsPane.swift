@@ -1,7 +1,6 @@
 import AppKit
 import MKCore
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// One row for each permission Mantel may need: its name, why, where it stands, and a button to the place it is given.
 struct PermissionsPane: View {
@@ -53,32 +52,9 @@ struct PermissionsPane: View {
         }
     }
 
-    /// The person picks the file in an open panel that starts in its folder with its name selected, and Mantel keeps it.
+    /// The person picks the file in an open panel, and Mantel keeps it (`FileGrantPanel`).
     private func chooseFile(for kind: FileGrantKind) async {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let expected = ExpectedFile.expected(kind, home: home)
-        guard let path = expected.candidates.first else { return }
-
-        let panel = NSOpenPanel()
-        panel.directoryURL = URL(filePath: path).deletingLastPathComponent()
-        panel.nameFieldStringValue = expected.fileName
-        panel.allowedContentTypes = [.propertyList]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "Choose \(expected.fileName)"
-        panel.prompt = "Choose"
-        guard await panel.begin() == .OK, let url = panel.url else { return }
-
-        do {
-            _ = try await grants.grant(kind, chosen: url, home: home)
-            fileGranted()
-        } catch {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Couldn't use that file"
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
-        }
+        if await FileGrantPanel.choose(kind, grants: grants) { fileGranted() }
         await refresh()
     }
 }

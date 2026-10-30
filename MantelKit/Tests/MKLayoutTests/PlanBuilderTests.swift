@@ -27,9 +27,10 @@ private let wide = WideScreenInput(enabled: true, threshold: 3000, activeScreenW
 
 private func planInputs(running: [String], sections: SectionModel = oneInEachSection(), reveal: RevealLevel = .off, focus: Bool = false,
                     rules: [RuleEffect] = [], allowClock: Bool = false, screen: WideScreenInput = narrow,
-                    swap: Set<String> = []) -> PlanInputs {
+                    swap: Set<String> = [], icons: Set<ItemID> = [], iconRoom: Set<String> = []) -> PlanInputs {
     PlanInputs(ownBundleID: own, runningBundleIDs: running, sections: sections, reveal: reveal, focusMode: focus, rules: rules,
-               allowHidingClockAndControlCenter: allowClock, wideScreen: screen, swapConcealed: swap)
+               allowHidingClockAndControlCenter: allowClock, wideScreen: screen, swapConcealed: swap, iconReveals: icons,
+               iconRoomConcealed: iconRoom)
 }
 
 /// One pair of layers, set up so that both have something to say about one app, and what the higher of them makes of it.
@@ -349,5 +350,82 @@ struct PlanBuilderTests {
         #expect(PlanSource.reveal(.all).explanation == "Showing all icons")
         #expect(PlanSource.wideScreen.explanation == "This screen is wide, so everything shows")
         #expect(PlanSource.rules.explanation == "A rule is showing icons")
+        #expect(PlanSource.iconReveal.explanation == "Showing an icon you asked for")
+    }
+
+    // MARK: Icons asked for
+
+    @Test func iconRevealBeatsFocusMode() {
+        let plan = PlanBuilder.build(planInputs(running: [own, shownApp, hiddenApp, alwaysApp], focus: true,
+                                                icons: [ItemID(bundleID: alwaysApp, key: .index(0))]))
+        // Focus Mode conceals everything; the app of the icon that was asked for is shown all the same, and only that one.
+        #expect(plan.visibleBundleIDs == [own, alwaysApp])
+        #expect(plan.concealedBundleIDs == [shownApp, hiddenApp])
+        // Focus Mode is still the reason.
+        #expect(plan.source == .focusMode)
+    }
+
+    @Test func iconRevealShowsSystemModule() {
+        var sections = SectionModel()
+        sections.move(item: .system("wifi"), to: .alwaysHidden)
+        sections.move(item: .system("battery"), to: .hidden)
+        let hidden = PlanBuilder.build(planInputs(running: [own], sections: sections))
+        #expect(!hidden.visibleSystemItems.contains(6))
+
+        let plan = PlanBuilder.build(planInputs(running: [own], sections: sections, icons: [.system("wifi")]))
+        #expect(plan.visibleSystemItems.contains(6))
+        // The module that wasn't asked for stays hidden.
+        #expect(!plan.visibleSystemItems.contains(0))
+        // Also under Focus Mode, which keeps only the clock and Control Center.
+        let focus = PlanBuilder.build(planInputs(running: [own], sections: sections, focus: true, icons: [.system("wifi")]))
+        #expect(focus.visibleSystemItems.contains(6))
+        #expect(!focus.visibleSystemItems.contains(5))
+        // A system icon asked for names no app: the apps are as the sections have them.
+        sections.move(app: hiddenApp, to: .hidden)
+        #expect(PlanBuilder.build(planInputs(running: [own, hiddenApp], sections: sections, icons: [.system("wifi")])).concealedBundleIDs == [hiddenApp])
+    }
+
+    @Test func iconRoomConcealsOnlyDuringIconReveal() {
+        let running = [own, shownApp, hiddenApp]
+        let room: Set<String> = [shownApp]
+
+        // The room is made for an icon: with none asked for, it is left out.
+        let idle = PlanBuilder.build(planInputs(running: running, iconRoom: room))
+        #expect(idle.visibleBundleIDs == [own, shownApp])
+        #expect(idle.source == .sections)
+
+        let revealing = PlanBuilder.build(planInputs(running: running, icons: [ItemID(bundleID: hiddenApp, key: .index(0))], iconRoom: room))
+        #expect(revealing.visibleBundleIDs == [own, hiddenApp])
+        #expect(revealing.concealedBundleIDs == [shownApp])
+        #expect(revealing.source == .iconReveal)
+        // The room is made by concealing an app, not a section.
+        #expect(!revealing.concealedSections.contains(.shown))
+        // Nor can it conceal Mantel.
+        let ownRoom = PlanBuilder.build(planInputs(running: running, icons: [ItemID(bundleID: hiddenApp, key: .index(0))], iconRoom: [own]))
+        #expect(ownRoom.visibleBundleIDs.contains(own))
+    }
+
+    @Test func iconRoomNeverConcealsRevealedApp() {
+        // The app of the icon asked for is in the room that was made (it was Shown, and the person asked for it while it was concealed by
+        // an earlier ticket): it is shown.
+        let item = ItemID(bundleID: shownApp, key: .index(0))
+        let plan = PlanBuilder.build(planInputs(running: [own, shownApp, hiddenApp], icons: [item], iconRoom: [shownApp, hiddenApp]))
+        #expect(plan.visibleBundleIDs == [own, shownApp])
+        #expect(plan.concealedBundleIDs == [hiddenApp])
+    }
+
+    @Test func sourceIsIconRevealOnlyWhenTopmostApplying() {
+        let icon: Set<ItemID> = [ItemID(bundleID: hiddenApp, key: .index(0))]
+        let running = [own, shownApp, hiddenApp]
+        #expect(PlanBuilder.build(planInputs(running: running, icons: icon)).source == .iconReveal)
+        // Above a wide screen and rules.
+        #expect(PlanBuilder.build(planInputs(running: running, screen: wide, icons: icon)).source == .iconReveal)
+        #expect(PlanBuilder.build(planInputs(running: running, rules: [.show([hiddenApp])], icons: icon)).source == .iconReveal)
+        // Below a reveal and Focus Mode.
+        #expect(PlanBuilder.build(planInputs(running: running, reveal: .hidden, icons: icon)).source == .reveal(.hidden))
+        #expect(PlanBuilder.build(planInputs(running: running, focus: true, icons: icon)).source == .focusMode)
+        // Not at all when nothing was asked for.
+        #expect(PlanBuilder.build(planInputs(running: running, screen: wide)).source == .wideScreen)
+        #expect(PlanBuilder.build(planInputs(running: running)).source == .sections)
     }
 }

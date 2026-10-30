@@ -1,13 +1,16 @@
 import CoreGraphics
+import MKCore
 
 /// Why the plan is what it is: the highest of the layers that built it. Each layer overrides the ones below it; from the lowest:
-/// the person's sections, rules, a wide screen, a reveal, Focus Mode.
+/// the person's sections, rules, a wide screen, an icon the person asked for, a reveal, Focus Mode. (What the plan shows is another matter:
+/// an icon asked for is shown whatever Focus Mode says, but the reason the plan gives is the highest of these.)
 public enum PlanSource: Codable, Sendable, Equatable {
     case sections
     case focusMode
     case reveal(RevealLevel)
     case wideScreen
     case rules
+    case iconReveal
 
     /// The reason in words, for Diagnostics.
     public var explanation: String {
@@ -16,6 +19,7 @@ public enum PlanSource: Codable, Sendable, Equatable {
         case .focusMode: "Focus Mode is on"
         case .reveal(.hidden): "Showing hidden icons"
         case .reveal(.all): "Showing all icons"
+        case .iconReveal: "Showing an icon you asked for"
         case .wideScreen: "This screen is wide, so everything shows"
         case .rules: "A rule is showing icons"
         }
@@ -95,10 +99,15 @@ public struct PlanInputs: Sendable, Equatable {
     public var wideScreen: WideScreenInput
     /// The Shown apps that a swap conceals to make room while something is revealed.
     public var swapConcealed: Set<String>
+    /// The icons that something asked to have shown (one click, one look), wherever they are hidden. The top layer: they are shown whatever
+    /// Focus Mode says.
+    public var iconReveals: Set<ItemID>
+    /// The Shown apps that are concealed to make room for an icon in `iconReveals`. Concealed only while there is one.
+    public var iconRoomConcealed: Set<String>
 
     public init(ownBundleID: String, runningBundleIDs: [String], sections: SectionModel, reveal: RevealLevel, focusMode: Bool,
                 rules: [RuleEffect] = [], allowHidingClockAndControlCenter: Bool, wideScreen: WideScreenInput,
-                swapConcealed: Set<String> = []) {
+                swapConcealed: Set<String> = [], iconReveals: Set<ItemID> = [], iconRoomConcealed: Set<String> = []) {
         self.ownBundleID = ownBundleID
         self.runningBundleIDs = runningBundleIDs
         self.sections = sections
@@ -108,5 +117,7 @@ public struct PlanInputs: Sendable, Equatable {
         self.allowHidingClockAndControlCenter = allowHidingClockAndControlCenter
         self.wideScreen = wideScreen
         self.swapConcealed = swapConcealed
+        self.iconReveals = iconReveals
+        self.iconRoomConcealed = iconRoomConcealed
     }
 }

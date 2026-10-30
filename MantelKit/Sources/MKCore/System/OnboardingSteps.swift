@@ -51,7 +51,7 @@ public enum OnboardingCopy {
     public static func title(for step: OnboardingStep) -> String {
         switch step {
         case .welcome: "Welcome to Mantel"
-        case .accessibility: "Allow Accessibility"
+        case .accessibility: "Allow Device control and data access"
         case .location: "Move Mantel to Applications"
         case .dots: "The dots"
         case .done: "You're set"

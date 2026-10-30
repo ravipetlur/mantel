@@ -58,6 +58,60 @@ struct InventoryProbeTests {
         let report = await harness.run(.inventory)
         #expect(report.measurements["frontMenuFrames"] == .number(0))
     }
+
+    /// Mantel's slot is the first dot's, by what it is called for the accessibility tools.
+    private func dotSlot(_ harness: ProbeHarness) throws -> Int {
+        let slot = try #require(harness.slotOwners.first { $0.value == ownID }?.key)
+        harness.ax.setAttribute(AXName.description, .string(DotsCopy.hiddenDotDescription), on: slot)
+        return slot
+    }
+
+    @Test func ownFrameMatchesSlotPerDisplay() async throws {
+        // The dot's button is 26 wide in a slot that is 30 wide (x 3000), on the main display: the middle of the frame is in the slot.
+        let inside = CGRect(x: 3002, y: 2, width: 26, height: 27)
+        let harness = try ProbeHarness.make { platform in
+            platform.ownItemFrames = { [DotsCopy.hiddenDotName: inside] }
+        }
+        _ = try dotSlot(harness)
+
+        let report = await harness.run(.inventory)
+
+        #expect(report.errors.isEmpty)
+        #expect(report.measurements["ownItemFrames"] == .object([DotsCopy.hiddenDotName: NotchCoordinatesProbe.rect(inside)]))
+        let main = DisplayFixtures.deskMain.uuid
+        #expect(report.object("ownFrameMatchesSlot")?[main] == .object([DotsCopy.hiddenDotName: .bool(true)]))
+        // The portrait display has no bar in the harness: nothing is said of it.
+        #expect(report.object("ownFrameMatchesSlot")?[DisplayFixtures.deskPortrait.uuid] == nil)
+
+        // A frame somewhere else is not in the slot.
+        let elsewhere = try ProbeHarness.make { platform in
+            platform.ownItemFrames = { [DotsCopy.hiddenDotName: CGRect(x: 1500, y: 2, width: 26, height: 27)] }
+        }
+        _ = try dotSlot(elsewhere)
+        let apart = await elsewhere.run(.inventory)
+        #expect(apart.object("ownFrameMatchesSlot")?[main] == .object([DotsCopy.hiddenDotName: .bool(false)]))
+    }
+
+    @Test func anOwnItemWithNoSlotOnADisplayIsNull() async throws {
+        // The second dot isn't in the bar: there is no slot of it to be in.
+        let harness = try ProbeHarness.make { platform in
+            platform.ownItemFrames = {
+                [DotsCopy.hiddenDotName: CGRect(x: 3002, y: 2, width: 26, height: 27), DotsCopy.alwaysDotName: CGRect(x: 2000, y: 2, width: 26, height: 27)]
+            }
+        }
+        _ = try dotSlot(harness)
+        let report = await harness.run(.inventory)
+        let main = DisplayFixtures.deskMain.uuid
+        #expect(report.object("ownFrameMatchesSlot")?[main]
+                == .object([DotsCopy.hiddenDotName: .bool(true), DotsCopy.alwaysDotName: .null]))
+    }
+
+    @Test func withNoOwnItemsNothingIsRecordedOfThem() async throws {
+        let harness = try ProbeHarness.make()
+        let report = await harness.run(.inventory)
+        #expect(report.measurements["ownItemFrames"] == .object([:]))
+        #expect(report.object("ownFrameMatchesSlot")?[DisplayFixtures.deskMain.uuid] == .object([:]))
+    }
 }
 
 // MARK: Allowlist probes
@@ -461,7 +515,7 @@ struct ReadingProbeTests {
         let harness = try ProbeHarness.make()
         for app in ProbeHarness.runningApps { harness.ax.failReads(on: harness.ax.root(ofApp: app.pid), with: .notTrusted) }
         let report = await harness.run(.inventory)
-        #expect(report.notes.contains("Accessibility isn't granted to Mantel."))
+        #expect(report.notes.contains("Device control and data access isn't granted to Mantel."))
         #expect(report.number("agentWindowCount") == 0)
     }
 
@@ -1368,7 +1422,7 @@ struct ClickReplayProbeTests {
         let harness = try ProbeHarness.make(clicks: [click])
         harness.taps.failToStart()
         let report = await harness.run(.clickReplay)
-        #expect(report.errors.contains { $0.contains("Accessibility") })
+        #expect(report.errors.contains { $0.contains("Device control and data access") })
         #expect(harness.allowlist.live == 0)
         #expect(report.restored)
     }

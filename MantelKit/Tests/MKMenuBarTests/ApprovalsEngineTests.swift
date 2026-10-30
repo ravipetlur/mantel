@@ -62,7 +62,7 @@ private struct ApprovalsDesk: Sendable {
                              service: service, engine: engine, clock: clock)
     }
 
-    var identity: String { file.resolvingSymlinksInPath().path(percentEncoded: false) }
+    var identity: String { CanonicalPath.of(file) }
 
     /// The list as the file holds it now.
     func blob() throws -> Data {

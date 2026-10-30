@@ -26,5 +26,16 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © The Mantel Authors. Apache License 2.0.</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeIdentifier</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).layout-drag</string>
+		</dict>
+	</array>
 </dict>
 </plist>

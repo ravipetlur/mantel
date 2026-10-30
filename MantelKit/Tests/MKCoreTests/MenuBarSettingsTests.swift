@@ -105,6 +105,28 @@ struct MenuBarSettingsTests {
         #expect(HidingSettings.noLongerOfferedLine == "the saved hiding method is no longer offered; Mantel uses Automatic")
     }
 
+    @Test func aNoRoomChoiceFromANewerMantelDoesNotLoseTheRestOfTheFile() async throws {
+        let saved = try decode(HidingSettings.self, #"{"noRoomPolicy":"somethingNew","wideScreenThreshold":4200,"automaticOverflow":false}"#)
+        var expected = HidingSettings()
+        expected.wideScreenThreshold = 4200
+        expected.automaticOverflow = false
+        #expect(saved == expected, "the choice takes its default; everything else the file says is kept")
+        let whole = try decode(GeneralSettings.self, #"{"hiding":{"noRoomPolicy":"somethingNew","method":"systemSettingsSwitches"},"onboardingCompleted":true}"#)
+        #expect(whole.hiding.noRoomPolicy == .secondBar)
+        #expect(whole.hiding.method == .systemSettingsSwitches)
+        #expect(whole.onboardingCompleted)
+        #expect(try decode(HidingSettings.self, #"{"noRoomPolicy":"swap"}"#).noRoomPolicy == .swap, "a known choice is still read")
+    }
+
+    @Test func aHidingMethodFromANewerMantelDoesNotLoseTheRestOfTheFile() async throws {
+        let saved = try decode(HidingSettings.self, #"{"method":"somethingNew","noRoomPolicy":"swap","automaticOverflow":false}"#)
+        #expect(saved.method == .automatic, "the method takes its default")
+        #expect(saved.noRoomPolicy == .swap && !saved.automaticOverflow, "everything else the file says is kept")
+        let whole = try decode(GeneralSettings.self, #"{"hiding":{"method":"somethingNew"},"onboardingCompleted":true}"#)
+        #expect(whole.onboardingCompleted, "and the rest of the settings file is read")
+        #expect(try decode(HidingSettings.self, #"{"method":"systemSettingsSwitches"}"#).method == .systemSettingsSwitches)
+    }
+
     @Test func generalSettingsRoundTripWithNestedValues() async throws {
         var settings = GeneralSettings(onboardingCompleted: true, settingsPage: "advanced")
         settings.reveal = RevealSettings(hoverReveals: true, clickReveals: true, scrollReveals: true, hoverDelayMilliseconds: 800,

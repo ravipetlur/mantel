@@ -18,15 +18,55 @@ public struct MenuBarState: Sendable, Equatable {
     public let engine: EngineStatus
     /// Whether anything that is running is in Always Hidden: the •• dot is shown only then.
     public let alwaysHiddenHasApps: Bool
+    /// How wide each icon's slot was when it was last on the bar: what the second bar's cells and the layout editor's tokens are sized by.
+    public let widths: ItemWidthCache
+    /// The running apps whose icon macOS doesn't tie to them, so that the allowlist gives it no slot and hides it whenever anything is
+    /// hidden (`UnattachedIconTracker`).
+    public let unattachedApps: Set<String>
+    /// What the layout writer is doing and has done; nil until a writer is set (`setLayout`).
+    public let layout: LayoutStatus?
+    /// The menu bar was left stuck by a change of displays and restarting MenuBarAgent didn't put it right (`StuckBarWatch`).
+    public let stuckBarNotRecovered: Bool
+    /// The icons each running app had in its last whole read in this run. The sections can hold more records of an app than it has icons
+    /// (`SectionModel.staleRecords`): what lists icons shows these.
+    public let currentIDs: [String: Set<ItemID>]
 
     public init(inventory: Inventory, sections: SectionModel, lists: ReadOnlyLists, plan: VisibilityPlan, engine: EngineStatus,
-                alwaysHiddenHasApps: Bool) {
+                alwaysHiddenHasApps: Bool, widths: ItemWidthCache = ItemWidthCache(), unattachedApps: Set<String> = [],
+                layout: LayoutStatus? = nil, stuckBarNotRecovered: Bool = false, currentIDs: [String: Set<ItemID>] = [:]) {
         self.inventory = inventory
         self.sections = sections
         self.lists = lists
         self.plan = plan
         self.engine = engine
         self.alwaysHiddenHasApps = alwaysHiddenHasApps
+        self.widths = widths
+        self.unattachedApps = unattachedApps
+        self.layout = layout
+        self.stuckBarNotRecovered = stuckBarNotRecovered
+        self.currentIDs = currentIDs
+    }
+
+    /// The records the places that list icons leave out.
+    public var staleRecords: StaleRecords {
+        sections.staleRecords(current: currentIDs, listed: inventory.items.map(\.id))
+    }
+}
+
+/// What the session needs to restart MenuBarAgent by itself when a change of displays leaves the menu bar stuck (`StuckBarWatch`).
+public struct StuckBarRecovery: Sendable {
+    let restarter: any MenuBarAgentRestarting
+    let refusal: @Sendable () async -> String?
+    let activity: ResetActivity
+
+    /// - Parameters:
+    ///   - restarter: what Reset restarts MenuBarAgent with.
+    ///   - refusal: why the menu bar can't be restarted now, if it can't: a platform test is changing it (`ReplayNowPolicy.resetRefusal`).
+    ///   - activity: what the probes read, and what a Reset sets: only one of the two is under way at a time.
+    public init(restarter: any MenuBarAgentRestarting, refusal: @escaping @Sendable () async -> String?, activity: ResetActivity) {
+        self.restarter = restarter
+        self.refusal = refusal
+        self.activity = activity
     }
 }
 
@@ -34,13 +74,22 @@ public struct MenuBarState: Sendable, Equatable {
 public struct AppliedReveal: Sendable, Equatable {
     /// The state that was applied.
     public let state: RevealState
+    /// Where the revealed icons are shown: on the bar, or in the second bar (which leaves the bar as the sections make it).
+    public let presentation: RevealPresentation
     /// The number of changes of reveal the session had made when this one was applied. A later change makes this one stale.
     let generation: Int
 
-    init(state: RevealState, generation: Int) {
+    init(state: RevealState, presentation: RevealPresentation = .inline, generation: Int) {
         self.state = state
+        self.presentation = presentation
         self.generation = generation
     }
+}
+
+/// What `MenuBarSession.revealIcons` gives back: the icons that were asked for and the room made for them end with it
+/// (`endIconReveal`).
+public struct IconRevealTicket: Sendable, Hashable {
+    let id: Int
 }
 
 /// Turns what happens (apps start and quit, displays change, the person reveals, a menu bar is read) into a plan for the menu bar, and
@@ -60,10 +109,37 @@ public struct AppliedReveal: Sendable, Equatable {
 ///   for the revealed icons and for room, which takes seconds when the bar is slow. A caller that has to apply changes in order does
 ///   the first one by one and starts each follow-up on a task of its own, so a follow-up never holds up the next change; a newer
 ///   change makes an older follow-up stop (it is stale), and nothing is ever cancelled for that. `setReveal` is the two together.
+/// - **A reveal is shown inline or in the second bar** (`RevealPresentation`). In the second bar the menu bar itself keeps what the
+///   sections say: the plan is built with nothing revealed, and the session still holds the reveal state (for the dots, the machine and
+///   the apps that are revealed). Reads taken then are judged as a collapsed bar's are. Its follow-up looks for nothing. An inline reveal
+///   that turns out not to fit is answered with `NoRoomAction.openSecondBar`, which corrects the prediction (`predictedFits(_:)`).
 /// - **Refresh, reset and auto-refresh** are in `refresh()`, `reset(restarter:replayJournal:)` and `scan`: a refresh applies the plan
 ///   again whether or not it is the one that was applied, a reset takes everything down and restarts the menu bar's process, and the
-///   session refreshes by itself (once, and logged) when the agent hasn't answered three reads in a row or a display change left a bar
-///   empty (`AutoRefreshPolicy`).
+///   session refreshes by itself (each time logged) when the agent hasn't answered three reads in a row, at most four times in an
+///   outage and each after a longer wait, or when a display change left a bar empty (`AutoRefreshPolicy`). It doesn't while the displays
+///   are asleep, the screen is locked or another user's session is on screen (`SessionState`); a refresh that is asked for is never held.
+/// - **An icon macOS doesn't tie to its app** gets no slot while the allowlist is live. Every read goes to `UnattachedIconTracker`, which
+///   flags a running Shown app whose icon has none in two reads 10 seconds apart, with an assertion live through both and the rest of the bar
+///   drawn (`UnattachedIcons`); Automatic then uses the System Settings switches while such an app is in Shown. A bar that is stuck
+///   after a lid cycle looks the same, so a read of one, a change of displays and a wake each start every run again, and an app that
+///   had a slot before a change isn't flagged until it has one again or is started again. A manual refresh and a reset forget the flags,
+///   an auto-refresh doesn't.
+/// - **A bar a change of displays left stuck** (`StuckBarWatch`): two or more apps, or one of Mantel's own items, that had a slot in the
+///   last read before a change (a slot, or out of the way behind the notch: `StuckBar.appsPlaced`) and have none after it, with room for
+///   them, on two reads at least 5 seconds apart and 10 seconds or more after the change, have MenuBarAgent restarted, once for that
+///   change and 3 times an hour at most; never while a reset, a platform test, a layout write, quitting, the lock screen or sleep is in
+///   the way. One app alone with Mantel's dots drawn is never restarted by itself: a read can't tell it from an app that is switched off
+///   in System Settings, and the person's Reset covers it. It is a reset's restart (`runReset`) without the hiding being taken down or
+///   the journal replayed: the person's hiding and layout stay. An app that had no slot in the last read before the change, one that is
+///   flagged or one that is turned off in System Settings is never a reason (the list is read again just before; Mantel's own items
+///   aren't looked at while Mantel is turned off), and when what is left after that isn't the shape, nothing is decided again until the
+///   next change. The tracker forgets what it knew as on a reset, and the flags are held back until a read finds the bar whole. A
+///   restart that didn't help is said in the log once and in Diagnostics, and no other is made until the bar is seen whole or a reset is
+///   done.
+/// - **The layout** (`MenuBarSession+Layout.swift`): the person's changes ask `LayoutApplier` to write macOS's order table, which runs on a
+///   task of its own. The session is pending from before it asks until the applier says verification is over, and settling from the write
+///   until then (`setLayoutPhase`): a read taken then follows nothing (a drop waits to be written), judges nothing, and no picture is taken.
+///   Every other read follows the order macOS shows, and what the follower finds is never written back.
 /// - **Quitting** (`tearDownForQuit()`) ends reads and plans for good, and takes the engine down within a bound.
 public actor MenuBarSession {
     /// How often the bar is looked at while a reveal is being confirmed. Each look reads one window of MenuBarAgent's.
@@ -74,8 +150,10 @@ public actor MenuBarSession {
     /// The most that taking the engine down at quit waits for: a teardown can queue behind a plan an engine is still applying (a
     /// preferences service that disagrees costs seconds), and the app can't wait for that.
     static let quitTeardownLimit: Duration = .milliseconds(1500)
+    /// The most that writing a change of the order that is still in its debounce waits for at quit: it must fit in the quit timer.
+    static let quitLayoutLimit: Duration = .milliseconds(500)
     static let quitStillBusyLogLine = "the hiding method was still busy at quit; macOS releases its hold shortly after Mantel quits"
-    static let couldNotLookLogLine = "the reveal couldn't be confirmed on the bar (Accessibility, MenuBarAgent or its window didn't answer); going on"
+    static let couldNotLookLogLine = "the reveal couldn't be confirmed on the bar (Device control and data access, MenuBarAgent or its window didn't answer); going on"
 
     /// What the log says when a reveal isn't seen on the bar within the wait: how many icons were there of how many there should be.
     /// Counts only: nothing here names an app.
@@ -83,23 +161,26 @@ public actor MenuBarSession {
         "the reveal wasn't seen on the bar within the wait (\(drawn) of \(expected) icons on the main bar); going on"
     }
 
-    private let scanner: MenuBarScanner
+    let scanner: MenuBarScanner
     private let hiding: HidingController
-    private let runningApps: @Sendable () -> [RunningApp]
+    let runningApps: @Sendable () -> [RunningApp]
     private let loadSections: @Sendable () async -> SectionModel
     private let saveSections: @Sendable (SectionModel) async -> Void
     private let turnedOff: @Sendable () async -> TurnedOffList
-    private let ownBundleID: String
-    private let clock: any Clock
-    private let confirmationWait: Duration
+    let ownBundleID: String
+    let clock: any Clock
+    let confirmationWait: Duration
     /// The windows on screen, which say whether a display's bar is shown (`BarVisibility`). Read only when a read of the menu bar has a «.
-    private let windows: any WindowListReading
+    let windows: any WindowListReading
 
     private var settings: HidingSettings
     /// Where everything is. (Readable by the tests of the session.)
     private(set) var sections = SectionModel()
-    private var inventory = Inventory.empty
-    private var widths = ItemWidthCache()
+    private(set) var inventory = Inventory.empty
+    /// The apps the scanner was told not to believe the places of when `inventory` was read (`appsNotDrawn()` then): it was read under
+    /// that plan, whatever the plan in force is by now.
+    private(set) var concealedAtRead: Set<String> = []
+    private(set) var widths = ItemWidthCache()
     /// How many slots the bar should draw, learned from the reads (what a reveal is looked for by).
     private var expectation = BarExpectation()
     private var tracker = AutoOverflowTracker()
@@ -115,15 +196,41 @@ public actor MenuBarSession {
     /// what it was is no sign of how the trial went (`OverflowInputs.overflowedApps(in:ignoringUnchangedPlaces:)`). Cleared when the
     /// displays change.
     private var placesBeforeTrials: [ItemID: [String: CGRect]] = [:]
-    private var turnedOffList: TurnedOffList = .apps([])
+    private(set) var turnedOffList: TurnedOffList = .apps([])
+    /// Which running Shown apps have an icon macOS doesn't tie to the app (`UnattachedIcons`). An app that hides its own icon lists none,
+    /// so a sighting is needed only while the list of the apps macOS has turned off can't be read. (Readable by the tests of the session.)
+    private(set) var unattached = UnattachedIconTracker(sighting: .whileTurnedOffIsUnknown)
+    /// The apps the engine chooser was last told have such an icon and are in Shown (`UnattachedIconTracker.forAutomatic`).
+    private var toldAutomatic: Set<String> = []
+    /// When the displays last changed: a read that began before it is of a bar that is being made again.
+    private(set) var lastDisplayChangeAt: Date?
+    /// Whether a bar that a change of displays left stuck is restarted, and why it hasn't been put right (`StuckBarWatch`).
+    private(set) var stuckWatch = StuckBarWatch()
+    /// What restarts MenuBarAgent for a stuck bar; nil restarts nothing.
+    private var stuckRecovery: StuckBarRecovery?
+    /// A recovery of a stuck bar has begun and isn't over: a second one isn't begun.
+    private(set) var recoveryUnderWay = false
+    /// How many recoveries of a stuck bar the watch has decided on, begun or not. (Readable by the tests of the session.)
+    private(set) var stuckRecoveriesDecided = 0
+    /// Bumped by a change of displays, a wake and a reset: a recovery decided before one is of a bar that was made again since.
+    private var stuckBarStamp = 0
     /// How icons are hidden and why, as of the last time the engines were asked or switched.
     private var lastStatus: EngineStatus?
 
-    private var revealState: RevealState = .collapsed
+    var revealState: RevealState = .collapsed
+    /// Whether the reveal that is in force is shown in the second bar and not on the menu bar. Always `.inline` while nothing is revealed.
+    var revealPresentation: RevealPresentation = .inline
     /// Bumped by every `applyReveal` and `collapseReveal`, so that a follow-up that is under way knows it has been overtaken.
-    private var revealGeneration = 0
+    var revealGeneration = 0
     /// The Shown apps that are concealed to make room for a reveal. Cleared by every `applyReveal` and `collapseReveal`: a swap lasts as long as its reveal.
-    private var swapConcealed: Set<String> = []
+    var swapConcealed: Set<String> = []
+
+    // Icons asked for (`MenuBarSession+Icons.swift`).
+    /// The icons each ticket asked to have shown, by the ticket's number. A ticket ends with `endIconReveal`, a reset or the quit.
+    var iconTickets: [Int: Set<ItemID>] = [:]
+    /// The Shown apps concealed to make room for each ticket's icons, by the ticket's number: they come back when the ticket ends.
+    var iconRoomByTicket: [Int: Set<String>] = [:]
+    var nextIconTicket = 0
     private var alreadyLogged = false
     /// Whether the log has said, during this run, that the bar couldn't be looked at to confirm a reveal.
     private var couldNotLookLogged = false
@@ -143,40 +250,184 @@ public actor MenuBarSession {
     /// that comes in the middle of one shows a bar in transition.
     private var switchesUnderway = 0
 
+    // Which icons an app has (`MenuBarSession+Records.swift`).
+    /// What tells which apps a read names the icons of for certain.
+    var wholeReads = WholeReads()
+    /// The icons of each running app's last whole read in this run: its other records in the sections are of icons that aren't there now.
+    /// An app that quits has none.
+    var currentIDs: [String: Set<ItemID>] = [:]
+    /// What the app does with the settings of the icons whose records a check of an app's saved icons took out: it is asked once for
+    /// each app, and says what it moved and left. Set when the session is made.
+    let recordsChecked: @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved
+    /// The task that moves those settings and says so in the log; the session doesn't wait on it. The next one starts when it is done, so
+    /// that the moves are made in the order the checks were.
+    var settingsMoves: Task<Void, Never>?
+
     private var scheduler: ScanScheduler?
     private var periodicTask: Task<Void, Never>?
-    private var isStarted = false
+    private(set) var isStarted = false
+    /// Whether `start()` is still reading the menu bar for the first time: the reads it makes are the launch's, taken before macOS has
+    /// placed Mantel's own icons (the dots).
+    private(set) var isReadingAtLaunch = false
+    /// When `start()` began, and whether a read has had Mantel's dots on a bar since (`DotsRoom.dotsArePlaced`): until one has, or
+    /// `dotsPlacementWait` has gone by, where a dot has no place isn't said in the log (`dotsHaveHadTheirPlaces`).
+    private var launchBeganAt: Date?
+    private var dotsHavePlaced = false
+    /// How long after the launch a dot that macOS hasn't placed is said to have no place all the same: it may never be placed.
+    static let dotsPlacementWait: Duration = .seconds(60)
+
+    // Capturing the icons (`MenuBarSession+Capture.swift`).
+    /// What takes the pictures of the icons at the moments that call for them; nil takes none.
+    var imageCollector: ItemImageCollector?
+    /// Whether the launch's capture has been made: it is made once, by the first read that has a bar.
+    var launchCaptureDone = false
+    /// Whether a recapture is under way: a second one is turned away.
+    var isRecapturing = false
+    /// Whether the log has said that the recording indicator is ignored for a while after a capture.
+    var indicatorQuietLogged = false
+    /// How many times a capture that is taken from a read of its own is taken when the bar changes under it (`captureForSettings`).
+    var captureTries = 3
+    /// How long a plan is given to be drawn after the engines have applied it, before a capture reads the bar: the platform check found the
+    /// apps a plan asks for drawn within 452 ms (`ClickRouteRules.drawnWait`), so this is a little more.
+    var barDrawnWait: Duration = .milliseconds(500)
+    /// Bumped whenever the bar is changed (a plan is handed to the engines and when they are done with it, the engine is switched, a
+    /// reset or the quit takes the engines down). A read, and the pictures taken from it, are of the bar as it was when this was what
+    /// it is now (`TakenRead`): a picture isn't kept when it has moved since.
+    var barChanges = 0
+    /// What the last of those was, in words for the log (`noteBarChange`): what a check that found the count moved says Mantel did.
+    private(set) var lastBarChange = "nothing"
+    /// The apps the plan before the one in force concealed, when the two differ: they have just been drawn again, and don't say which
+    /// display is active.
+    var concealedBeforeThePlan: Set<String> = []
+    /// The captures that run on a task of their own, by number; each takes itself out when it is done.
+    var captureTasks: [Int: Task<Void, Never>] = [:]
+    var nextCaptureTask = 0
+
+    // The layout writer (`MenuBarSession+Layout.swift`).
+    /// What writes macOS's order table; nil leaves the order to the person's ⌘-drags and writes nothing.
+    var layoutApplier: LayoutApplier?
+    var layoutRules = LayoutRules.unmeasured
+    var layoutSettings = LayoutSettings()
+    var layoutDots = DotSettings()
+    /// The applier says a write is pending and its verification isn't over: nothing follows the table or the bar.
+    var layoutPending = false
+    /// How many requests the session has begun and the applier hasn't taken yet: the session is pending from before it asks.
+    var layoutRequestsInFlight = 0
+    /// The revision of the last request the applier took (`LayoutApplier.request` answers it), and the newest revision its phase
+    /// callbacks have told: a request newer than the phase told keeps the session pending, whatever order the two arrive in.
+    var layoutRequestedRevision = 0
+    var layoutPhaseRevision = 0
+    /// What a request was for when it wasn't sent because the layout file can't be written (not granted, or reordering is off), or the
+    /// last read had no bars: it is sent again, with the arrangement as it is then, when that changes, or with the next read that has bars.
+    var layoutDeferredCause: LayoutChangeCause?
+    /// A ⌘-drag's follow was refused because a write was pending or settling: it is taken when that ends.
+    var layoutFollowWaits = false
+    /// The bar is being re-sorted by a write or a restore: nothing is judged or captured.
+    var layoutSettling = false
+    /// The keys the resolver matched by distance, for the next resolution: the report of each write brings the new ones back.
+    var layoutMemory: [ItemID: String] = [:]
+    /// The items no key was found for at the last resolution: what the lists show as not reorderable.
+    var layoutUnresolved: [ItemID] = []
+    var layoutStatus: LayoutStatus?
+    var layoutStatusTask: Task<Void, Never>?
+    /// The order macOS showed when the ⌘-drag began: what the read that follows the drag compares with.
+    var dragBefore: ObservedOrder?
+    /// How the follow of the ⌘-drag that is being followed went, as `followedSections` found it; nil until a read has been judged.
+    var dragFollow: CommandDragLog.Follow?
+    /// The ⌘-drag whose follow is under way or waiting. For the line that says how the follow ended.
+    var dragDrop: DragDrop?
+    /// How many ⌘-drags have ended: each is told apart from the next by it (`DragDrop.number`).
+    var dragsEnded = 0
+
+    struct DragDrop: Equatable {
+        /// Which drag it is: a follow a write deferred ends by this, and writes its line only if the drag is still the one it was taken for.
+        let number: Int
+        /// When the mouse went up, as the monitor saw it (or, with no mouse-up seen, when the drag was taken as ended).
+        let dropped: Date
+        /// When the session began the follow's wait.
+        let begun: Date
+        let end: CommandDragLog.End
+    }
+    /// Which reads are whole enough for the order to be followed from them, and whether the last one that would have been followed wasn't.
+    var followTrust = FollowTrust()
+    /// The order table as it was last read, and when: it is read at most every two seconds.
+    var tableRead: (at: Date, table: LayoutTableSnapshot)?
+    /// The report of the last write the session has taken in.
+    var lastTakenReport: LayoutWriteReport?
 
     /// Whether a reset is under way. Set before the reset awaits anything, so that a second one finds it set.
-    private var resetting = false
+    private(set) var resetting = false
     /// Set when quitting begins: no plan is applied and nothing is read from then on.
-    private var isQuitting = false
+    private(set) var isQuitting = false
     private var autoRefresh = AutoRefreshPolicy()
     /// The displays, as the session was last told they are (`displaysChanged`).
     private var knownDisplays: Set<String> = []
-    /// The displays that had a bar, or slots, in the last read the agent answered: only a display that had one can be left with none.
+    /// The displays that had a bar, or slots, in the last read the agent answered while refreshing wasn't held back: only a display that
+    /// had one can be left with none.
     private var displaysWithABar: Set<String> = []
 
+    // What holds auto-refresh back while nobody is looking at the menu bar (the displays asleep, the screen locked, another user's session
+    // on screen).
+    /// Where the state of the session comes from.
+    private let sessionState: any SessionStateSource
+    /// The state of the session as the session was last told. Auto-refresh is held back unless it is awake. (Readable by the tests of the
+    /// session.)
+    private(set) var sessionNow: SessionState = .awake
+    /// What passes the changes of `sessionState` on to `sessionChanged`. Ended by quitting.
+    private var sessionTask: Task<Void, Never>?
+    /// What the log has said about auto-refresh, the last hundred lines: each refresh, and the state of the session going from awake to
+    /// held back and back. (Readable by the tests of the session.)
+    private(set) var autoRefreshLogLines: [String] = []
+
     // The plan that is applied, and the one that is asked for.
-    private var currentPlan: VisibilityPlan?
+    private(set) var currentPlan: VisibilityPlan?
     /// The plan that was asked for last. (Readable by the tests of the session.)
     private(set) var lastSubmitted: VisibilityPlan?
     private var pendingApply: (plan: VisibilityPlan, force: Bool)?
     private var isApplying = false
     private var applyWaiters: [CheckedContinuation<Void, Never>] = []
 
+    /// A read, and how many times the bar had been changed (`barChanges`) when it began.
+    struct TakenRead {
+        let inventory: Inventory
+        let barChanges: Int
+        /// The apps the scanner was told not to believe the places of when it read.
+        var concealed: Set<String> = []
+        /// The process MenuBarAgent had when the read began; nil when it wasn't known. A bar that MenuBarAgent has drawn again since isn't
+        /// the one the read was of (`isStillCurrent`).
+        var agentPID: pid_t?
+        /// The order of the icons wasn't followed from this read because it was empty or partial (`FollowTrust`): a drag's follow reads
+        /// again. It is the verdict of this read, and not of the one that came last.
+        var followNeedsAnotherRead = false
+    }
+
     // Reads that someone waits for.
     private struct ScanTicket {
         /// The read that answers is one that began at this moment or later.
         let since: Date
-        var result: Inventory?
+        /// When set, only a read taken for this reason answers (a ⌘-drag's follow: a scan whose reasons were fixed before it was asked for
+        /// can't).
+        var needs: ScanScheduler.Reason?
+        var result: TakenRead?
         var isDone = false
-        var continuation: CheckedContinuation<Inventory?, Never>?
+        var continuation: CheckedContinuation<TakenRead?, Never>?
     }
     private var tickets: [Int: ScanTicket] = [:]
     private var nextTicketID = 0
+    /// How many reads someone is waiting for. For tests.
+    var readsWaitedFor: Int { tickets.count }
     /// How many reads have been through `ingest`. For tests.
     private(set) var scansIngested = 0
+    /// How long the last read took, retries included, on the session's clock: what the checks that follow a read (a strip's) take about as
+    /// long as (`CaptureRules.launchBudget(forShownBars:readTook:)`).
+    private(set) var lastReadTook: TimeInterval = 0
+    /// How many refreshes the auto-refresh policy has started: counted when a read is taken in, so a test that has seen the read knows.
+    /// For tests.
+    private(set) var autoRefreshesStarted = 0
+    /// Whether `start` has set the bar's polling and the minute's check for room going: both are set in the same stretch as the call
+    /// that starts them, so a test that has seen `start` return knows. For tests.
+    var isPollingTheBar: Bool { get async { await scheduler?.isPolling ?? false } }
+    var checksForRoomEveryMinute: Bool { periodicTask != nil }
 
     // What is published.
     private var subscribers: [Int: AsyncStream<MenuBarState>.Continuation] = [:]
@@ -195,12 +446,17 @@ public actor MenuBarSession {
     ///   - confirmationWait: how long a reveal is looked for on the bar before the session goes on without having seen it, as the
     ///     clock measures it (the time a look takes counts). Seeing it is only advisory: a look at the bar can miss a change that did
     ///     happen, and never fails anything.
+    ///   - sessionState: whether the displays are asleep, the screen is locked or another user's session is on screen, which hold
+    ///     auto-refresh back. Steady (always awake) unless the app gives the system's.
+    ///   - recordsChecked: what moves the settings (shortcuts, names) of the icons whose records the check of an app's saved icons took
+    ///     out. It moves nothing unless the app gives it.
     public init(scanner: MenuBarScanner, hiding: HidingController, runningApps: @escaping @Sendable () -> [RunningApp],
                 loadSections: @escaping @Sendable () async -> SectionModel,
                 saveSections: @escaping @Sendable (SectionModel) async -> Void,
                 turnedOff: @escaping @Sendable () async -> TurnedOffList,
                 settings: HidingSettings, ownBundleID: String, clock: any Clock, windows: any WindowListReading,
-                confirmationWait: Duration = .seconds(2)) {
+                confirmationWait: Duration = .seconds(2), sessionState: any SessionStateSource = SteadySessionState(),
+                recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved = { _, _ in SettingsMoved() }) {
         self.scanner = scanner
         self.hiding = hiding
         self.runningApps = runningApps
@@ -212,10 +468,13 @@ public actor MenuBarSession {
         self.clock = clock
         self.windows = windows
         self.confirmationWait = confirmationWait
+        self.sessionState = sessionState
+        self.recordsChecked = recordsChecked
     }
 
     deinit {
         periodicTask?.cancel()
+        sessionTask?.cancel()
         if let scheduler { Task { await scheduler.stop() } }
         for continuation in subscribers.values { continuation.finish() }
     }
@@ -232,11 +491,14 @@ public actor MenuBarSession {
     public func start() async {
         guard !isStarted else { return }
         isStarted = true
+        isReadingAtLaunch = true
+        launchBeganAt = clock.now()
+        startWatchingTheSession()
         knownLayout = await scanner.currentLayout()
         sections = await loadSections()
         revealState = .collapsed
         await chooseEngine()
-        turnedOffList = await turnedOff()
+        await readTurnedOffList()
 
         let scheduler = ScanScheduler(clock: clock) { [weak self] reasons in
             await self?.scan(reasons)
@@ -249,6 +511,7 @@ public actor MenuBarSession {
         // The first read was taken with everything on the bar, the Hidden apps among it, so it judged nothing: apps that are Shown may
         // have been pushed out of the bar by icons that are about to be hidden. The bar is read again, collapsed, and judged at once.
         _ = await requestScan(.refresh)
+        isReadingAtLaunch = false
         // Quitting that began while the session was starting has stopped the reads: they are not started again (`start()` of the scheduler
         // would), nor is the minute's check for room.
         guard !isQuitting else { return }
@@ -304,6 +567,9 @@ public actor MenuBarSession {
         // What was seen before the change, and the front app's menus (they are where they were), are of the displays as they were: the
         // read taken for the change is marked without menus, and counts for nothing towards the reads in a row.
         tracker.displaysAreChanging()
+        unattached.displaysAreChanging()
+        lastDisplayChangeAt = clock.now()
+        stuckBarChangeHappened()
         frontMenuFrames = []
         _ = await requestScan(.displaysChanged)
         // What is known of the front app's menus is where they were. (The front app is asked about after the read: another may have come
@@ -337,25 +603,78 @@ public actor MenuBarSession {
         if frontPID == pid { frontMenuFrames = frames }
     }
 
+    // MARK: While nobody is looking
+
+    /// Takes the state of the session, says in the log that auto-refresh is held back if it is, and has the changes that come passed on
+    /// to `sessionChanged`. The changes are asked for before the state, so that none falls between the two.
+    private func startWatchingTheSession() {
+        guard !isQuitting else { return }
+        let changes = sessionState.changes()
+        sessionNow = sessionState.current()
+        if let reason = sessionNow.pauseReason { sayAboutAutoRefresh("auto-refresh paused: \(reason)") }
+        sessionTask = Task { [weak self] in
+            for await change in changes {
+                await self?.sessionChanged(change)
+            }
+        }
+    }
+
+    /// The displays went to sleep or woke, the screen was locked or unlocked, this user's session left the screen or came back, or the
+    /// Mac woke.
+    ///
+    /// - The log says once when auto-refresh goes from running to held back, and once when it goes back: never for a change that leaves it
+    ///   as it was (the screen locks while the displays are asleep).
+    /// - What auto-refresh has counted starts over (`AutoRefreshPolicy.woke`) when the Mac wakes, and when it goes from held back to
+    ///   running (the screen unlocked, this session on screen again, the displays on): whichever of the notifications comes first, and
+    ///   whether or not the others come at all.
+    ///
+    /// Nothing is read or refreshed because of it: the reads go on as they were, and the next one is judged.
+    public func sessionChanged(_ change: SessionChange) async {
+        guard !isQuitting else { return }
+        let before = sessionNow
+        sessionNow = before.applying(change)
+        if before.isAwake != sessionNow.isAwake {
+            sayAboutAutoRefresh(sessionNow.pauseReason.map { "auto-refresh paused: \($0)" } ?? "auto-refresh resumed")
+        }
+        if change == .systemWoke || (!before.isAwake && sessionNow.isAwake) {
+            autoRefresh.woke()
+            // A run of reads can't span a sleep or the lock screen: the bar may be made again as it wakes.
+            unattached.displaysAreChanging()
+            stuckBarChangeHappened()
+        }
+    }
+
+    /// Writes a line about auto-refresh in the log, and keeps it for the tests of the session.
+    private func sayAboutAutoRefresh(_ line: String) {
+        Log.info("session", line)
+        autoRefreshLogLines.append(line)
+        if autoRefreshLogLines.count > 100 { autoRefreshLogLines.removeFirst(autoRefreshLogLines.count - 100) }
+    }
+
     // MARK: Revealing
 
     /// Shows what the state shows, or hides it again, and says what is left to do about icons that have no room: `applyReveal`, then
     /// `followUp`.
-    public func setReveal(_ state: RevealState) async -> NoRoomAction {
-        await followUp(applyReveal(state))
+    public func setReveal(_ state: RevealState, presentation: RevealPresentation = .inline) async -> NoRoomAction {
+        await followUp(applyReveal(state, presentation: presentation))
     }
 
     /// Puts the plan for the state on the bar and returns, whatever the state is. It does nothing else: nothing is looked for and
     /// nothing is read, so this takes as long as the engines do, and a change that comes after it can be applied at once.
     ///
+    /// With `.secondBar` the plan is the one for nothing revealed: the icons are shown in the second bar, and the menu bar is left as
+    /// the sections make it. The state is kept all the same (the dots, the machine and the apps that are revealed go by it). A state
+    /// that reveals nothing (a collapse, Focus Mode) has no second bar, and is applied as it always is.
+    ///
     /// It ends any follow-up that is under way for an earlier change: that one is stale from here on.
-    public func applyReveal(_ state: RevealState) async -> AppliedReveal {
+    public func applyReveal(_ state: RevealState, presentation: RevealPresentation = .inline) async -> AppliedReveal {
         revealGeneration += 1
         let generation = revealGeneration
         revealState = state
+        revealPresentation = state.level == .off ? .inline : presentation
         swapConcealed = []
         await rebuildAndApply()
-        return AppliedReveal(state: state, generation: generation)
+        return AppliedReveal(state: state, presentation: revealPresentation, generation: generation)
     }
 
     /// What follows a reveal that was applied: the bar is looked at every 250 ms until it has a place for every revealed icon, or the
@@ -365,40 +684,52 @@ public actor MenuBarSession {
     /// Shown apps, right-most first, and reads again, up to three times (`SwapCalculator.maximumRounds`); what is left for the app comes
     /// back as the answer, which is never `.swap`.
     ///
+    /// When the look saw the revealed icons on the bar, the pictures of them are taken (`captureRevealed`), on a task of its own, from the
+    /// read after which no more room is made.
+    ///
     /// A follow-up that is overtaken by a newer change of reveal stops, wherever it is, and answers `.none`. A collapse has nothing to
-    /// follow up.
+    /// follow up, and neither has a reveal that is shown in the second bar: the menu bar isn't asked to hold the icons, so nothing is
+    /// looked for. An inline reveal that finds icons without room answers `.openSecondBar` when that is the person's choice (the
+    /// prediction that they would fit was wrong).
     public func followUp(_ applied: AppliedReveal) async -> NoRoomAction {
         let generation = applied.generation
-        guard generation == revealGeneration, !isQuitting else { return .none }
+        guard generation == revealGeneration, !isQuitting, applied.presentation == .inline else { return .none }
 
         let revealed = revealedApps()
         guard !revealed.isEmpty else { return .none }
-        await confirmReveal(generation: generation)
-        return await settleRoom(for: revealed, generation: generation, menuBarTakenOver: false)
+        let verdict = await confirmReveal(generation: generation)
+        return await settleRoom(for: revealed, generation: generation, menuBarTakenOver: false, capturing: verdict == .seen)
     }
 
     /// The app has made room itself (it took the menu bar over): the menu bar is read, and what is left to do is answered as at the end of
     /// `setReveal`, knowing that it has. (Should the policy be to swap, the swap is made here too: the answer is never `.swap`.)
     public func recheckRoom(menuBarTakenOver: Bool) async -> NoRoomAction {
         let revealed = revealedApps()
-        guard !revealed.isEmpty else { return .none }
+        guard !revealed.isEmpty, revealPresentation == .inline else { return .none }
         return await settleRoom(for: revealed, generation: revealGeneration, menuBarTakenOver: menuBarTakenOver)
     }
 
     /// Reads the bar and answers what is left to do about the revealed apps that have no room, making room itself where the policy is
     /// to swap: Shown apps are concealed, the bar is read again, and so on up to the most rounds there are. Stops, answering `.none`,
     /// when another reveal has overtaken this one.
-    private func settleRoom(for revealed: Set<String>, generation: Int, menuBarTakenOver: Bool) async -> NoRoomAction {
+    private func settleRoom(for revealed: Set<String>, generation: Int, menuBarTakenOver: Bool, capturing: Bool = false) async -> NoRoomAction {
         var round = 0
         while generation == revealGeneration {
-            guard let read = await requestScan(.reveal), generation == revealGeneration else { return .none }
+            guard let taken = await requestRead(.reveal), generation == revealGeneration else { return .none }
+            let read = taken.inventory
             let check = roomCheck(revealed: revealed, in: read, round: round)
             let action = decide(check, menuBarTakenOver: menuBarTakenOver)
-            guard case .swap = action else { return action }
+            // The pictures are of the read after which no more room is made: before that the icons are still moving. Where the swap
+            // made room, it is the last round's.
+            guard case .swap = action else {
+                if capturing { startCapturingRevealed(revealed, taken: taken, generation: generation) }
+                return action
+            }
 
             let concealed = appsToConceal(forRevealed: check.overflowedRevealedApps, in: read)
             guard !concealed.subtracting(swapConcealed).isEmpty else {
                 // Every Shown app there is has been tried: nothing more can be made.
+                if capturing { startCapturingRevealed(revealed, taken: taken, generation: generation) }
                 Log.warning("session", NoRoomResponse.giveUpText)
                 return .giveUp(NoRoomResponse.giveUpText)
             }
@@ -410,8 +741,13 @@ public actor MenuBarSession {
     }
 
     /// The apps that a reveal brings onto the bar: running apps whose icons are in a section the state shows, and aren't Shown anyway.
+    /// (Grouped apps are in Always Hidden, so only a reveal of everything shows them.)
     private func revealedApps() -> Set<String> {
-        let shown: Set<MenuBarSection> = switch revealState.level {
+        revealedApps(at: revealState.level)
+    }
+
+    private func revealedApps(at level: RevealLevel) -> Set<String> {
+        let shown: Set<MenuBarSection> = switch level {
         case .off: []
         case .hidden: [.hidden]
         case .all: [.hidden, .alwaysHidden]
@@ -422,7 +758,7 @@ public actor MenuBarSession {
     }
 
     /// What a look at the bar makes of a reveal.
-    private enum BarVerdict {
+    enum BarVerdict: Equatable {
         /// The bar has a place for every icon the plan draws.
         case seen
         /// Not yet: this many icons are there of this many.
@@ -438,27 +774,34 @@ public actor MenuBarSession {
     ///   is the last.
     /// - **A look that can't tell ends it at once** (nothing to look with, or the read timed out): another look would only wait.
     ///   The log says so, once for as long as Mantel runs.
-    private func confirmReveal(generation: Int) async {
+    ///
+    /// Says what the last look made of it: `.seen`, `.notYet` when the wait ran out, `.cantTell` when the look couldn't tell, and also
+    /// when another change of reveal overtook this one, even during its last look (the reveal is over, and nothing was seen).
+    @discardableResult
+    func confirmReveal(generation: Int, wait limit: Duration? = nil) async -> BarVerdict {
         let started = clock.now()
-        let wait = Double(confirmationWait.components.seconds) + Double(confirmationWait.components.attoseconds) / 1e18
+        let limit = limit ?? confirmationWait
+        let wait = Double(limit.components.seconds) + Double(limit.components.attoseconds) / 1e18
         while generation == revealGeneration {
-            switch await lookForReveal() {
+            let verdict = await lookForReveal()
+            switch verdict {
             case .seen:
-                return
+                return generation == revealGeneration ? verdict : .cantTell
             case .cantTell:
                 if generation == revealGeneration, !couldNotLookLogged {
                     couldNotLookLogged = true
                     Log.info("session", Self.couldNotLookLogLine)
                 }
-                return
+                return verdict
             case .notYet(let drawn, let expected):
                 guard clock.now().timeIntervalSince(started) < wait else {
                     if generation == revealGeneration { Log.info("session", Self.notSeenLogLine(drawn: drawn, expected: expected)) }
-                    return
+                    return verdict
                 }
-                do { try await clock.sleep(for: Self.confirmationInterval) } catch { return }
+                do { try await clock.sleep(for: Self.confirmationInterval) } catch { return .cantTell }
             }
         }
+        return .cantTell
     }
 
     /// A look at the main display's bar: whether it has a place for every icon the plan draws now, counted against how many the last
@@ -507,7 +850,7 @@ public actor MenuBarSession {
             }
         case .giveUp(let text):
             Log.warning("session", text)
-        case .none, .swap, .takeOverMenuBar:
+        case .none, .swap, .takeOverMenuBar, .openSecondBar:
             break
         }
         return action
@@ -518,7 +861,8 @@ public actor MenuBarSession {
     ///
     /// Only apps that are in the Shown section are candidates, and only those that are on that display's bar now: an app that is
     /// visible for another reason (a rule, a wide screen, or because it is revealed) isn't Shown, and isn't concealed to make room.
-    private func appsToConceal(forRevealed overflowed: Set<String>, in read: Inventory) -> Set<String> {
+    func appsToConceal(forRevealed overflowed: Set<String>, in read: Inventory, alreadyConcealed: Set<String>? = nil) -> Set<String> {
+        let alreadyConcealed = alreadyConcealed ?? swapConcealed
         var concealed: Set<String> = []
         for bar in read.bars {
             let display = bar.displayUUID
@@ -527,7 +871,7 @@ public actor MenuBarSession {
             let needed = short.reduce(into: CGFloat.zero) { $0 += widths.width(ofApp: $1, in: read) ?? 0 }
 
             var candidates: [(bundleID: String, right: CGFloat, width: CGFloat)] = []
-            for app in read.appsWithItems where sections.section(ofApp: app) == .shown && !swapConcealed.contains(app) {
+            for app in read.appsWithItems where sections.section(ofApp: app) == .shown && !alreadyConcealed.contains(app) {
                 let drawn = read.items(ofApp: app).compactMap { item -> CGRect? in
                     item.overflowedOn.contains(display) ? nil : item.frames[display]
                 }
@@ -539,6 +883,34 @@ public actor MenuBarSession {
                                                              never: [ownBundleID]))
         }
         return concealed
+    }
+
+    // MARK: The second bar
+
+    /// Whether the icons that the state would reveal are predicted to fit on the menu bar beside what is drawn there now: the answer
+    /// `RevealPresentationPolicy` goes by. It is made from what the session already knows (the widths icons had when they were last on
+    /// the bar, the last read and the front app's menus), so it takes no read of the bar and asks nothing of Accessibility; the one thing
+    /// it asks for is the window list, which says which bars are shown. True when the state reveals nothing.
+    ///
+    /// Apps that macOS has turned off are left out: they take no room. An app whose width isn't known counts as fitting, and the
+    /// follow-up of the reveal corrects the prediction (`RoomPrediction`).
+    public func predictedFits(_ state: RevealState) async -> Bool {
+        let off: Set<String> = if case .apps(let bundleIDs) = turnedOffList { Set(bundleIDs) } else { [] }
+        let apps = revealedApps(at: state.level).subtracting(off)
+        guard !apps.isEmpty, !inventory.bars.isEmpty else { return true }
+        return RoomPrediction.fits(apps, inventory: inventory, widths: widths, menuFrames: frontMenuFrames,
+                                   shownBars: shownBars(of: inventory))
+    }
+
+    /// The reveal the plan is built with. A reveal that is shown in the second bar leaves the menu bar as the sections make it.
+    private var revealLevelOnTheBar: RevealLevel {
+        revealPresentation == .secondBar ? .off : revealState.level
+    }
+
+    /// Whether the menu bar is as the sections make it, so that what a read of it finds is a verdict on them: nothing is revealed, or the
+    /// reveal is in the second bar. (Focus Mode, and a reveal on the bar, change the bar for a reason of their own.)
+    private var barIsCollapsed: Bool {
+        revealState == .collapsed || revealPresentation == .secondBar
     }
 
     // MARK: The person's changes
@@ -554,44 +926,55 @@ public actor MenuBarSession {
 
     /// The person moves one icon (its whole app, or a system item by itself) to a section.
     public func move(item: ItemID, to section: MenuBarSection) async {
-        let before = sections
-        sections.move(item: item, to: section)
-        await changedSections(from: before)
+        await editSections(.person) { $0.move(item: item, to: section) }
     }
 
     /// The person moves an app to a section.
     public func move(app bundleID: String, to section: MenuBarSection) async {
-        let before = sections
-        sections.move(app: bundleID, to: section)
-        await changedSections(from: before)
+        await editSections(.person) { $0.move(app: bundleID, to: section) }
     }
 
     /// Where apps that are new go.
     public func setNewItemsSection(_ section: MenuBarSection) async {
         let before = sections
         sections.newItems = section
-        await changedSections(from: before)
+        await changedSections(from: before, by: .person)
     }
 
     /// Drops what is known of an app. It is placed again, in the new-items section, if it is seen again.
     public func forget(app bundleID: String) async {
         let before = sections
         sections.forget(app: bundleID)
-        await changedSections(from: before)
+        await changedSections(from: before, by: .person)
     }
 
-    private func changedSections(from before: SectionModel) async {
-        await saveIfChanged(from: before)
+    private func changedSections(from before: SectionModel, by cause: SectionChangeLog.Cause) async {
+        await saveIfChanged(from: before, by: cause)
         await rebuildAndApply()
+        await tellAutomaticIfChanged()
+    }
+
+    /// The person's change to the sections, as the layout API makes it: applied, saved and planned like any other, and, when it changed
+    /// anything, written to macOS's order table (`cause`). The session is pending before the writer is asked, so that no read between
+    /// them follows the order and puts the change back.
+    func editSections(_ cause: LayoutChangeCause, _ change: (inout SectionModel) -> Void) async {
+        let before = sections
+        change(&sections)
+        guard sections != before else { return }
+        let began = beginLayoutRequest()
+        await changedSections(from: before, by: .person)
+        await sendLayoutRequest(cause, began: began)
     }
 
     /// Settings opened or closed: the menu bar is read every two seconds while it is open, and the list of apps macOS has turned off is
-    /// read again when it opens.
+    /// read again when it opens. Opening it is a moment the Shown icons are captured at (`startCapturingForSettings`).
     public func setSettingsOpen(_ open: Bool) async {
         await scheduler?.setSettingsOpen(open)
         if open {
-            turnedOffList = await turnedOff()
+            await readTurnedOffList()
+            await tellAutomaticIfChanged()
             publish()
+            startCapturingForSettings()
         }
     }
 
@@ -605,7 +988,8 @@ public actor MenuBarSession {
     /// does nothing then.
     public func permissionsChanged() async {
         guard isStarted, mayChangeEngines(forReset: false) else { return }
-        turnedOffList = await turnedOff()
+        await layoutAvailabilityChanged()
+        await readTurnedOffList()
         guard mayChangeEngines(forReset: false) else { return }
         await chooseEngine()
         guard !isQuitting else { return }
@@ -619,9 +1003,16 @@ public actor MenuBarSession {
     /// was applied (an engine that remembers what it applied makes it live once more), and the menu bar is read again.
     ///
     /// Nothing is done while a reset is under way (it does all of this when it is done) or once quitting has begun, and the answer says
-    /// so.
+    /// so. Auto-refresh doesn't hold this back (the screen can be locked, and it still works), and doesn't count it as one of its own: only
+    /// the read it makes can tell auto-refresh something, as any read does.
     @discardableResult
     public func refresh() async -> RefreshOutcome {
+        // A manual refresh starts over from what is true, the icons macOS doesn't tie to their apps included (an app may have been fixed):
+        // what was found is found again. What is known of a stuck bar is kept: only a reset restarts MenuBarAgent. Not one that is refused,
+        // and not an auto-refresh, which goes by `refreshNow`.
+        if mayChangeEngines(forReset: false) { unattached.forgetFlags() }
+        // Whether the order table can be written is looked at again (the layout file may have been given, or have moved).
+        await layoutAvailabilityChanged()
         if await refreshNow() { return .done }
         return .refused(isQuitting ? CommandAnswers.quitting : CommandAnswers.resetUnderWay)
     }
@@ -638,7 +1029,7 @@ public actor MenuBarSession {
     @discardableResult
     private func refreshNow(forReset: Bool = false) async -> Bool {
         guard mayChangeEngines(forReset: forReset) else { return false }
-        turnedOffList = await turnedOff()
+        await readTurnedOffList()
         guard mayChangeEngines(forReset: forReset) else { return false }
         await chooseEngine(forReset: forReset)
         guard mayChangeEngines(forReset: forReset) else { return false }
@@ -690,10 +1081,14 @@ public actor MenuBarSession {
     public func reset(restarter: any MenuBarAgentRestarting,
                       replayJournal: @escaping @Sendable () async -> Void) async throws(RestartError) {
         resetting = true
+        noteBarChange("a reset began")
+        // Step 1: no icon is asked for any more, and no room made for one is kept (the plan of step 6 is made without them).
+        endAllIconReveals()
         // What waits to be applied is not applied after the engine is down (as at quit): the plan that is being applied is let finish.
         pendingApply = nil
         let outcome = await Task { await self.runReset(restarter: restarter, replayJournal: replayJournal) }.value
         resetting = false
+        noteBarChange("a reset ended")
         try outcome.get()
     }
 
@@ -701,6 +1096,7 @@ public actor MenuBarSession {
                           replayJournal: @escaping @Sendable () async -> Void) async -> Result<Void, RestartError> {
         Log.info("session", "resetting the menu bar")
         await hiding.tearDown()
+        noteBarChange("the engine was taken down for a reset")
         await replayJournal()
 
         do throws(RestartError) {
@@ -715,6 +1111,9 @@ public actor MenuBarSession {
 
         collapseReveal()
         await waitForAgent()
+        unattached.forgetAll()
+        stuckBarStamp += 1
+        stuckWatch.resetDone()
         await refreshNow(forReset: true)
         return .success(())
     }
@@ -723,22 +1122,24 @@ public actor MenuBarSession {
     private func collapseReveal() {
         revealGeneration += 1
         revealState = .collapsed
+        revealPresentation = .inline
         swapConcealed = []
     }
 
-    /// Reads the bar until the agent answers it, for up to `agentWait`.
+    /// Reads the bar until the agent answers it, for up to `agentWait`: time on the clock from the start, so that the reads (each a scan,
+    /// which takes seconds on a busy Mac) count, and a MenuBarAgent that doesn't come back is given up on after the wait and one read.
     private func waitForAgent() async {
         guard scheduler != nil else { return }
-        var waited: Duration = .zero
+        let began = clock.now()
+        let limit = Self.seconds(Self.agentWait)
         while !isQuitting {
             if let read = await requestScan(.refresh), read.agentAnswered { return }
-            guard waited < Self.agentWait else {
+            guard clock.now().timeIntervalSince(began) < limit else {
                 let seconds = Self.agentWait.components.seconds
                 Log.warning("session", "MenuBarAgent hadn't answered \(seconds) seconds after it restarted; going on")
                 return
             }
             do { try await clock.sleep(for: Self.agentPollInterval) } catch { return }
-            waited += Self.agentPollInterval
         }
     }
 
@@ -758,9 +1159,20 @@ public actor MenuBarSession {
     /// `tearDownForQuit`, saying whether the engine was taken down within the limit.
     func tearDownEngineForQuit() async -> Bool {
         isQuitting = true
+        noteBarChange("the quit began")
+        // Icons asked for end with the app: the engine's teardown shows everything, and what was concealed for room comes back with it.
+        endAllIconReveals()
         pendingApply = nil
         periodicTask?.cancel()
         periodicTask = nil
+        sessionTask?.cancel()
+        sessionTask = nil
+        layoutStatusTask?.cancel()
+        layoutStatusTask = nil
+        layoutFollowWaits = false
+        // Reads that are under way give up waiting for apps at once, so that none holds a thread or the main thread's turn while the app
+        // takes itself down.
+        scanner.stopWaiting()
         await scheduler?.stop()
         // A read that was asked for and won't be taken is answered with nothing, so that whoever waits for it goes on.
         for id in Array(tickets.keys) { abandon(id) }
@@ -781,14 +1193,18 @@ public actor MenuBarSession {
         // the plan applied: they took them down.
         guard mayChangeEngines(forReset: forReset) else { return }
         switchesUnderway += 1
+        noteBarChange("the way of hiding was being chosen")
         // On a task of its own, as the plans are applied (`drainPlans`): the switch applies the plan with the new engine and then takes
         // the old one down, and a caller that is cancelled while it runs mustn't cut the new engine's activation short, which would leave
         // the old one taken down and the new one with nothing applied: a bar that is fully shown.
         // The epoch is read now, with the guard just passed: a teardown (a reset's, or the quit's) that comes before the call gets to the
         // controller makes it a choice of the time before, and it is dropped there.
         let hiding = hiding, method = settings.method, epoch = hiding.epoch
-        await Task { await hiding.choose(method: method, expectedEpoch: epoch) }.value
+        let unattachedShown = unattached.forAutomatic(sections: sections)
+        toldAutomatic = unattachedShown
+        await Task { await hiding.choose(method: method, unattachedShownApps: unattachedShown, expectedEpoch: epoch) }.value
         switchesUnderway -= 1
+        noteBarChange("the way of hiding was chosen")
         // Before the first plan was applied a switch has changed nothing on the bar, and the first read stays the one that judges nothing.
         if lastApplyEndedAt != nil { lastApplyEndedAt = clock.now() }
         lastStatus = await hiding.status()
@@ -797,24 +1213,42 @@ public actor MenuBarSession {
     // MARK: Reading the menu bar
 
     /// Asks for a read and waits for the one that answers it: one that began now or later.
-    private func requestScan(_ reason: ScanScheduler.Reason) async -> Inventory? {
+    func requestScan(_ reason: ScanScheduler.Reason) async -> Inventory? {
+        await requestRead(reason)?.inventory
+    }
+
+    /// The slots drawn on a display's bar now, from one window of MenuBarAgent's: no app is asked, and no inventory is made (the scanner
+    /// may go on to read the window it used first next time). Nil when they can't be read. What a read's slots are compared with once a
+    /// strip of the bar has been taken (`isStillCurrent`).
+    func slotsNow(on display: String) async -> SlotSnapshot? {
+        await scanner.slotSnapshot(on: display)
+    }
+
+    /// The frames these apps report for their items now: only these apps are asked, together, and nothing is learned. An app that doesn't
+    /// answer is not in the answer. What a read's ties are compared with once a strip of the bar has been taken (`isStillCurrent`).
+    func itemFramesNow(ofApps apps: Set<String>) async -> [String: [CGRect]] {
+        await scanner.itemFrames(ofApps: apps)
+    }
+
+    /// `requestScan`, with what the bar had been through when the read began.
+    func requestRead(_ reason: ScanScheduler.Reason) async -> TakenRead? {
         guard let scheduler, !isQuitting else { return nil }
         let id = nextTicketID
         nextTicketID += 1
         // The ticket is out before the request is made: a read that is quick can be over before this call is back.
-        tickets[id] = ScanTicket(since: clock.now())
+        tickets[id] = ScanTicket(since: clock.now(), needs: reason == .layoutFollow ? reason : nil)
         await scheduler.request(reason)
         return await answer(of: id)
     }
 
-    private func answer(of id: Int) async -> Inventory? {
+    private func answer(of id: Int) async -> TakenRead? {
         guard let ticket = tickets[id] else { return nil }
         if ticket.isDone {
             tickets[id] = nil
             return ticket.result
         }
         return await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Inventory?, Never>) in
+            await withCheckedContinuation { (continuation: CheckedContinuation<TakenRead?, Never>) in
                 if Task.isCancelled {
                     tickets[id] = nil
                     continuation.resume(returning: nil)
@@ -833,14 +1267,27 @@ public actor MenuBarSession {
 
     /// What the scheduler runs when a read is due: reads, takes in what was read, and tells those who waited for it.
     private func scan(_ reasons: Set<ScanScheduler.Reason>) async {
-        let read = await ingest(await scanner.scan(reasons: reasons, concealed: appsNotDrawn()), afterDisplayChange: reasons.contains(.displaysChanged))
+        let changesBefore = barChanges
+        // Whether the allowlist is live is looked at on both sides of the read: only one that is live throughout says an icon has no slot.
+        let armedBefore = hiding.allowlist?.isArmed ?? false
+        let concealed = appsNotDrawn()
+        let began = clock.now()
+        let agentPID = await scanner.menuBarAgentPID()
+        let raw = await scanner.scan(reasons: reasons, concealed: concealed, notVoting: concealedBeforeThePlan)
+        lastReadTook = max(0, clock.now().timeIntervalSince(began))
+        let armedAfter = hiding.allowlist?.isArmed ?? false
+        let (read, followNeedsAnotherRead) = await ingest(raw, afterDisplayChange: reasons.contains(.displaysChanged), atLaunch: isReadingAtLaunch,
+                                                          armed: (before: armedBefore, after: armedAfter), reasons: reasons, concealed: concealed,
+                                                          agentPID: agentPID)
         scansIngested += 1
-        for (id, ticket) in tickets where !ticket.isDone && read.capturedAt >= ticket.since {
+        let taken = TakenRead(inventory: read, barChanges: changesBefore, concealed: concealed, agentPID: agentPID,
+                              followNeedsAnotherRead: followNeedsAnotherRead)
+        for (id, ticket) in tickets where !ticket.isDone && read.capturedAt >= ticket.since && (ticket.needs.map(reasons.contains) ?? true) {
             if let continuation = ticket.continuation {
                 tickets[id] = nil
-                continuation.resume(returning: read)
+                continuation.resume(returning: taken)
             } else {
-                tickets[id]?.result = read
+                tickets[id]?.result = taken
                 tickets[id]?.isDone = true
             }
         }
@@ -848,7 +1295,9 @@ public actor MenuBarSession {
     }
 
     /// Asks the auto-refresh policy whether this read calls for a refresh, and starts one if it does. It isn't asked during a reset (the
-    /// bar is empty for a moment then, and what is read says nothing of a bar that is stuck) or after quitting has begun.
+    /// bar is empty for a moment then, and what is read says nothing of a bar that is stuck) or after quitting has begun. While the
+    /// displays are asleep, the screen is locked or another user's session is on screen, the policy is told it may not refresh, and
+    /// the read teaches nothing of which displays have a bar: it is of a bar nobody sees.
     ///
     /// The refresh is a task of its own: it asks for a read, and a read can't be taken while this one, which is what the scheduler is
     /// running, hasn't returned.
@@ -856,17 +1305,22 @@ public actor MenuBarSession {
         // A read that couldn't be taken because Accessibility isn't granted says nothing of any display.
         let canTell = !read.problems.contains(.accessibilityNotGranted)
         let hadABar = displaysWithABar
-        if read.agentAnswered, canTell { displaysWithABar = Set(read.bars.map(\.displayUUID)).union(read.displaysWithSlots) }
+        // Not a read taken while nobody looks: the bar of a display that is asleep is empty, and the read that judges the display change
+        // read in the meantime (`AutoRefreshPolicy`) has to be compared with the bars there were before it.
+        if read.agentAnswered, canTell, sessionNow.isAwake {
+            displaysWithABar = Set(read.bars.map(\.displayUUID)).union(read.displaysWithSlots)
+        }
         guard !resetting, !isQuitting else { return }
         // Only a display that had a bar in the read before can be left with an empty one: with "Displays have separate Spaces" off the
         // other displays have none at all, and a display change brings them without it being a bar that went empty.
         let displays = canTell ? knownDisplays.intersection(hadABar) : []
         let verdict = autoRefresh.scanFinished(agentAnswered: read.agentAnswered, displaysWithSlots: read.displaysWithSlots,
                                                displays: displays, afterDisplayChange: reasons.contains(.displaysChanged),
-                                               now: clock.now())
+                                               mayRefresh: sessionNow.isAwake, now: clock.now())
         guard case .refresh(let reason) = verdict else { return }
-        Log.info("session", "refreshing the menu bar: \(reason)")
-        Task { await self.refresh() }
+        sayAboutAutoRefresh("refreshing the menu bar: \(reason)")
+        autoRefreshesStarted += 1
+        Task { await self.refreshNow() }
     }
 
     /// What every read of the menu bar comes to, whoever asked for it.
@@ -881,22 +1335,49 @@ public actor MenuBarSession {
     ///   apps (the tracker moves them to Hidden), and the read that follows says whether that was enough; with automatic overflow off,
     ///   or when the « menu is showing and it can't be told what is in it, the log says so and nothing is moved.
     ///   The read taken for a change of displays is of a bar that is being made again, so what it says of a dot that can't be placed is
-    ///   not said in the log: the next read says it, if it agrees.
-    /// - Apps that were never placed are put in the new-items section, and what changed is saved.
+    ///   not said in the log: the next read says it, if it agrees. So are the reads of the launch (`atLaunch`): macOS may not have placed
+    ///   the dots yet.
+    /// - **The order macOS shows is followed** (`followedSections`), before the icons that are new are listed: not while a write of the
+    ///   order table is pending or settling, from the table when it is granted and can be matched, else from the bar. Sections change only
+    ///   for the read that follows a ⌘-drag. Nothing that is followed is written back.
+    /// - Apps that were never placed are put in the new-items section, and what changed is saved. Apps that appear while Mantel runs, with the
+    ///   new-items marker placed, ask for a write of the order.
     /// - The plan is made again and applied if it is another one, and the state is published.
+    /// - While the recording indicator is being ignored after a capture (`droppingTheIndicator`), it isn't in what is judged.
     ///
     /// Returns the read as it was taken in, with the icons that are out of the way marked (`BarRegion`): what is answered to whoever asked
-    /// for it, and what everything else here reads.
-    private func ingest(_ raw: Inventory, afterDisplayChange: Bool = false) async -> Inventory {
+    /// for it, and what everything else here reads; and whether the order of the icons wasn't followed from it because it was empty or
+    /// partial (`FollowTrust`), which is the verdict of this read, taken at the moment it was made.
+    private func ingest(_ taken: Inventory, afterDisplayChange: Bool = false, atLaunch: Bool = false,
+                        armed: (before: Bool, after: Bool) = (false, false), reasons: Set<ScanScheduler.Reason> = [],
+                        concealed: Set<String> = [], agentPID: pid_t? = nil) async -> (read: Inventory, followNeedsAnotherRead: Bool) {
+        let raw = await droppingTheIndicator(from: taken)
         // Which bars are shown is looked at only when a read has something to say of a place or of the dots.
         var shown: Set<String>?
         if raw.items.contains(where: { !$0.strayFrames.isEmpty }) { shown = shownBars(of: raw) }
         let read = markingWhatIsOutOfTheWay(raw, shownBars: shown)
         inventory = read
+        concealedAtRead = concealed
         // A read that says nothing of any bar (Accessibility isn't granted, MenuBarAgent isn't there) says nothing of the icons either.
         guard !read.bars.isEmpty else {
+            // Quits are counted all the same, while MenuBarAgent is down.
+            let unattachedChanges = noteUnattached(read, armed: armed, afterDisplayChange: afterDisplayChange, atLaunch: atLaunch)
             await rebuildAndApply()
-            return read
+            await settleUnattached(unattachedChanges)
+            return (read, false)
+        }
+        // The pictures of the icons are taken at the first read that has a bar, while everything is on the bar, and before a plan hides any
+        // of it: at the launch's, or, when the launch's reads had none and a plan that hides nothing was applied, the first that comes
+        // after. It is bounded: past its budget the capture is left to finish, and the plan applies. The first read that has a bar and comes
+        // after a plan has hidden icons (two empty reads at the launch can have the plan applied before any read with a bar) can't have
+        // it: it is counted as lost, and the moments that follow (a reveal that is seen, Settings opening) take the pictures.
+        if !launchCaptureDone, imageCollector != nil {
+            if currentPlan?.concealsNothing ?? true {
+                await captureAtLaunch(read, agentPID: agentPID)
+            } else {
+                launchCaptureDone = true
+                Log.info("session", Self.launchCaptureLostLogLine)
+            }
         }
         await hiding.spacer?.setBars(read.bars)
         widths.update(from: read)
@@ -909,18 +1390,38 @@ public actor MenuBarSession {
             placesBeforeTrials[item.id] = nil
         }
 
+        // Every read is looked at for the dots' places, not only the ones that judge the bar.
+        let dotsHavePlaces = dotsHaveHadTheirPlaces(in: read)
+        // A change the person made while the last read had no bars is written from this one, which has them.
+        await sendDeferredLayoutChange(after: read)
+
         let before = sections
-        sections.note(read.items)
+        var changes = SectionChangeLog(from: before)
+        let follow = await followedSections(in: read, reasons: reasons)
+        // A change someone made while the follow was being worked out saved itself, and says so in its own line.
+        changes.skip(to: sections)
+        if let followed = follow.sections { sections = followed }
+        changes.took(sections, by: reasons.contains(.layoutFollow) ? .commandDrag : .barOrder)
+        let previousIDs = currentIDs
+        let wholeApps = takeInWholeReads(of: read)
+        sections.noteIcons(iconsToNote(in: read, wholeApps: wholeApps, previous: previousIDs))
+        changes.took(sections, by: .newIcons)
+        let checked = sections.checkUnchecked(apps: wholeApps, in: read)
+        changes.took(sections, by: .check)
+        await reportChecked(checked, in: read)
+        changes.skip(to: sections)
         let showsThePlan = readShowsThePlan(read)
         // What a read shows is what the plan in force makes of the bar: the icons it finds with no place on the bar, though the plan
         // draws them, are ones macOS isn't drawing, and a reveal isn't waited for to bring them.
         if showsThePlan, let currentPlan { expectation.learn(from: read, plan: currentPlan) }
+        // With the sections as they were when the plan in force was made, before this read changes them.
+        let unattachedChanges = noteUnattached(read, armed: armed, afterDisplayChange: afterDisplayChange, atLaunch: atLaunch)
         var madeRoomForTheDots = false
-        if revealState == .collapsed, showsThePlan, !planIsTheSections {
+        if barIsCollapsed, showsThePlan, !planIsTheSections {
             // A wide screen's plan draws every icon whatever the sections say: what a read finds says nothing of whether the icons the
             // sections show fit, so nothing is judged, and the reads counted before it don't carry over to when it is over.
             tracker.forgetSightings()
-        } else if revealState == .collapsed, showsThePlan {
+        } else if barIsCollapsed, showsThePlan {
             let verdict = dotsVerdict(of: read, shownBars: &shown)
             var outcome: AutoOverflowTracker.Outcome?
             // Where the dots sit under the wide spacer is the spacer's doing (it pushes icons off the bar on purpose): none is made room for.
@@ -933,6 +1434,7 @@ public actor MenuBarSession {
                     AutoOverflowTracker.Read(overflowedApps: overflowed, unansweredApps: read.unansweredApps, trappedBars: trapped,
                                              inferredApps: overflowed.intersection(OverflowInputs.inferredOnlyApps(in: read))),
                     sections: &sections, now: clock.now())
+                changes.took(sections, by: .overflowTracker)
                 // A move asks for the read that says whether it was enough; dots (or apps) found out of the way for the first time ask for the
                 // read that confirms it.
                 madeRoomForTheDots = !result.movedForDots.isEmpty || !result.awaitingConfirmation.isEmpty || !result.awaitingApps.isEmpty
@@ -941,14 +1443,19 @@ public actor MenuBarSession {
                 // Nothing is made of this read: the reads in a row that were counted don't carry over to when it is on again.
                 tracker.forgetSightings()
             }
-            sayAboutTheDots(verdict: verdict, outcome: outcome, underTheSpacer: underTheSpacer, afterDisplayChange: afterDisplayChange)
+            sayAboutTheDots(verdict: verdict, outcome: outcome, underTheSpacer: underTheSpacer,
+                            beingMadeAgain: afterDisplayChange || atLaunch || !dotsHavePlaces)
         }
-        sections.assignNew(apps: read.appsWithItems)
-        await saveIfChanged(from: before)
+        let placedNew = sections.assignNew(apps: read.appsWithItems)
+        changes.took(sections, by: .newApps)
+        await saveIfChanged(from: before, changes: changes)
         await rebuildAndApply()
+        await settleUnattached(unattachedChanges)
+        // Apps that appear while Mantel runs go to the marker's place, when the person has placed it; the launch's go in the next write.
+        if !placedNew.isEmpty, !atLaunch, before.newItemsIndex != nil { await requestLayoutWrite(.newApps) }
         // The read that says whether the room that was made was enough is one taken after the plan that made it was applied.
         if madeRoomForTheDots { await scheduler?.request(.trial) }
-        return read
+        return (read, follow.needsAnotherRead)
     }
 
     /// macOS 27 lists no slot for an icon it isn't drawing and shows no «: an icon that is out of the way says where it would be, behind the
@@ -968,27 +1475,44 @@ public actor MenuBarSession {
     }
 
     /// The displays whose bar is on screen (a full-screen app hides one), from the window list.
-    private func shownBars(of read: Inventory) -> Set<String> {
+    func shownBars(of read: Inventory) -> Set<String> {
         BarVisibility.shownBars(windows.onScreenWindows(), bars: read.bars)
     }
 
     /// The apps the scanner isn't to believe the places of, and that are not judged: the ones the plan in force conceals, and the ones whose
     /// switch is off in System Settings (macOS doesn't draw them, whatever the plan says).
-    private func appsNotDrawn() -> Set<String> {
+    func appsNotDrawn() -> Set<String> {
         var apps = currentPlan?.concealedBundleIDs ?? []
         if case .apps(let off) = turnedOffList { apps.formUnion(off) }
         return apps
+    }
+
+    /// The apps the layout resolver isn't to believe the frames of: the ones not drawn now, and the ones the last read was taken while the
+    /// plan concealed (whose frames in it are where they were last drawn).
+    func appsNotDrawnForLayout() -> Set<String> {
+        concealedAtRead.union(appsNotDrawn())
     }
 
     private func displayKind(of uuid: String) -> DisplayKind {
         knownLayout?.display(uuid: uuid)?.isBuiltIn == true ? .builtIn : .other
     }
 
+    /// Whether the dots have been seen on a bar since the launch (this read included), or the wait for it is over: only then is a dot with
+    /// no place a finding. At the launch macOS places Mantel's dots after the first reads (the log used to say that one had no place, and
+    /// that the « menu couldn't be told, once at every launch). Nothing else waits for it: only what the log says of the dots is held back.
+    private func dotsHaveHadTheirPlaces(in read: Inventory) -> Bool {
+        if dotsHavePlaced { return true }
+        let waited = launchBeganAt.map { clock.now().timeIntervalSince($0) >= Self.seconds(Self.dotsPlacementWait) } ?? true
+        dotsHavePlaced = DotsRoom.dotsArePlaced(in: read) || waited
+        return dotsHavePlaced
+    }
+
     private func sayAboutTheDots(verdict: DotsRoom.Verdict, outcome: AutoOverflowTracker.Outcome?, underTheSpacer: Bool,
-                                 afterDisplayChange: Bool) {
-        // A read taken for a change of displays is of a bar that is being made again: where a dot can't be placed on it is no finding yet.
+                                 beingMadeAgain: Bool) {
+        // A read taken for a change of displays, or at launch, is of a bar that is being made: where a dot can't be placed on it is no
+        // finding yet.
         var verdict = verdict
-        if afterDisplayChange { verdict.cantTell = [:] }
+        if beingMadeAgain { verdict.cantTell = [:] }
         let lines = dotsLog.lines(verdict: verdict, outcome: outcome, automaticOverflowIsOn: settings.automaticOverflow,
                                   underTheSpacer: underTheSpacer, now: clock.now(), kind: { displayKind(of: $0) },
                                   hasNotch: { knownLayout?.display(uuid: $0)?.notch != nil })
@@ -1014,10 +1538,268 @@ public actor MenuBarSession {
     /// Not a read taken before the first plan was applied: nothing is hidden yet (nil), the bar is not what the sections make of it.
     /// Nor one taken after an engine failed to apply the plan: the engine showed everything, and a bar that is fully shown says nothing
     /// of whether the apps fit once the plan is hidden. Nor one taken while a reset has everything shown, or while a plan is being
-    /// applied or the engine switched, or one that began before the engines last finished.
+    /// applied or the engine switched, or while the bar is being re-sorted by a write of the order table, or one that began before the
+    /// engines last finished.
     private func readShowsThePlan(_ read: Inventory) -> Bool {
-        !isApplying && switchesUnderway == 0 && !resetting && lastStatus?.lastError == nil
+        !isApplying && switchesUnderway == 0 && !resetting && !layoutSettling && lastStatus?.lastError == nil
             && (lastApplyEndedAt.map { read.capturedAt >= $0 } ?? false)
+    }
+
+    // MARK: Icons macOS doesn't tie to their apps
+
+    /// Gives the tracker what a read says (`UnattachedIcons`), whichever engine is in charge: it keeps count of quits and of apps that
+    /// list nothing, and of the sightings and the runs. An app that is flagged is expected on the bar again, since the switches will
+    /// draw it. Nothing is logged or told here: `settleUnattached` does that once the plan has been applied.
+    private func noteUnattached(_ read: Inventory, armed: (before: Bool, after: Bool), afterDisplayChange: Bool,
+                                atLaunch: Bool) -> [UnattachedIconTracker.Change] {
+        // A read that began before the last change of displays, or the one that was taken for it, is of a bar that is being made again.
+        let beforeTheChange = lastDisplayChangeAt.map { read.capturedAt <= $0 } ?? false
+        let gate = UnattachedReadGate(
+            allowlistInCharge: lastStatus?.kind == .allowlist && lastStatus?.lastError == nil, armedBefore: armed.before,
+            armedAfter: armed.after, showsThePlan: readShowsThePlan(read), collapsed: revealState == .collapsed && planIsTheSections,
+            awake: sessionNow.isAwake, beingMadeAgain: afterDisplayChange || atLaunch || beforeTheChange,
+            layoutWriteInProgress: layoutIsPending || layoutSettling)
+        let running = Set(runningBundleIDs())
+        var shown: Set<String>?
+        let fits: (String) -> Bool = { app in
+            if shown == nil { shown = DotsRoom.mayHaveAVerdict(in: read) ? self.shownBars(of: read) : [] }
+            return self.trialFits([app], shownBars: shown ?? [])
+        }
+        let assessment = currentPlan.map { plan in
+            UnattachedIcons.assess(read, gate: gate, plan: plan, sections: sections, running: running, notDrawn: appsNotDrawn(),
+                                   ownBundleID: ownBundleID, fits: fits)
+        }
+        var evidence: UnattachedIconEvidence?
+        if case .evidence(let found) = assessment { evidence = found }
+        var processes: [String: Set<pid_t>] = [:]
+        for app in runningApps() { if let bundleID = app.bundleID { processes[bundleID, default: []].insert(app.pid) } }
+        let changes = unattached.readTaken(read, gate: gate, evidence: evidence, barLooksStuck: assessment == .stuck,
+                                           holdingFlags: stuckWatch.holdsFlags, processes: processes)
+        let flaggedNow = changes.compactMap { if case .flagged(let app) = $0 { app } else { nil } }
+        // The switches' look at the bar then expects the icon, and is confirmed without waiting for one the allowlist never draws.
+        if !flaggedNow.isEmpty { expectation.forget(apps: Set(flaggedNow)) }
+        // After the tracker has taken the read: an app placed in it is no longer a suspect of the last change, and is one of the next.
+        if let plan = currentPlan {
+            var look = StuckBar.Look.none
+            var suspects: [String: Set<pid_t>] = [:]
+            let notDrawn = appsNotDrawn()
+            if let placed = StuckBar.appsPlaced(in: read, gate: gate, plan: plan, sections: sections, running: running, notDrawn: notDrawn,
+                                                ownBundleID: ownBundleID) {
+                unattached.readPlaced(placed, processes: processes)
+            }
+            if let noSlot = StuckBar.appsWithNoSlot(in: read, gate: gate, plan: plan, sections: sections, running: running,
+                                                    notDrawn: notDrawn, ownBundleID: ownBundleID, fits: fits) {
+                suspects = stuckWatch.suspects(from: unattached.stuckBarSuspects)
+                look = StuckBar.look(noSlot: noSlot, in: read, ownBundleID: ownBundleID, notDrawn: notDrawn, hadASlot: suspects,
+                                     processes: processes, fits: fits)
+            }
+            noteStuckBar(stuckWatch.look(look, at: read.capturedAt), suspects: suspects)
+        }
+        return changes
+    }
+
+    /// Reads the list of the apps macOS has turned off, and has the tracker drop what it holds of them.
+    private func readTurnedOffList() async {
+        turnedOffList = await turnedOff()
+        logUnattached(noteTurnedOffList())
+    }
+
+    private func noteTurnedOffList() -> [UnattachedIconTracker.Change] {
+        if case .apps(let off) = turnedOffList { return unattached.turnedOffListRead(Set(off)) }
+        return unattached.turnedOffListRead(nil)
+    }
+
+    /// What follows from the changes a read made: an app that was flagged is looked for in the list of the apps that are turned off, which
+    /// is read again (a switch that was turned off while the app ran isn't what it was when the list was last read, and a turned-off app
+    /// is never drawn), and then the changes are logged and Automatic is told.
+    private func settleUnattached(_ changes: [UnattachedIconTracker.Change]) async {
+        var changes = changes
+        let flaggedNow = Set(changes.compactMap { if case .flagged(let app) = $0 { app } else { nil } })
+        if !flaggedNow.isEmpty {
+            turnedOffList = await turnedOff()
+            let dropped = noteTurnedOffList()
+            // An app flagged and dropped by that check is neither logged nor told.
+            let droppedApps = Set(dropped.compactMap { if case .clearedTurnedOff(let app) = $0, flaggedNow.contains(app) { app } else { nil } })
+            changes.removeAll { if case .flagged(let app) = $0 { droppedApps.contains(app) } else { false } }
+            changes += dropped.filter { if case .clearedTurnedOff(let app) = $0 { !droppedApps.contains(app) } else { true } }
+        }
+        guard !isQuitting else { return }
+        logUnattached(changes)
+        publish()
+        await tellAutomaticIfChanged()
+    }
+
+    private func logUnattached(_ changes: [UnattachedIconTracker.Change]) {
+        for change in changes {
+            switch change {
+            case .flagged(let app):
+                Log.info("session", "\(app): its icon gets no slot while the allowlist is live; macOS hasn't tied it to the app")
+            case .clearedBySlot(let app):
+                Log.info("session", "\(app): its icon has a slot under the allowlist again")
+            case .clearedByQuit(let app):
+                Log.info("session", "\(app) quit; its icon is no longer watched")
+            case .clearedByNoItems(let app):
+                Log.info("session", "\(app) lists no icon now; it is no longer watched")
+            case .clearedTurnedOff(let app):
+                Log.info("session", "\(app) is off in System Settings; its icon is no longer watched")
+            }
+        }
+    }
+
+    /// Chooses the engine again when the apps Automatic is to be told of aren't what it was last told. Not while a reset is under way or
+    /// once quitting has begun (a reset's own choice picks the set up).
+    private func tellAutomaticIfChanged() async {
+        guard mayChangeEngines(forReset: false), unattached.forAutomatic(sections: sections) != toldAutomatic else { return }
+        await chooseEngine()
+        guard !isQuitting else { return }
+        publish()
+    }
+
+    // MARK: A bar a change of displays left stuck
+
+    /// Sets what restarts MenuBarAgent for a bar that a change of displays left stuck; nil takes it away, and nothing is restarted by
+    /// the session then.
+    public func setStuckBarRecovery(_ recovery: StuckBarRecovery?) {
+        stuckRecovery = recovery
+    }
+
+    /// What the watch made of a read: the recovery begins (on a task of its own: it asks for reads, which can't be taken while this one,
+    /// which is what the scheduler is running, hasn't returned), or a line is logged. A recovery that can't begin now ends the watch's
+    /// run of looks (`StuckBarWatch.recoveryNotBegun`): two new looks are needed to decide it again, not one.
+    private func noteStuckBar(_ verdict: StuckBarWatch.Verdict, suspects: [String: Set<pid_t>]) {
+        switch verdict {
+        case .nothing:
+            break
+        case .recover(let finding, let afterTheChange):
+            guard stuckRecovery != nil, !recoveryUnderWay, mayRecoverStuckBar else {
+                stuckWatch.recoveryNotBegun()
+                return
+            }
+            recoveryUnderWay = true
+            stuckRecoveriesDecided += 1
+            let stamp = stuckBarStamp
+            Task { await self.recoverStuckBar(finding: finding, suspects: suspects, afterTheChange: afterTheChange, stamp: stamp) }
+        case .limitReached:
+            Log.info("session", "the menu bar looks stuck after a change of displays, and MenuBarAgent was restarted \(StuckBarWatch.perHour) times in the last hour already: not restarting it again")
+        case .didntHelp(let finding):
+            Log.warning("session", "the menu bar is still stuck 10 seconds after MenuBarAgent restarted (\(describe(finding))); not restarting it again")
+        }
+    }
+
+    /// The displays changed, or the Mac woke.
+    private func stuckBarChangeHappened() {
+        stuckBarStamp += 1
+        stuckWatch.changeHappened(at: clock.now())
+    }
+
+    /// Whether the menu bar may be restarted now: not while a reset is under way, quitting has begun, the screen is locked or asleep, or
+    /// a write of the order table is pending or settling.
+    private var mayRecoverStuckBar: Bool {
+        !resetting && !isQuitting && sessionNow.isAwake && !layoutIsPending && !layoutSettling
+    }
+
+    private func describe(_ finding: StuckBarFinding) -> String {
+        var parts: [String] = []
+        if !finding.apps.isEmpty { parts.append("no slot for \(finding.apps.sorted().joined(separator: ", "))") }
+        if finding.ownItems { parts.append("no slot for Mantel's own items") }
+        return parts.joined(separator: "; ")
+    }
+
+    /// What became of a recovery that was decided.
+    private enum RecoveryOutcome {
+        case restarted, failed
+        /// Something forbade it before MenuBarAgent was asked to restart: nothing was done, and nothing is said of it.
+        case notBegun
+    }
+
+    /// Restarts MenuBarAgent, as a Reset does, and puts the plan back and reads the bar: the plan stays as it is in force, with the
+    /// engine in charge of it.
+    ///
+    /// What of `runReset` is kept, and what isn't:
+    /// - **Kept:** the restart through the same `MenuBarAgentRestarting`; the wait for the agent to answer; the tracker forgetting what it
+    ///   knew (`forgetAll`), though its hold on new flags stays until the bar is seen whole (`StuckBarWatch.holdsFlags`); the choice of
+    ///   engine and the plan applied again by force (an assertion of the allowlist is made live once more), then a read; and the
+    ///   session's own `resetting`, so that nothing is judged or captured, no trial starts and no refresh is made while the agent is down.
+    /// - **Not kept:** the engine isn't taken down (that shows every icon, which is for a Reset's undoing everything: here the person's
+    ///   hiding stays), and the journal isn't replayed (it undoes what Mantel changed in the system, which a Reset does so that nothing
+    ///   of Mantel's is left behind, and which this leaves in place: the layout and the spacing are the person's choices). The reveal
+    ///   isn't collapsed either: the gate for the recovery says nothing is revealed, and one that begins in the meantime is the person's.
+    ///
+    /// Just before it, in this order: the platform test's refusal; the list of the apps macOS has turned off is read again (an app switched
+    /// off in System Settings keeps listing its icon, and the list may be older than the switch): what it names is no reason, and when
+    /// nothing else is left nothing is restarted; and, right before MenuBarAgent is asked, nothing may have changed since the decision (the
+    /// displays, a reset) nor quitting begun.
+    private func recoverStuckBar(finding: StuckBarFinding, suspects: [String: Set<pid_t>], afterTheChange: TimeInterval, stamp: Int) async {
+        defer { recoveryUnderWay = false }
+        guard let recovery = stuckRecovery, mayRecoverStuckBar else {
+            stuckWatch.recoveryNotBegun()
+            return
+        }
+        // A Reset (the app's) or a platform test that changes the menu bar has it: this isn't begun, and two new looks decide again.
+        guard recovery.activity.begin() else {
+            stuckWatch.recoveryNotBegun()
+            return
+        }
+        defer { recovery.activity.end() }
+        guard await recovery.refusal() == nil, mayRecoverStuckBar, stuckRecovery != nil, stamp == stuckBarStamp else {
+            stuckWatch.recoveryNotBegun()
+            return
+        }
+        await readTurnedOffList()
+        var off: Set<String> = []
+        if case .apps(let apps) = turnedOffList { off = Set(apps) }
+        let reasons = StuckBarFinding(apps: finding.apps.subtracting(off), ownItems: finding.ownItems && !off.contains(ownBundleID))
+        guard mayRecoverStuckBar, stuckRecovery != nil, stamp == stuckBarStamp else {
+            stuckWatch.recoveryNotBegun()
+            return
+        }
+        // What the list says stays so until the next change: nothing is decided again before it.
+        guard reasons.warrantsARestart else {
+            Log.info("session", reasons.isEmpty
+                ? "what had no slot after a change of displays is off in System Settings; not restarting MenuBarAgent"
+                : "only one app is left with no slot after a change of displays once what is off in System Settings is out (\(describe(reasons))); not restarting MenuBarAgent")
+            stuckWatch.recoveryRefused()
+            return
+        }
+
+        resetting = true
+        noteBarChange("a stuck bar's recovery began")
+        pendingApply = nil
+        let outcome = await Task {
+            await self.runStuckBarRecovery(recovery, reasons: reasons, suspects: suspects, afterTheChange: afterTheChange, stamp: stamp)
+        }.value
+        resetting = false
+        noteBarChange("a stuck bar's recovery ended")
+        switch outcome {
+        case .restarted:
+            stuckWatch.recoveryEnded(at: clock.now(), suspects: suspects)
+        case .failed:
+            stuckWatch.recoveryFailed(at: clock.now(), suspects: suspects)
+            await rebuildAndApply()
+        case .notBegun:
+            stuckWatch.recoveryNotBegun()
+            await rebuildAndApply()
+        }
+        guard !isQuitting else { return }
+        publish()
+    }
+
+    private func runStuckBarRecovery(_ recovery: StuckBarRecovery, reasons: StuckBarFinding, suspects: [String: Set<pid_t>],
+                                     afterTheChange: TimeInterval, stamp: Int) async -> RecoveryOutcome {
+        // The hop onto this task, and what came since the last check: quitting, a change of displays, a reset.
+        guard !isQuitting, stamp == stuckBarStamp else { return .notBegun }
+        stuckWatch.recoveryBegan(at: clock.now())
+        Log.info("session", "the menu bar is stuck after a change of displays, \(Int(afterTheChange.rounded())) seconds on (\(describe(reasons))); restarting MenuBarAgent")
+        do throws(RestartError) {
+            try await recovery.restarter.restart()
+        } catch {
+            Log.warning("session", "MenuBarAgent couldn't be restarted for a stuck menu bar: \(error.localizedDescription)")
+            return .failed
+        }
+        await waitForAgent()
+        unattached.forgetAll()
+        await refreshNow(forReset: true)
+        return .restarted
     }
 
     // MARK: Room may have returned
@@ -1027,29 +1809,30 @@ public actor MenuBarSession {
     private func tryTrial(_ trigger: AutoOverflowTracker.Trigger) async {
         // Not while a reset has everything shown, nor once quitting has begun.
         guard !resetting, !isQuitting else { return }
-        let mayTry = settings.automaticOverflow && revealState == .collapsed && planIsTheSections
+        let mayTry = settings.automaticOverflow && barIsCollapsed && planIsTheSections
         // A change of displays is told to the tracker whatever else is going on: what it knows of the room is out of date, and it
         // forgets which apps overflowed again.
         guard mayTry || trigger == .displaysChanged else { return }
 
         var proposed = sections
         let shown = mayTry && DotsRoom.mayHaveAVerdict(in: inventory) ? shownBars(of: inventory) : []
-        let started = tracker.roomMayHaveReturned(trigger, sections: &proposed, predictedFits: { mayTry && predictedFits($0, shownBars: shown) },
+        let started = tracker.roomMayHaveReturned(trigger, sections: &proposed, predictedFits: { mayTry && trialFits($0, shownBars: shown) },
                                                   now: clock.now())
         guard !started.isEmpty else { return }
         // What the apps said of where they were is what a place after the trial is told from.
         placesBeforeTrials.merge(OverflowInputs.strayPlaces(ofApps: started, in: inventory)) { _, new in new }
         let before = sections
         sections = proposed
-        await saveIfChanged(from: before)
+        await saveIfChanged(from: before, by: .overflowTracker)
         await rebuildAndApply()
         await scheduler?.request(.trial)
     }
 
     /// Whether these apps, all on the bar at once, are predicted to have room on every bar: what they were last seen to take is no
     /// more than what is free of it (and, on a bar that is shown and has a dot of Mantel's out of the way, the room the dot needs too).
-    /// False when any of them has never been seen, or the bars aren't known.
-    private func predictedFits(_ apps: Set<String>, shownBars: Set<String>) -> Bool {
+    /// False when any of them has never been seen, or the bars aren't known: a trial of automatic overflow puts an app on the bar only
+    /// when it is known to fit. (`predictedFits(_:)` answers the other way for an unknown width, which the reveal's follow-up corrects.)
+    private func trialFits(_ apps: Set<String>, shownBars: Set<String>) -> Bool {
         var needed: CGFloat = 0
         for app in apps {
             guard let width = widths.width(ofApp: app, in: inventory) else { return false }
@@ -1068,30 +1851,50 @@ public actor MenuBarSession {
 
     // MARK: The plan
 
-    private func runningBundleIDs() -> [String] {
+    func runningBundleIDs() -> [String] {
         Array(Set(runningApps().compactMap(\.bundleID))).sorted()
     }
 
     private func buildPlan() -> VisibilityPlan {
         PlanBuilder.build(PlanInputs(
-            ownBundleID: ownBundleID, runningBundleIDs: runningBundleIDs(), sections: sections, reveal: revealState.level,
+            ownBundleID: ownBundleID, runningBundleIDs: runningBundleIDs(), sections: sections, reveal: revealLevelOnTheBar,
             focusMode: revealState == .focusMode, allowHidingClockAndControlCenter: settings.allowHidingClockAndControlCenter,
             wideScreen: WideScreenInput(enabled: settings.showEverythingOnWideScreens, threshold: settings.wideScreenThreshold,
                                         activeScreenWidth: activeScreenWidth),
-            swapConcealed: swapConcealed))
+            swapConcealed: swapConcealed, iconReveals: iconTickets.values.reduce(into: []) { $0.formUnion($1) },
+            iconRoomConcealed: iconRoomByTicket.values.reduce(into: []) { $0.formUnion($1) }))
     }
 
-    private func saveIfChanged(from before: SectionModel) async {
+    /// Saves the sections if they are not what they were, with a line in the log that says what changed and who changed it.
+    private func saveIfChanged(from before: SectionModel, by cause: SectionChangeLog.Cause) async {
+        var changes = SectionChangeLog(from: before)
+        changes.took(sections, by: cause)
+        await saveIfChanged(from: before, changes: changes)
+    }
+
+    /// `changes` has the steps of what was done to the sections since `before`: what it doesn't say yet is the sections as they are now,
+    /// which someone else changed (and said so) while the session was waiting.
+    private func saveIfChanged(from before: SectionModel, changes: SectionChangeLog) async {
         guard sections != before else { return }
+        if let line = changes.line { Log.info("layout", line) }
         await saveSections(sections)
+    }
+
+    /// Counts a change of the bar (`barChanges`), and keeps what it was.
+    func noteBarChange(_ what: String) {
+        barChanges += 1
+        lastBarChange = what
     }
 
     /// Makes the plan from what is true now, and has it applied if it isn't the one that was asked for last. Returns when the plan, or
     /// a newer one, has been applied.
-    private func rebuildAndApply(force: Bool = false) async {
+    func rebuildAndApply(force: Bool = false) async {
         // After quitting has begun no plan reaches the engines: what is applied is what quitting takes down.
         guard !isQuitting else { return }
         let plan = buildPlan()
+        if let currentPlan, currentPlan.concealedBundleIDs != plan.concealedBundleIDs {
+            concealedBeforeThePlan = currentPlan.concealedBundleIDs
+        }
         currentPlan = plan
         if !force, plan == lastSubmitted {
             // It is the plan that is applied, or on its way.
@@ -1100,6 +1903,14 @@ public actor MenuBarSession {
             await submit(plan, force: force)
         }
         publish()
+    }
+
+    /// Where the engines are with the plans: whether one is being applied (or a switch of engine is under way), and how long ago the last
+    /// one ended (nil when none has). What a plan has applied is drawn on screen some time later (`ClickRouteRules.drawnWait`), and the
+    /// click path waits that out before it looks at the bar.
+    var applyProgress: ApplyProgress {
+        ApplyProgress(underway: isApplying || pendingApply != nil || switchesUnderway > 0,
+                      since: lastApplyEndedAt.map { .seconds(max(0, clock.now().timeIntervalSince($0))) })
     }
 
     /// Hands the plan to the engines. While another plan is being applied this one is only kept, in place of the one that was kept
@@ -1111,6 +1922,7 @@ public actor MenuBarSession {
     /// doesn't end its wait, either: every caller waits until the engines have finished with the newest plan.
     private func submit(_ plan: VisibilityPlan, force: Bool) async {
         guard !isQuitting else { return }
+        noteBarChange("a plan was handed to the engines")
         lastSubmitted = plan
         pendingApply = (plan, force || (pendingApply?.force ?? false))
         if !isApplying {
@@ -1126,6 +1938,7 @@ public actor MenuBarSession {
             while let next = pendingApply {
                 pendingApply = nil
                 await hiding.apply(next.plan, force: next.force)
+                noteBarChange("a plan was applied")
             }
             let status = await hiding.status()
             lastStatus = status
@@ -1143,19 +1956,22 @@ public actor MenuBarSession {
 
     // MARK: Publishing
 
-    private func publish() {
+    func publish() {
         guard let lastStatus, let currentPlan else { return }
         let state = MenuBarState(
             inventory: inventory, sections: sections,
-            lists: ReadOnlyLists.make(inventory: inventory, sections: sections, running: Set(runningBundleIDs()), turnedOff: turnedOffList),
-            plan: currentPlan, engine: lastStatus, alwaysHiddenHasApps: alwaysHiddenHasApps())
+            lists: ReadOnlyLists.make(inventory: inventory, sections: sections, running: Set(runningBundleIDs()), turnedOff: turnedOffList,
+                                      unresolved: layoutUnresolved),
+            plan: currentPlan, engine: lastStatus, alwaysHiddenHasApps: alwaysHiddenHasApps(), widths: widths,
+            unattachedApps: unattached.flagged.intersection(runningBundleIDs()), layout: layoutStatus,
+            stuckBarNotRecovered: stuckWatch.didntHelp, currentIDs: currentIDs)
         guard state != lastPublished else { return }
         lastPublished = state
         for continuation in subscribers.values { continuation.yield(state) }
     }
 
     /// Whether anything that is running is in Always Hidden, or a system item that can be put there is.
-    private func alwaysHiddenHasApps() -> Bool {
+    func alwaysHiddenHasApps() -> Bool {
         let running = Set(runningBundleIDs())
         if sections.apps.contains(where: { $0.value.section == .alwaysHidden && running.contains($0.key) }) { return true }
         return sections.systemItems.contains { module, section in

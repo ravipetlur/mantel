@@ -15,7 +15,8 @@ import Synchronization
 ///   fixtures make a concealed app). It follows the allowlist at once, and for an app that starts after the allowlist was made too: an
 ///   assertion hides whatever isn't on it.
 /// - **Room.** On a bar that is piled (the laptop's), the icons that are on the bar at once are at most `capacity` of the third-party
-///   ones, counted from the right (Mantel's own two dots among them); the others are piled at the «. A concealed app takes no room.
+///   ones, counted from the right (Mantel's own two dots among them); the others are piled at the «. A concealed app keeps its room and has
+///   no slot (`InventoryFixtures`), so what slides when it comes back is nothing: it comes back into its own room.
 /// - **Time.** Nothing here has a clock: a scan reads what the world is when it reads.
 ///
 /// The slots are, left to right: the weather app's two, the notes app's, the VPN app's, the sync app's two, Mantel's two, and the test
@@ -50,11 +51,38 @@ final class SessionWorld: Sendable {
         var undrawn = false
         /// An app that is concealed reports the place it had on the bar (`InventoryFixtures.Options.concealedKeepTheirPlace`).
         var staleConcealed = false
+        /// No third-party app names its items or its slots, as on macOS 27; Mantel and the test item do (`InventoryFixtures.Options.unnamedApps`).
+        var nameless = false
         /// Apps that say they are left of the notch whatever is done to them (`InventoryFixtures.Options.staleApps`).
         var staleApps: Set<String> = []
         var stalePlaceX: CGFloat = 484
+        /// Apps whose frames are reported this many points right of where their icons are (`InventoryFixtures.Options.frameShifts`).
+        var frameShifts: [String: CGFloat] = [:]
+        /// The items left to right (`InventoryFixtures.Options.itemOrder`).
+        var itemOrder: [String]?
+        /// Items of Mantel's own the app lists besides the dots, and dots it doesn't (`InventoryFixtures.Options.ownExtras`, `ownOmitted`).
+        var ownExtras: [String] = []
+        var ownOmitted: Set<String> = []
         /// The bars (by their place among the displays) that a full-screen app has hidden.
         var hiddenBars: Set<Int> = []
+        /// Apps whose icons macOS doesn't tie to them: while an assertion is live they get no slot, whatever it names; with none live they
+        /// are drawn.
+        var unattached: Set<String> = []
+        /// Apps that are running and aren't asked by the scanner, so that they list no item and don't fail to answer.
+        var withoutItems: Set<String> = []
+        /// How many times each app was relaunched: the session is told another process ID for it (the scanner asks by the fixture's).
+        var relaunches: [String: Int] = [:]
+        /// Other processes of an app that run under its bundle ID and list no item (a helper), by bundle ID.
+        var helpers: [String: pid_t] = [:]
+        /// MenuBarAgent doesn't answer the list of its windows (a busy Mac): a read finds no bar.
+        var windowsHung = false
+        var slotsHung = false
+        /// The slot of this item (by its app and its title) doesn't say where it is: its position and size time out.
+        var hungSlotFrame: (bundleID: String, title: String)?
+        /// MenuBarAgent has been started again: it is another process.
+        var agentRestarted = false
+        /// How many times the readers were told the app is quitting.
+        var stopWaitingCalls = 0
         /// How many times the window list has been read.
         var windowReads = 0
         var cache: (key: String, fixture: InventoryFixtures.Fixture)?
@@ -79,14 +107,52 @@ final class SessionWorld: Sendable {
     /// The system modules whose slots have a frame that is off the bar, whatever is applied (macOS parks an icon it isn't drawing).
     func setParked(_ modules: Set<String>) { state.withLock { $0.parkedModules = modules } }
     func setStaleApps(_ apps: Set<String>, from x: CGFloat = 484) { state.withLock { $0.staleApps = apps; $0.stalePlaceX = x } }
+    /// The apps' own frames are reported this far right of their icons from now on (the slots don't move): stale ones, or one app's in
+    /// the place of its neighbour's.
+    func setFrameShifts(_ shifts: [String: CGFloat]) { state.withLock { $0.frameShifts = shifts } }
+    /// The items are drawn in this order from now on (`InventoryFixtures.Options.itemOrder`); nil is the fixture's own.
+    func setItemOrder(_ order: [String]?) { state.withLock { $0.itemOrder = order } }
+    /// Mantel's own items the app lists from now on: the spacers, groups and divider that are on the bar (by name), and the dots that aren't.
+    func setOwnItems(listed: [String], omitted: Set<String> = []) { state.withLock { $0.ownExtras = listed; $0.ownOmitted = omitted } }
     func setShape(_ shape: Shape) { state.withLock { $0.shape = shape } }
+    /// No third-party app names its items, in its own list or on its slots, from now on (every app on macOS 27 is like that); Mantel's items
+    /// and the test item's keep their names.
+    func setNameless(_ nameless: Bool) { state.withLock { $0.nameless = nameless } }
     /// Whether the bar of the display (by its place among the displays) is on screen: a full-screen app hides it.
     func setBarShown(_ index: Int, _ shown: Bool) {
         state.withLock { if shown { $0.hiddenBars.remove(index) } else { $0.hiddenBars.insert(index) } }
     }
+    /// The apps whose icons get no slot while an assertion is live (`SessionRig.withAllowlist` makes them concealed then).
+    func setUnattached(_ apps: Set<String>) { state.withLock { $0.unattached = apps } }
+    var unattachedApps: Set<String> { state.withLock { $0.unattached } }
+    /// The apps that list no item although they run: the scanner doesn't ask them.
+    func setWithoutItems(_ apps: Set<String>) { state.withLock { $0.withoutItems = apps } }
+    /// The app runs another process under its bundle ID, which lists no item (a helper): the session and the scanner see both.
+    func addHelper(of bundleID: String, pid: pid_t) { state.withLock { $0.helpers[bundleID] = pid } }
+    /// The app quits and starts again: from now on the session sees it as another process.
+    func relaunch(_ bundleID: String) { state.withLock { $0.relaunches[bundleID, default: 0] += 1 } }
     func setTestItemRunning(_ running: Bool) { state.withLock { $0.testItemRunning = running } }
     /// Whether MenuBarAgent is running as far as the scanner can tell: without it a read finds no bar, and says the agent isn't there.
     func setAgentRunning(_ running: Bool) { state.withLock { $0.agentRunning = running } }
+    /// Whether MenuBarAgent doesn't answer the list of its windows, though it runs: a read finds no bar, as one that timed out does.
+    func setWindowsHung(_ hung: Bool) { state.withLock { $0.windowsHung = hung } }
+    var windowsHung: Bool { state.withLock { $0.windowsHung } }
+    /// Whether MenuBarAgent answers the list of its windows but not what its slots say of themselves: a read has its bars and may be short of
+    /// what is there (`Inventory.agentReadCut`).
+    func setSlotsHung(_ hung: Bool) { state.withLock { $0.slotsHung = hung } }
+    var slotsHung: Bool { state.withLock { $0.slotsHung } }
+    /// MenuBarAgent doesn't say where the slot of one icon is, whichever window it is read in (nil for every slot answering): a read has its
+    /// bars and one icon of the app is left without a frame (`Inventory.agentReadCut`).
+    func hangSlotFrame(ofItemTitled title: String, ofApp bundleID: String) { state.withLock { $0.hungSlotFrame = (bundleID, title) } }
+    func releaseSlotFrame() { state.withLock { $0.hungSlotFrame = nil } }
+    var hungSlotFrame: (bundleID: String, title: String)? { state.withLock { $0.hungSlotFrame } }
+    /// MenuBarAgent is started again (a reset, or the system doing it): the scanner sees another process by its name, and the windows it
+    /// draws are the new process's (`ownerPID(of:)`, and `WorldAX.application(pid:)` for the new process ID).
+    func restartAgent() { state.withLock { $0.agentRestarted = true } }
+    /// How far a restarted MenuBarAgent's process ID is from the first one's.
+    private static let restartedAgentShift: pid_t = 7000
+    func noteStopWaiting() { state.withLock { $0.stopWaitingCalls += 1 } }
+    var stopWaitingCalls: Int { state.withLock { $0.stopWaitingCalls } }
     /// The apps the session's list of running apps has (the fixture's own apps all keep their icons in the bar).
     func setPlanRunning(_ apps: Set<String>?) { state.withLock { $0.planRunning = apps } }
 
@@ -119,14 +185,25 @@ final class SessionWorld: Sendable {
 
     /// Every app the scanner is to ask: all of the fixture's (the agent too, while it is running).
     var scannerApps: [RunningApp] {
-        let agentRunning = state.withLock { $0.agentRunning }
-        return fixture().running.filter { agentRunning || $0.bundleID != Self.agent }
+        let (agentRunning, withoutItems, helpers, restarted) = state.withLock { ($0.agentRunning, $0.withoutItems, $0.helpers, $0.agentRestarted) }
+        return fixture().running.filter { (agentRunning || $0.bundleID != Self.agent) && !($0.bundleID.map(withoutItems.contains) ?? false) }
+            .map { app in
+                guard restarted, app.bundleID == Self.agent else { return app }
+                return RunningApp(pid: app.pid + Self.restartedAgentShift, bundleID: app.bundleID, name: app.name, bundleURL: app.bundleURL,
+                                  isBackgroundOnly: app.isBackgroundOnly)
+            }
+            + helpers.map { RunningApp.fake($0.value, $0.key, "Helper") }
     }
 
     /// The apps the session is told are running.
     var sessionApps: [RunningApp] {
         let ids = Set(runningBundleIDs)
-        return fixture().running.filter { $0.bundleID.map(ids.contains) ?? false }
+        let (relaunches, helpers) = state.withLock { ($0.relaunches, $0.helpers) }
+        return helpers.map { RunningApp.fake($0.value, $0.key, "Helper") } + fixture().running.filter { $0.bundleID.map(ids.contains) ?? false }.map { app in
+            guard let count = app.bundleID.flatMap({ relaunches[$0] }) else { return app }
+            return RunningApp(pid: app.pid + 1000 * pid_t(count), bundleID: app.bundleID, name: app.name, bundleURL: app.bundleURL,
+                              isBackgroundOnly: app.isBackgroundOnly)
+        }
     }
 
     func app(_ bundleID: String) -> RunningApp {
@@ -134,6 +211,28 @@ final class SessionWorld: Sendable {
     }
 
     var ax: any AXReading { WorldAX(world: self) }
+
+    /// The process whose tree the element is in (`FakeAX.ownerPID(of:)`); once MenuBarAgent was started again, the new process for the
+    /// elements of its windows and slots.
+    func ownerPID(of element: AXElementRef) -> pid_t? {
+        let tree = fixture().ax
+        guard let pid = tree.ownerPID(of: element) else { return nil }
+        return pid == agentTreePID && agentRestarted ? pid + Self.restartedAgentShift : pid
+    }
+
+    /// The application element of the process, in the tree: MenuBarAgent's own once it was started again, whose windows are the same
+    /// ones as before (the process draws the bars again, as they were). The first process is gone then, and has nothing of the tree.
+    func treeApplication(pid: pid_t, in tree: FakeAX) -> AXElementRef {
+        guard agentRestarted, let agent = agentTreePID else { return tree.application(pid: pid) }
+        if pid == agent { return tree.application(pid: Self.goneProcessPID) }
+        return pid == agent + Self.restartedAgentShift ? tree.application(pid: agent) : tree.application(pid: pid)
+    }
+
+    /// A process ID that no app has: its application element in the tree is an empty one.
+    private static let goneProcessPID: pid_t = -1
+
+    private var agentRestarted: Bool { state.withLock { $0.agentRestarted } }
+    private var agentTreePID: pid_t? { fixture().pid(of: Self.agent) }
 
     /// The apps that are concealed now.
     var concealed: Set<String> {
@@ -145,7 +244,7 @@ final class SessionWorld: Sendable {
         // Asked outside the lock: it reads the allowlist, which asks the world which apps run.
         let hidden = concealed
         return state.withLock { state in
-            let key = "\(state.shape)|\(state.ownFirst)|\(state.undrawn)|\(state.staleConcealed)|\(state.staleApps.sorted().joined(separator: ","))|\(state.stalePlaceX)|\(state.testItemRunning)|\(state.capacity.map(String.init) ?? "-")|\(hidden.sorted().joined(separator: ","))|\(state.parkedModules.sorted().joined(separator: ","))"
+            let key = "\(state.nameless)|\(state.shape)|\(state.ownFirst)|\(state.undrawn)|\(state.staleConcealed)|\(state.staleApps.sorted().joined(separator: ","))|\(state.stalePlaceX)|\(state.frameShifts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","))|\(state.itemOrder?.joined(separator: ",") ?? "-")|\(state.ownExtras.joined(separator: ","))|\(state.ownOmitted.sorted().joined(separator: ","))|\(state.testItemRunning)|\(state.capacity.map(String.init) ?? "-")|\(hidden.sorted().joined(separator: ","))|\(state.parkedModules.sorted().joined(separator: ","))"
             if let cached = state.cache, cached.key == key { return cached.fixture }
 
             let leftToRight = state.ownFirst
@@ -156,7 +255,9 @@ final class SessionWorld: Sendable {
             let options = InventoryFixtures.Options(concealed: hidden, includeTestItem: state.testItemRunning, visibleOnPileBar: visible,
                                                     parkedSystemModules: state.parkedModules, ownItemsFirst: state.ownFirst,
                                                     undrawnOverflow: state.undrawn, concealedKeepTheirPlace: state.staleConcealed,
-                                                    staleApps: state.staleApps, stalePlaceX: state.stalePlaceX)
+                                                    staleApps: state.staleApps, stalePlaceX: state.stalePlaceX, frameShifts: state.frameShifts,
+                                                    itemOrder: state.itemOrder, ownExtras: state.ownExtras, ownOmitted: state.ownOmitted,
+                                                    unnamedApps: state.nameless)
             let fixture: InventoryFixtures.Fixture = switch state.shape {
             case .desk: InventoryFixtures.desk(options)
             case .laptop: InventoryFixtures.laptop(options)
@@ -198,16 +299,36 @@ struct WorldAX: AXReading {
     private var current: FakeAX { world.fixture().ax }
 
     func attribute(_ name: String, of element: AXElementRef) throws(AXReadError) -> AXValueBox {
-        try current.attribute(name, of: element)
+        if name == AXName.windows, world.windowsHung { throw .timeout }
+        if name == AXName.description, world.slotsHung { throw .timeout }
+        if name == AXName.position || name == AXName.size, hangsFrame(of: element) { throw .timeout }
+        return try current.attribute(name, of: element)
+    }
+
+    /// Whether this is the slot that is told not to say where it is: the one at the place its app's item of that title is, six points to the
+    /// left (the apps list their items about six points inside their slots, as the fixture has it). Other displays' slots are elsewhere.
+    private func hangsFrame(of element: AXElementRef) -> Bool {
+        guard let (bundleID, title) = world.hungSlotFrame, let pid = current.ownerPID(of: element) else { return false }
+        let fixture = world.fixture()
+        guard pid == fixture.pid(of: SessionWorld.agent) else { return false }
+        for node in fixture.extrasNodes(of: bundleID) {
+            let item = current.ref(node)
+            guard case .string(title)? = try? current.attribute(AXName.title, of: item),
+                  case .point(let itemOrigin)? = try? current.attribute(AXName.position, of: item),
+                  case .point(let origin)? = try? current.attribute(AXName.position, of: element) else { continue }
+            return abs(origin.x - (itemOrigin.x - 6)) < 1
+        }
+        return false
     }
 
     func children(of element: AXElementRef) throws(AXReadError) -> [AXElementRef] {
         try current.children(of: element)
     }
 
-    func application(pid: pid_t) -> AXElementRef { current.application(pid: pid) }
+    func application(pid: pid_t) -> AXElementRef { world.treeApplication(pid: pid, in: current) }
     func press(_ element: AXElementRef) throws(AXReadError) { try current.press(element) }
     func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { try current.attributeNames(of: element) }
+    func stopWaiting() { world.noteStopWaiting() }
 }
 
 /// Reads an app's items, after waiting at a gate while a test holds one: a read of the menu bar that is under way and doesn't finish.
@@ -218,10 +339,23 @@ final class HoldableExtras: AppExtrasReading {
     private let world: SessionWorld
     private let hold = Mutex<Gate?>(nil)
     private let held = Mutex(0)
+    private let asked = Mutex<[String]>([])
+    private let rewrite = Mutex<(@Sendable (ExtrasOutcome, RunningApp) -> ExtrasOutcome)?>(nil)
+
+    /// What an app's answer is made into before the scanner has it (a name that didn't come in time, a second process listing): nil
+    /// leaves them as they are.
+    func rewriteAnswers(_ body: (@Sendable (ExtrasOutcome, RunningApp) -> ExtrasOutcome)?) { rewrite.withLock { $0 = body } }
+
+    /// The apps that don't answer, by bundle ID, and for how many more reads (nil for as long as they are told to).
+    private let silent = Mutex<[String: Int?]>([:])
 
     init(world: SessionWorld) {
         self.world = world
     }
+
+    /// The app doesn't answer in time for its next `reads` reads (for ever with nil): a busy Mac.
+    func stopAnswering(_ bundleID: String, forReads reads: Int? = nil) { silent.withLock { $0[bundleID] = .some(reads) } }
+    func startAnswering(_ bundleID: String) { silent.withLock { $0[bundleID] = nil } }
 
     /// Reads that begin from now on wait at the gate (none wait for nil).
     func holdReads(at gate: Gate?) { hold.withLock { $0 = gate } }
@@ -229,13 +363,49 @@ final class HoldableExtras: AppExtrasReading {
     /// How many reads have come to a gate, whether they have been let through since or not.
     var readsHeld: Int { held.withLock { $0 } }
 
+    /// The apps asked (by bundle ID) since the last time this was asked to forget.
+    var appsAsked: [String] { asked.withLock { $0 } }
+    func forgetAppsAsked() { asked.withLock { $0 = [] } }
+
+    private let onNextRead = Mutex<(@Sendable () -> Void)?>(nil)
+
+    /// Runs this once, as the next read of an app begins (before it reads the world): the bar changes while the apps are being asked.
+    func runOnNextRead(_ body: @escaping @Sendable () -> Void) { onNextRead.withLock { $0 = body } }
+
+    private let slowApp = Mutex<(seconds: TimeInterval, clock: FakeClock, bundleID: String)?>(nil)
+
+    /// This app takes this long, on the clock, to answer each read: a read whose scope has less time left than that is cut where its time
+    /// ends, and comes back timed out (a busy Mac, as `PatientAX` makes of it).
+    func answerAfter(_ seconds: TimeInterval, on clock: FakeClock, app bundleID: String) {
+        slowApp.withLock { $0 = (seconds, clock, bundleID) }
+    }
+
     func read(_ app: RunningApp) async -> ExtrasOutcome {
+        if let slow = slowApp.withLock({ $0 }), app.bundleID == slow.bundleID {
+            let left = AXReadScope.current?.timeLeft ?? .infinity
+            if left < slow.seconds {
+                slow.clock.advance(by: .seconds(left))
+                return .timedOut
+            }
+            slow.clock.advance(by: .seconds(slow.seconds))
+        }
+        onNextRead.withLock { hook -> (@Sendable () -> Void)? in defer { hook = nil }; return hook }?()
+        asked.withLock { $0.append(app.bundleID ?? "") }
+        let doesntAnswer = silent.withLock { silent -> Bool in
+            guard let bundleID = app.bundleID, let entry = silent[bundleID] else { return false }
+            if let left = entry {
+                silent[bundleID] = left > 1 ? .some(left - 1) : nil
+            }
+            return true
+        }
+        if doesntAnswer { return .timedOut }
         let tree = world.fixture().ax
         if let gate = hold.withLock({ $0 }) {
             held.withLock { $0 += 1 }
             await gate.wait()
         }
-        return AppExtrasReader(ax: tree).read(app)
+        let outcome = AppExtrasReader(ax: tree).read(app)
+        return rewrite.withLock { $0 }?(outcome, app) ?? outcome
     }
 }
 
@@ -330,7 +500,10 @@ struct SessionRig {
                               capacity: Int? = nil, ownFirst: Bool = false, undrawn: Bool = false, staleConcealed: Bool = false,
                               sections initial: SectionModel = SectionModel(),
                               settings: HidingSettings = HidingSettings(), confirmationWait: Duration = .seconds(2),
-                              trusted: Switch = Switch(true)) -> SessionRig {
+                              trusted: Switch = Switch(true), sessionState: any SessionStateSource = SteadySessionState(),
+                              otherEngines: [HidingEngineKind: any HidingEngine] = [:],
+                              recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved = { _, _ in SettingsMoved() },
+                              reading: ((SessionWorld, FakeClock) -> any AXReading)? = nil) -> SessionRig {
         let world = existing ?? SessionWorld(shape: shape, testItem: testItem, capacity: capacity, ownFirst: ownFirst, undrawn: undrawn,
                                                    staleConcealed: staleConcealed)
         let events = CallLog()
@@ -338,32 +511,37 @@ struct SessionRig {
         world.setHiddenProvider { [world] in
             // An assertion hides whatever isn't on it, apps that start later included.
             guard fake.live > 0, let last = fake.calls.last else { return [] }
-            return Set(world.runningBundleIDs).subtracting(last.bundleIDs)
+            return Set(world.runningBundleIDs).subtracting(last.bundleIDs).union(world.unattachedApps)
         }
         fake.onActivated { events.add("apply") }
         let engine = AllowlistEngine(allowlist: fake, ownBundleID: SessionWorld.own, isInstalledCopy: true)
         let clock = FakeClock()
-        let hiding = HidingController(engines: [.allowlist: engine], clock: clock, confirm: { _ in .seen })
+        let engines: [HidingEngineKind: any HidingEngine] = otherEngines.merging([.allowlist: engine]) { _, new in new }
+        let hiding = HidingController(engines: engines, clock: clock, confirm: { _ in .seen })
         return make(world: world, clock: clock, events: events, allowlist: fake, hiding: hiding, sections: initial, settings: settings,
-                    confirmationWait: confirmationWait, trusted: trusted)
+                    confirmationWait: confirmationWait, trusted: trusted, sessionState: sessionState, recordsChecked: recordsChecked,
+                    reading: reading)
     }
 
     /// A session over engines that only note what they were asked, and the world in which nothing is ever concealed.
     static func withEngines(_ engines: [HidingEngineKind: any HidingEngine], shape: SessionWorld.Shape = .desk, testItem: Bool = false,
                             capacity: Int? = nil, ownFirst: Bool = false, sections initial: SectionModel = SectionModel(),
-                            settings: HidingSettings = HidingSettings(), events: CallLog = CallLog()) -> SessionRig {
+                            settings: HidingSettings = HidingSettings(), events: CallLog = CallLog(),
+                            sessionState: any SessionStateSource = SteadySessionState()) -> SessionRig {
         let world = SessionWorld(shape: shape, testItem: testItem, capacity: capacity, ownFirst: ownFirst)
         let clock = FakeClock()
         let hiding = HidingController(engines: engines, clock: clock, confirm: { _ in .seen })
         return make(world: world, clock: clock, events: events, allowlist: nil, hiding: hiding, sections: initial, settings: settings,
-                    confirmationWait: .seconds(2), trusted: Switch(true))
+                    confirmationWait: .seconds(2), trusted: Switch(true), sessionState: sessionState)
     }
 
     private static func make(world: SessionWorld, clock: FakeClock, events: CallLog, allowlist: FakeAllowlist?, hiding: HidingController,
                              sections initial: SectionModel, settings: HidingSettings, confirmationWait: Duration,
-                             trusted: Switch) -> SessionRig {
+                             trusted: Switch, sessionState: any SessionStateSource,
+                             recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved = { _, _ in SettingsMoved() },
+                             reading: ((SessionWorld, FakeClock) -> any AXReading)? = nil) -> SessionRig {
         let extras = HoldableExtras(world: world)
-        let scanner = MenuBarScanner(ax: world.ax, extrasReader: extras, runningApps: { world.scannerApps }, layout: { world.layout },
+        let scanner = MenuBarScanner(ax: reading?(world, clock) ?? world.ax, extrasReader: extras, runningApps: { world.scannerApps }, layout: { world.layout },
                                      ownBundleID: SessionWorld.own, isTrusted: {
             events.add("scan")
             return trusted.isOn
@@ -374,7 +552,7 @@ struct SessionRig {
                                      loadSections: { initial }, saveSections: { saved.save($0) },
                                      turnedOff: { await turnedOff.answer() },
                                      settings: settings, ownBundleID: SessionWorld.own, clock: clock, windows: world.windowList,
-                                     confirmationWait: confirmationWait)
+                                     confirmationWait: confirmationWait, sessionState: sessionState, recordsChecked: recordsChecked)
         return SessionRig(world: world, clock: clock, events: events, allowlist: allowlist, extras: extras, saved: saved,
                           turnedOff: turnedOff, hiding: hiding, session: session)
     }

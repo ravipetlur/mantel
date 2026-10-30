@@ -33,11 +33,11 @@ case .success(let invocation):
     // standard error, so that what is printed to standard output is only ever the answer.
     if let question = invocation.confirmation {
         guard isatty(STDIN_FILENO) != 0 else {
-            finish(CLIOutput.needsAnswerBeforehand)
+            finish(CLIOutput.needsAnswerBeforehand(invocation.command))
         }
         FileHandle.standardError.write(Data(question.utf8))
         guard CLIConfirmation.accepts(readLine()) else {
-            finish(CLIOutput.declined)
+            finish(CLIOutput.declined(invocation.command))
         }
     }
     let client = ControlSocketClient(path: MantelPaths.live().controlSocket)

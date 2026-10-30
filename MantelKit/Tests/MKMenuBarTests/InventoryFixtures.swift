@@ -57,6 +57,9 @@ enum InventoryFixtures {
         var includeTestItem = true
         /// The third-party slots carry no name at all, in any window.
         var stripThirdPartyNames = false
+        /// The world of macOS 27: no third-party app names its items, in its own list or on its slots. Only Mantel's items and the test item's
+        /// have names (the dots', the test item's extras).
+        var unnamedApps = false
         /// The windows (by their place among a display's) that lack the names of the third-party slots. By default every third one, from
         /// the third.
         var windowsWithoutNames: Set<Int>?
@@ -81,12 +84,28 @@ enum InventoryFixtures {
         var staleApps: Set<String> = []
         /// Where, from the display's left edge, the stale apps' places start (each icon of an app 38 points right of the one before).
         var stalePlaceX: CGFloat = 484
+        /// Apps whose items report their frames this many points to the right of where they are (an app whose frames are from before the
+        /// bar moved, or whose icon has traded places with its neighbour's: the slots stay where they are).
+        var frameShifts: [String: CGFloat] = [:]
+        /// The items left to right on the bar, by the name each has (its title when it has none): the ones named come first, in this order,
+        /// and the others follow as they were. (An app lists its items in its own order whatever they are drawn in.)
+        var itemOrder: [String]?
+        /// Items of Mantel's own the app lists besides the dots, by the name each is told by (`mantel.spacer.<id>`, `mantel.group.<id>`, the
+        /// divider's), drawn after the dots. An item the app has hidden with `isVisible` isn't listed, so they come and go in a test.
+        var ownExtras: [String] = []
+        /// Mantel's items among the dots that aren't listed (••, while nothing is in Always Hidden), by name.
+        var ownOmitted: Set<String> = []
 
         init(pidBase: pid_t = 1000, windowsPerDisplay: Int = 5, seed: UInt64 = 1, concealed: Set<String> = [], includeTestItem: Bool = true,
              stripThirdPartyNames: Bool = false, windowsWithoutNames: Set<Int>? = nil, listingDisplay: Int = 0, visibleOnPileBar: Int = 0,
              appsReportIdentifiers: Bool = true, parkedSystemModules: Set<String> = [], ownItemsFirst: Bool = false,
              undrawnOverflow: Bool = false, concealedKeepTheirPlace: Bool = false,
-             staleApps: Set<String> = [], stalePlaceX: CGFloat = 484) {
+             staleApps: Set<String> = [], stalePlaceX: CGFloat = 484, frameShifts: [String: CGFloat] = [:], itemOrder: [String]? = nil,
+             ownExtras: [String] = [], ownOmitted: Set<String> = [], unnamedApps: Bool = false) {
+            self.unnamedApps = unnamedApps
+            self.itemOrder = itemOrder
+            self.ownExtras = ownExtras
+            self.ownOmitted = ownOmitted
             self.pidBase = pidBase
             self.windowsPerDisplay = windowsPerDisplay
             self.seed = seed
@@ -103,6 +122,7 @@ enum InventoryFixtures {
             self.concealedKeepTheirPlace = concealedKeepTheirPlace
             self.staleApps = staleApps
             self.stalePlaceX = stalePlaceX
+            self.frameShifts = frameShifts
         }
     }
 
@@ -210,8 +230,19 @@ enum InventoryFixtures {
 
     private static func make(layout: DisplayLayout, piled: Set<String>, _ options: Options) -> Fixture {
         let ax = FakeAX()
-        var items = thirdParty.filter { options.includeTestItem || $0.bundleID != testItemBundleID }
+        var items = thirdParty.filter { (options.includeTestItem || $0.bundleID != testItemBundleID) && !options.ownOmitted.contains($0.name ?? "") }
+        for (index, name) in options.ownExtras.enumerated() {
+            items.append(Third(bundleID: ownBundleID, name: name, slotName: name, title: "Mantel", position: 2 + index))
+        }
         if options.ownItemsFirst { items = items.filter { $0.bundleID == ownBundleID } + items.filter { $0.bundleID != ownBundleID } }
+        if let order = options.itemOrder {
+            let named = order.compactMap { name in items.first { ($0.name ?? $0.title) == name } }
+            items = named + items.filter { entry in !named.contains { $0.bundleID == entry.bundleID && $0.position == entry.position } }
+        }
+        if options.unnamedApps {
+            let named: Set<String> = [ownBundleID, testItemBundleID]
+            items = items.map { named.contains($0.bundleID) ? $0 : Third(bundleID: $0.bundleID, name: nil, slotName: nil, title: $0.title, position: $0.position) }
+        }
         var bars: [CGRect] = []
         var windowsByDisplay: [[Int]] = []
         var namedSlots: [Int: [(slot: Int, name: String)]] = [:]
@@ -267,7 +298,7 @@ enum InventoryFixtures {
                     let bottom = layout.main.map { layout.cgRect(fromAppKit: $0.frame).maxY } ?? 1000
                     frame = CGRect(x: entry.position == 0 ? 7 : -1, y: bottom - 12, width: 24, height: 24)
                 } else {
-                    frame = home[index].map { $0.insetBy(dx: 6, dy: 1) }
+                    frame = home[index].map { $0.insetBy(dx: 6, dy: 1).offsetBy(dx: options.frameShifts[app.bundleID] ?? 0, dy: 0) }
                 }
                 extras.append(FakeAX.Extra(title: entry.title, identifier: options.appsReportIdentifiers ? entry.name : nil, frame: frame))
             }

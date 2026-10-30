@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import MKCore
+import Synchronization
 
 /// What reading MenuBarAgent's windows gave.
 struct AgentRead: Sendable {
@@ -13,6 +14,18 @@ struct AgentRead: Sendable {
     var memory: [String: WindowMemory] = [:]
     /// Accessibility refused the read.
     var notTrusted = false
+    /// Some read of what was used (a window's place, a slot's frame or name) timed out, or was cut by the read's budget or deadline: a
+    /// slot may lack its frame or its name, and a window may have been passed over. The bars are what was seen, and may be short of what
+    /// is there (`Inventory.agentReadCut`).
+    var cut = false
+}
+
+/// How many reads of one window or one window's slots timed out. A read that is cut (`PatientAX` asks nobody once the budget or the
+/// deadline has passed) is a timeout here too.
+final class TimeoutCount: Sendable {
+    private let count = Mutex(0)
+    func note() { count.withLock { $0 += 1 } }
+    var value: Int { count.withLock { $0 } }
 }
 
 /// What a quick look at one display's bar found.
@@ -92,33 +105,40 @@ struct AgentWindowReader: Sendable {
         }
 
         // What the windows say of where they are, and, when the plan wants to compare them, where their slots are.
-        var slotsOfWindow: [Int: [AgentSlot]] = [:]
+        var slotsOfWindow: [Int: (slots: [AgentSlot], timeouts: Int)] = [:]
         var reads: [AgentWindowRead] = []
+        let placing = TimeoutCount()
         for (index, element) in elements.enumerated() {
             var slotFrames: [CGRect?] = []
             if case .thorough = plan {
-                let slots = self.slots(of: element)
-                slotsOfWindow[index] = slots
+                let counted = TimeoutCount()
+                let slots = self.slots(of: element, timeouts: counted)
+                slotsOfWindow[index] = (slots, counted.value)
                 slotFrames = slots.map(\.frame)
             }
-            reads.append(AgentWindowRead(index: index, frame: frame(of: element), slotFrames: slotFrames))
+            reads.append(AgentWindowRead(index: index, frame: frame(of: element, timeouts: placing), slotFrames: slotFrames))
         }
 
         let chosen = AgentWindowChooser.choose(reads, layout: layout)
         var result = AgentRead()
+        result.cut = placing.value > 0
         for window in chosen {
             let search = Self.search(of: window, plan: plan)
 
-            var best: (index: Int, slots: [AgentSlot], count: Int)?
+            var best: (index: Int, slots: [AgentSlot], count: Int, timeouts: Int)?
             var looked: Int?
             for (position, index) in search.order.enumerated() {
-                let slots = slotsOfWindow[index] ?? self.slots(of: elements[index])
+                let counted = TimeoutCount()
+                let slots = slotsOfWindow[index]?.slots ?? self.slots(of: elements[index], timeouts: counted)
+                let timeouts = slotsOfWindow[index]?.timeouts ?? counted.value
                 let count = Self.identifierCount(slots)
-                if best == nil || count > best?.count ?? 0 { best = (index, slots, count) }
+                if best == nil || count > best?.count ?? 0 { best = (index, slots, count, timeouts) }
                 if search.looksAround, position == 1 { looked = index }
                 if position + 1 >= search.atLeast, let best, best.count >= search.wanted { break }
             }
             guard let best else { continue }
+            // Only the window that is used says what the bar is: a window that was read and not used, and timed out, is nothing to it.
+            if best.timeouts > 0 { result.cut = true }
 
             switch plan {
             case .thorough, .allWindows:
@@ -155,9 +175,11 @@ struct AgentWindowReader: Sendable {
         }
     }
 
-    /// How many of the slots have an identifier.
+    /// How many of the slots have an identifier that no other slot of the window has. A window of a Space that isn't on screen can give
+    /// every slot of an app its first item's name, and a name that repeats tells none of them apart.
     static func identifierCount(_ slots: [AgentSlot]) -> Int {
-        slots.filter { !($0.identifier ?? "").isEmpty }.count
+        let names = slots.compactMap(\.identifier).filter { !$0.isEmpty }
+        return Dictionary(names.map { ($0, 1) }, uniquingKeysWith: +).values.filter { $0 == 1 }.count
     }
 
     /// A quick look at the main display's bar (the first display if none is main): how many of its slots have a place on it.
@@ -233,6 +255,49 @@ struct AgentWindowReader: Sendable {
         return nil
     }
 
+    /// One window of one display, with its slots: the quick read that finds where an item is now. The other displays' windows are not read.
+    ///
+    /// `best` is the window that was used last for the display (`WindowMemory.best`), read first if it is still on the display; then the
+    /// others that start on the display, in Accessibility's order. A window that repeats a name among its slots is one of a Space that isn't
+    /// on screen, which can lag behind the bar, so the next is read: the first whose names don't repeat is the one (a window whose slots
+    /// have no names is one too, as every window was before apps named their items). When none is, the one with the most names of its own
+    /// is, the first of those. A window that can't be placed (its position or size can't be read, or it is empty) is passed over.
+    ///
+    /// - Returns: the bar, the window's place among all the agent's windows, and whether every read of what was used was answered: a read
+    ///   that timed out (or was cut by the read's budget) leaves a slot without its frame or its name, so that the bar is short of what is
+    ///   there, and a window that couldn't be placed may have been the better one. Nil when Accessibility doesn't give MenuBarAgent's
+    ///   windows, or none is on the display.
+    @concurrent
+    func readBar(agent: RunningApp, layout: DisplayLayout, display uuid: String, preferring best: Int?)
+        async -> (bar: MatchBar, index: Int, isComplete: Bool)? {
+        let root = ax.application(pid: agent.pid)
+        guard case .elements(let windows)? = try? ax.attribute(AXName.windows, of: root) else { return nil }
+        var order = Array(windows.indices)
+        if let best, let at = order.firstIndex(of: best) { order.insert(order.remove(at: at), at: 0) }
+        var found: (bar: MatchBar, index: Int, count: Int, timeouts: Int)?
+        let placing = TimeoutCount()
+        for index in order {
+            let window = windows[index]
+            guard case .point(let origin)? = value(AXName.position, of: window, timeouts: placing),
+                  AgentWindowChooser.displayUUID(at: origin, layout: layout) == uuid,
+                  case .size(let size)? = value(AXName.size, of: window, timeouts: placing) else { continue }
+            let rect = CGRect(origin: origin, size: size)
+            guard !rect.isEmpty else { continue }
+            let counted = TimeoutCount()
+            let slots = slots(of: window, timeouts: counted)
+            let count = Self.identifierCount(slots)
+            if count > found?.count ?? -1 { found = (MatchBar(displayUUID: uuid, rect: rect, slots: slots), index, count, counted.value) }
+            if !Self.repeatsAName(slots) { break }
+        }
+        return found.map { ($0.bar, $0.index, $0.timeouts == 0 && placing.value == 0) }
+    }
+
+    /// Whether two of the slots have one name.
+    static func repeatsAName(_ slots: [AgentSlot]) -> Bool {
+        let names = slots.compactMap(\.identifier).filter { !$0.isEmpty }
+        return Set(names).count < names.count
+    }
+
     /// The frames of an app's own menus (the children of its `AXMenuBar`), in CoreGraphics global points. Empty when the app has no
     /// menu bar or doesn't answer in time.
     @concurrent
@@ -240,40 +305,69 @@ struct AgentWindowReader: Sendable {
         let root = ax.application(pid: pid)
         guard case .elements(let bars)? = try? ax.attribute(AXName.menuBar, of: root), let bar = bars.first,
               let children = try? ax.children(of: bar) else { return [] }
-        return children.compactMap(frame(of:)).filter { !$0.isEmpty }
+        return children.compactMap { frame(of: $0) }.filter { !$0.isEmpty }
     }
 
     // MARK: Slots
 
-    private func slots(of window: AXElementRef) -> [AgentSlot] {
-        ((try? ax.children(of: window)) ?? []).map { element in
-            let role = string(AXName.role, of: element)
-            return AgentSlot(frame: frame(of: element),
-                             identifier: string(AXName.identifier, of: element) ?? firstIdentifier(below: element, depth: 3),
-                             role: role, subrole: string(AXName.subrole, of: element), description: string(AXName.description, of: element),
+    private func slots(of window: AXElementRef, timeouts: TimeoutCount? = nil) -> [AgentSlot] {
+        let children: [AXElementRef]
+        do {
+            children = try ax.children(of: window)
+        } catch {
+            if error == .timeout { timeouts?.note() }
+            return []
+        }
+        return children.map { element in
+            let role = string(AXName.role, of: element, timeouts: timeouts)
+            return AgentSlot(frame: frame(of: element, timeouts: timeouts),
+                             identifier: string(AXName.identifier, of: element, timeouts: timeouts)
+                                 ?? firstSystemIdentifier(below: element, depth: 3, timeouts: timeouts),
+                             role: role, subrole: string(AXName.subrole, of: element, timeouts: timeouts),
+                             description: string(AXName.description, of: element, timeouts: timeouts),
                              ownerPID: nil, isOverflowChevron: role == OverflowDetector.chevronRole)
         }
     }
 
-    /// The identifier of the first descendant that has one: some slots carry theirs on a child.
-    private func firstIdentifier(below element: AXElementRef, depth: Int) -> String? {
-        guard depth > 0, let children = try? ax.children(of: element) else { return nil }
+    /// The identifier of the first descendant that names a system module: some slots carry theirs on a child. Any other name found below a
+    /// slot is a view's inside the app's item (an updater's window, a panel), not the item's own, and the slot is left without one.
+    private func firstSystemIdentifier(below element: AXElementRef, depth: Int, timeouts: TimeoutCount?) -> String? {
+        guard depth > 0 else { return nil }
+        let children: [AXElementRef]
+        do {
+            children = try ax.children(of: element)
+        } catch {
+            if error == .timeout { timeouts?.note() }
+            return nil
+        }
         for child in children {
-            if let identifier = string(AXName.identifier, of: child) { return identifier }
-            if let identifier = firstIdentifier(below: child, depth: depth - 1) { return identifier }
+            if let identifier = string(AXName.identifier, of: child, timeouts: timeouts), ItemID.systemModule(ofIdentifier: identifier) != nil {
+                return identifier
+            }
+            if let identifier = firstSystemIdentifier(below: child, depth: depth - 1, timeouts: timeouts) { return identifier }
         }
         return nil
     }
 
-    private func string(_ name: String, of element: AXElementRef) -> String? {
-        guard case .string(let value)? = try? ax.attribute(name, of: element), !value.isEmpty else { return nil }
+    /// What the attribute holds; nil when it has nothing or didn't come, which is counted (`timeouts`) when it was a timeout.
+    private func value(_ name: String, of element: AXElementRef, timeouts: TimeoutCount?) -> AXValueBox? {
+        do {
+            return try ax.attribute(name, of: element)
+        } catch {
+            if error == .timeout { timeouts?.note() }
+            return nil
+        }
+    }
+
+    private func string(_ name: String, of element: AXElementRef, timeouts: TimeoutCount? = nil) -> String? {
+        guard case .string(let value)? = value(name, of: element, timeouts: timeouts), !value.isEmpty else { return nil }
         return value
     }
 
     /// The element's frame from its position and size; nil when either is missing.
-    private func frame(of element: AXElementRef) -> CGRect? {
-        guard case .point(let origin)? = try? ax.attribute(AXName.position, of: element),
-              case .size(let size)? = try? ax.attribute(AXName.size, of: element) else { return nil }
+    private func frame(of element: AXElementRef, timeouts: TimeoutCount? = nil) -> CGRect? {
+        guard case .point(let origin)? = value(AXName.position, of: element, timeouts: timeouts),
+              case .size(let size)? = value(AXName.size, of: element, timeouts: timeouts) else { return nil }
         return CGRect(origin: origin, size: size)
     }
 }

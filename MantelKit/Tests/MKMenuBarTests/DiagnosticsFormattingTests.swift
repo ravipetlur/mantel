@@ -23,9 +23,26 @@ struct DiagnosticsFormattingTests {
     }
 
     private let checks = [
-        DiagnosticsCheck(title: "Accessibility", status: .ok, detail: "Granted"),
+        DiagnosticsCheck(title: "Device control and data access", status: .ok, detail: "Granted"),
         DiagnosticsCheck(title: "Layout file", status: .warning, detail: "Found at /Users/someone/Library/x.plist, not granted"),
     ]
+
+    // MARK: The journal
+
+    @Test func theJournalLineSaysWhatQuitPutsBackAndWhatIsKept() {
+        #expect(JournalSummary.detail(untilQuit: 2, kept: 5) == "2 to put back on quit, 5 kept.")
+        #expect(JournalSummary.detail(untilQuit: 0, kept: 0) == "0 to put back on quit, 0 kept.")
+        #expect(JournalSummary.detail(untilQuit: 1, kept: 0) == "1 to put back on quit, 0 kept.")
+    }
+
+    @Test func onlyTemporaryChangesNeedAttention() {
+        // What Mantel keeps is as it should be, and "Replay now" (which the pane disables for an OK line) has nothing to do for it.
+        #expect(JournalSummary.check(untilQuit: 0, kept: 3) == DiagnosticsCheck(title: "Journal", status: .ok,
+                                                                               detail: "0 to put back on quit, 3 kept."))
+        #expect(JournalSummary.check(untilQuit: 0, kept: 0).status == .ok)
+        #expect(JournalSummary.check(untilQuit: 1, kept: 3).status == .warning)
+        #expect(JournalSummary.check(untilQuit: 4, kept: 0).detail == "4 to put back on quit, 0 kept.")
+    }
 
     // MARK: Redaction
 
@@ -162,11 +179,11 @@ struct DiagnosticsFormattingTests {
                                           home: home, timeZone: utc)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         #expect(lines.first == "Mantel diagnostics")
-        #expect(text.contains("Accessibility: OK. Granted"))
+        #expect(text.contains("Device control and data access: OK. Granted"))
         #expect(text.contains("Layout file: Needs attention. Found at ~/Library/x.plist, not granted"))
         #expect(text.contains("overflow · 2023-11-14 22:13:20 · restored · no errors"))
         #expect(text.contains("\"chevronPresent\" : true"))
-        let checksAt = text.range(of: "Accessibility")
+        let checksAt = text.range(of: "Device control and data access")
         let probesAt = text.range(of: "Last probe reports")
         #expect(checksAt != nil && probesAt != nil)
         if let checksAt, let probesAt { #expect(checksAt.lowerBound < probesAt.lowerBound) }
@@ -219,7 +236,7 @@ struct DiagnosticsFormattingTests {
         let text = String(decoding: (try? JSONEncoder().encode(json)) ?? Data(), as: UTF8.self)
         #expect(!text.contains("/Users/someone"))
         #expect(object["checks"] == .array([
-            .object(["title": .string("Accessibility"), "status": .string("ok"), "detail": .string("Granted")]),
+            .object(["title": .string("Device control and data access"), "status": .string("ok"), "detail": .string("Granted")]),
             .object(["title": .string("Layout file"), "status": .string("warning"), "detail": .string("Found at ~/Library/x.plist, not granted")]),
         ]))
     }
@@ -240,6 +257,18 @@ struct DiagnosticsFormattingTests {
         let rows = HidingDiagnostics.reachRows(inventory(reach: reach))
         #expect(rows.map(\.name) == ["Alpha", "bravo", "Mike", "Zulu"])
         #expect(rows.map(\.text) == ["Fine", "Slow (312 ms)", "Timed out; asked again in 30 seconds", "Skipped"])
+    }
+
+    @Test func anAppThatRefusesAccessibilityHasItsOwnRow() {
+        let reach = [AppReach(bundleID: "com.example.refuser", name: "Refuser", status: .refused, readMs: 3),
+                     AppReach(bundleID: "com.example.refuser", name: "Refuser", status: .skipped, readMs: 0),
+                     AppReach(bundleID: "com.example.other", name: "Other", status: .fine, readMs: 5)]
+        let rows = HidingDiagnostics.reachRows(inventory(reach: reach))
+        #expect(rows.map(\.text) == ["Fine", "Refuses to answer"], "the one that went worse of the two answers")
+        #expect(rows.last?.status == .refused)
+        let copied = HidingDiagnostics.blocks(engine: nil, inventory: inventory(reach: reach)).first { $0.title == "How apps answer Mantel" }
+        #expect(copied?.lines == ["com.example.other: Fine", "com.example.refuser: Refuses to answer"])
+        #expect(inventory(reach: reach).problems.isEmpty, "and Mantel's own grant is not in question")
     }
 
     @Test func anAppWithTwoProcessesHasOneRowAndItIsTheWorst() {
@@ -268,7 +297,7 @@ struct DiagnosticsFormattingTests {
         let labelled = MenuBarItem(id: ItemID(bundleID: "com.example.alpha", key: .identifier("main")), ownerBundleID: "com.example.alpha",
                                    appName: "Home Wi-Fi Helper", label: "Connected to Sam's Network", frames: [:], overflowedOn: [], isMantel: false)
         let blocks = HidingDiagnostics.blocks(engine: nil, inventory: inventory(reach: reach, items: [labelled]))
-        let block = blocks.first { $0.title == "Accessibility reach" }
+        let block = blocks.first { $0.title == "How apps answer Mantel" }
         #expect(block?.lines == ["com.example.alpha: Slow (140 ms)", "com.example.beta: Fine"])
 
         let text = DiagnosticsText.render(checks: [], blocks: blocks, probes: [:], home: home, timeZone: utc)
@@ -285,13 +314,13 @@ struct DiagnosticsFormattingTests {
     }
 
     @Test func noReachSaysSo() {
-        let block = HidingDiagnostics.blocks(engine: nil, inventory: inventory()).first { $0.title == "Accessibility reach" }
+        let block = HidingDiagnostics.blocks(engine: nil, inventory: inventory()).first { $0.title == "How apps answer Mantel" }
         #expect(block?.lines == ["No app has been asked yet."])
     }
 
     @Test func theBlocksAreInTheReportBetweenTheChecksAndTheProbes() {
         let blocks = HidingDiagnostics.blocks(engine: nil, inventory: nil)
-        #expect(blocks.map(\.title) == ["Ways of hiding", "What hiding changes", "Accessibility reach"])
+        #expect(blocks.map(\.title) == ["Ways of hiding", "What hiding changes", "How apps answer Mantel"])
         let text = DiagnosticsText.render(checks: checks, blocks: blocks, probes: [:], home: home, timeZone: utc)
         let lastCheck = text.range(of: "Layout file")!.lowerBound
         let ways = text.range(of: "Ways of hiding")!.lowerBound

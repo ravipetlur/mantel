@@ -1,21 +1,22 @@
 import AppKit
+import MKCommands
 import SwiftUI
 
-/// The pane Settings is on, and what to do when the person picks another.
+/// The page Settings is on, and what to do when the person picks another.
 @Observable
 final class SettingsModel {
-    private(set) var selection: SettingsPane
-    private let didSelect: (SettingsPane) -> Void
+    private(set) var selection: SettingsPage
+    private let didSelect: (SettingsPage) -> Void
 
-    init(selection: SettingsPane, didSelect: @escaping (SettingsPane) -> Void) {
+    init(selection: SettingsPage, didSelect: @escaping (SettingsPage) -> Void) {
         self.selection = selection
         self.didSelect = didSelect
     }
 
-    func select(_ pane: SettingsPane) {
-        guard pane != selection else { return }
-        selection = pane
-        didSelect(pane)
+    func select(_ page: SettingsPage) {
+        guard page != selection else { return }
+        selection = page
+        didSelect(page)
     }
 }
 
@@ -32,8 +33,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     init(coordinator: AppCoordinator) {
         activation = coordinator.activation
         visibilityChanged = { [weak coordinator] in coordinator?.setSettingsOpen($0) }
-        let model = SettingsModel(selection: coordinator.lastSettingsPane,
-                                  didSelect: { [weak coordinator] in coordinator?.rememberSettingsPane($0) })
+        let model = SettingsModel(selection: coordinator.lastSettingsPage,
+                                  didSelect: { [weak coordinator] in coordinator?.rememberSettingsPage($0) })
         self.model = model
         // The coordinator owns this controller, so the content doesn't hold it.
         content = DroppableContent { [unowned coordinator] in AnyView(SettingsView(model: model, coordinator: coordinator)) }
@@ -53,11 +54,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    /// Shows the window on `pane`, or on the pane it was on, and brings it to the front: Mantel becomes an ordinary app, and then (after
+    /// Shows the window on `page`, or on the page it was on, and brings it to the front: Mantel becomes an ordinary app, and then (after
     /// the menu the request may have come from has finished) becomes active and has the window key (`WindowShowing`).
-    func show(pane: SettingsPane?) {
+    func show(page: SettingsPage?) {
         content.restore()
-        if let pane { model.select(pane) }
+        if let page { model.select(page) }
         if let window { activation.show(window, as: .settings) }
         visibilityChanged(true)
     }

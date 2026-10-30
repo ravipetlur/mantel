@@ -166,8 +166,7 @@ struct HidingControllerTests {
         #expect(during.kind == .spacer)
         #expect(during.decidedFor == .automatic)
 
-        while await rig.clock.waitForSleepers(1, within: .milliseconds(20)) { rig.clock.advance(by: HidingController.confirmationInterval) }
-        await switching.value
+        await rig.driven { await switching.value }
         #expect(await rig.controller.status().decidedFor == .wideSpacer)
 
         await rig.controller.tearDown()
@@ -623,5 +622,42 @@ struct HidingControllerTests {
         let rig = Rig()
         await rig.controller.choose(method: .automatic)
         #expect(await rig.controller.status().unavailableReasons.isEmpty)
+    }
+
+    // MARK: An icon macOS doesn't tie to its app
+
+    @Test func unattachedInputSwitchesThereAndBack() async {
+        let rig = Rig()
+        await rig.controller.choose(method: .automatic)
+        await rig.controller.apply(plan)
+        #expect(await rig.controller.status().kind == .allowlist)
+
+        await rig.controller.choose(method: .automatic, unattachedShownApps: ["com.example.a"])
+        #expect(rig.calls == ["allowlist.apply", "approvals.apply", "confirm", "allowlist.tearDown"], "new, confirmed, then old")
+        let status = await rig.controller.status()
+        #expect(status.kind == .approvals)
+        #expect(status.reason.hasPrefix("1 app in Shown has an icon macOS can't tie to it"))
+
+        // The same set again changes nothing.
+        let before = rig.calls
+        await rig.controller.choose(method: .automatic, unattachedShownApps: ["com.example.a"])
+        #expect(rig.calls == before)
+
+        await rig.controller.choose(method: .automatic, unattachedShownApps: [])
+        #expect(await rig.controller.status().kind == .allowlist)
+        #expect(rig.calls.suffix(3) == ["allowlist.apply", "confirm", "approvals.tearDown"])
+    }
+
+    @Test func forcedApplyKeepsTheUnattachedInput() async {
+        let rig = Rig()
+        await rig.controller.choose(method: .automatic, unattachedShownApps: ["com.example.a"])
+        await rig.controller.apply(plan)
+        #expect(await rig.controller.status().kind == .approvals)
+
+        // A refresh's forced apply chooses again from what was last asked: it stays on the switches.
+        await rig.controller.apply(plan, force: true)
+        #expect(await rig.controller.status().kind == .approvals)
+        #expect(rig.allowlist.applied.isEmpty)
+        #expect(rig.approvals.reapplied == 1)
     }
 }

@@ -127,7 +127,7 @@ struct PlistFileAccessLagTests {
         let codecs = [PlistBlobCodecs.nested: NestedPlistCodec() as any PlistBlobCodec]
         let access = PlistFileAccess(journal: makeJournal(), paths: paths, grants: nil, codecs: codecs,
                                      io: ScriptedService(.followsTheFile).io, clock: clock)
-        let entryOfTheApp = JournalEntry.plistPath(filePath: plist.resolvingSymlinksInPath().path(percentEncoded: false), key: "tracked",
+        let entryOfTheApp = JournalEntry.plistPath(filePath: CanonicalPath.of(plist), key: "tracked",
                                                    path: flag, original: .bool(true), strategy: .cfPreferences, codec: PlistBlobCodecs.nested)
 
         #expect(await access.stillHolds(.value(.bool(false)), for: entryOfTheApp, grants: nil) == true, "the switch is as Mantel left it")

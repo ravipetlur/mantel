@@ -14,9 +14,16 @@ public actor ScanScheduler {
     /// Why a scan is wanted, for the log and for what the scan then does.
     public enum Reason: String, Sendable {
         case appsChanged, displaysChanged, reveal, refresh, trial, poll
+        /// A read that checks the bar against a layout write, and one that follows a ⌘-drag: each is waited for.
+        case layoutCheck, layoutFollow
 
         /// The reasons that are acted on at once, not after the wait that lets requests that come together be one scan.
-        fileprivate var isImmediate: Bool { self == .reveal || self == .refresh }
+        fileprivate var isImmediate: Bool {
+            switch self {
+            case .reveal, .refresh, .layoutCheck, .layoutFollow: true
+            case .appsChanged, .displaysChanged, .trial, .poll: false
+            }
+        }
     }
 
     public static let idleInterval: Duration = .seconds(10)
@@ -67,6 +74,9 @@ public actor ScanScheduler {
         isStopped = false
         startPolling()
     }
+
+    /// Whether polling is set going. For tests.
+    var isPolling: Bool { pollingTask != nil }
 
     /// Stops polling and drops what was waiting for a scan. A scan that is running finishes.
     public func stop() {

@@ -11,12 +11,39 @@
 /// - **It is followed up only if the machine is still in that state when the apply is over.** One that was left during the apply has
 ///   a newer change behind it, and the follow-up would only be stale. It isn't remembered as applied either: nothing followed it up,
 ///   so if the machine comes back to it, it is applied again, and followed up then.
+/// - **A correction is stale once any later change has passed its second look.** The correction to the second bar opens the bar on
+///   the main actor after the session's work, so it carries the count of changes that had passed when it was asked for, and is dropped
+///   if the count has moved (`isStale(stamp:)`).
+/// - **The collapse after an icon is clicked in the second bar** is skipped under the same rule (`collapsesAfterIconClick(stamp:)`), the
+///   stamp being taken when the cell is clicked.
 /// - **A reset makes it forget** what was applied: the session collapsed itself, and the bar shows a collapse, so the next change to a
 ///   reveal is always applied, however long ago the last one was.
 public struct RevealApplyPolicy: Sendable, Equatable {
     private var applied: RevealState?
+    /// How many changes have passed their second look (and a reset), for telling a correction that something newer has overtaken.
+    public private(set) var looks = 0
 
     public init() {}
+
+    /// Notes that a change has passed its second look, and is about to open or close the bar and be applied; returns the stamp a
+    /// correction to it carries.
+    @discardableResult
+    public mutating func passedSecondLook() -> Int {
+        looks += 1
+        return looks
+    }
+
+    /// Whether a correction that was asked for at `stamp` has been overtaken: a change has passed its look since.
+    public func isStale(stamp: Int) -> Bool {
+        stamp != looks
+    }
+
+    /// Whether the collapse that follows an icon clicked in the second bar is still wanted. The click may take seconds (room is made for
+    /// it), and the cell was shown by the reveal at `stamp` (`looks` when it was clicked): a change that has passed its look since is a
+    /// newer reveal (an inline one the person asked for meanwhile, Focus Mode), which the collapse would take down.
+    public func collapsesAfterIconClick(stamp: Int) -> Bool {
+        !isStale(stamp: stamp)
+    }
 
     /// Whether to apply a change to `state`, the machine being in `current`.
     public func shouldApply(_ state: RevealState, machineIsIn current: RevealState) -> Bool {
@@ -46,5 +73,6 @@ public struct RevealApplyPolicy: Sendable, Equatable {
     /// Forgets what was applied: the next change is applied, whatever it is.
     public mutating func forget() {
         applied = nil
+        looks += 1
     }
 }

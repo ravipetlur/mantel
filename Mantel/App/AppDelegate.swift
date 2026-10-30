@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isQuitting = false
     /// What a SIGTERM does (`TerminationSignal`), and the dispatch source that hears it.
     private var terminationSignal = TerminationSignal()
+    /// What the log says of the quit: each step with its time, who answered, and what the fallback found (`QuitTrace`).
+    private let quitTrace = QuitTrace(write: { Log.info("quit", $0) })
     private var sigtermSource: DispatchSourceSignal?
     /// The one owner of Mantel's activation policy: a menu bar app with no Dock icon, except while a window of its own is open (or the
     /// menu bar is taken over). The coordinator, the windows and the takeover share it.
@@ -35,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// system's default action would have.
     private func quitOnSIGTERM() {
         signal(SIGTERM, SIG_IGN)
-        let fallback = SIGTERMFallback()
+        let fallback = SIGTERMFallback(trace: quitTrace)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: SIGTERMFallback.queue)
         source.setEventHandler { @Sendable [weak self] in
             DispatchQueue.main.async {
@@ -51,7 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch terminationSignal.received() {
         case .quit(let line):
             Log.info("quit", line)
-            NSApp.terminate(nil)
+            // An alert or panel that is up holds the run loop in its own mode, where the quit's request isn't served: it is ended, with the
+            // answer every alert takes as Cancel, so that the quit goes on with its cleanup.
+            if NSApp.modalWindow != nil { NSApp.abortModal() }
+            // Not `terminate` itself: this runs inside a main-queue block, where AppKit's wait for the reply would hold the cleanup and
+            // the quit timer that answer it (`QuitRequest`).
+            AppQuit.request()
         case .alreadyQuitting:
             break
         }
@@ -67,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let facts = await SingleInstance.handOff(socket: paths.controlSocket, to: other)
                 switch HandOff.decide(facts) {
                 case .quit:
-                    NSApp.terminate(nil)
+                    AppQuit.request()
                 case .start:
                     // Never quit with nobody to take over: the other one wasn't reached (it may have exited, or be starting
                     // at the same moment as this one), so this one starts, and the control socket's lock decides which stays.
@@ -83,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func start(with paths: MantelPaths, earlierHandOff: HandOffFacts? = nil) {
         let coordinator = AppCoordinator(paths: paths, activation: activation, earlierHandOff: earlierHandOff)
         self.coordinator = coordinator
+        coordinator.registerQuitDiagnostics(on: quitTrace)
         coordinator.start()
     }
 
@@ -100,21 +108,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isQuitting else { return .terminateLater }
         isQuitting = true
         terminationSignal.quitBegan()
+        // First of all, before anything is awaited: reads stop waiting for apps (they hold the threads the cleanup and the timer need), and
+        // the log's account of the quit begins, with a heartbeat of the main thread and of the pool.
+        coordinator.beginQuit(quitTrace, because: "quitting")
+        startQuitHeartbeats()
         Task {
             await coordinator.prepareToQuit()
-            answerQuit()
+            answerQuit(by: "the cleanup")
         }
         Task {
             await coordinator.quitTimer.wait()
-            answerQuit()
+            answerQuit(by: "the timer")
         }
         return .terminateLater
     }
 
-    private func answerQuit() {
+    private func answerQuit(by who: String) {
         guard !hasAnsweredQuit else { return }
         hasAnsweredQuit = true
+        quitTrace.answered(by: who)
         NSApp.reply(toApplicationShouldTerminate: true)
+    }
+
+    /// How long the beats go on: until the process ends, and no longer than the SIGTERM fallback waits.
+    private static let heartbeatLimitMilliseconds = 8_000
+
+    /// Every half second, a line from the main queue and one from a task of the pool: a beat that doesn't come says that thread was held (the
+    /// SIGTERM fallback's line says the last step reached, and what the readers were waiting for). They go on after the quit is answered,
+    /// so that a hang after the reply says which thread is held.
+    private func startQuitHeartbeats() {
+        let trace = quitTrace
+        let limit = Self.heartbeatLimitMilliseconds
+        func mainBeat() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500)) {
+                guard trace.elapsedMilliseconds <= limit else { return }
+                trace.beat("the main thread")
+                mainBeat()
+            }
+        }
+        mainBeat()
+        Task.detached {
+            while trace.elapsedMilliseconds <= limit {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard trace.elapsedMilliseconds <= limit else { return }
+                trace.beat("the task pool")
+            }
+        }
     }
 }
 
@@ -128,6 +167,11 @@ private nonisolated final class SIGTERMFallback: Sendable {
     static let wait: DispatchTimeInterval = .seconds(8)
 
     private let armed = Mutex(false)
+    private let trace: QuitTrace
+
+    init(trace: QuitTrace) {
+        self.trace = trace
+    }
 
     func armOnce() {
         let first = armed.withLock { wasArmed in
@@ -135,8 +179,10 @@ private nonisolated final class SIGTERMFallback: Sendable {
             return !wasArmed
         }
         guard first else { return }
+        let trace = trace
         Self.queue.asyncAfter(deadline: .now() + Self.wait) {
             Log.warning("quit", "the quit asked for by SIGTERM didn't end Mantel within 8 seconds; ending now")
+            Log.warning("quit", trace.fallbackLine())
             _exit(0)
         }
     }
