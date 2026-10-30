@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("HandOff")
+@Suite("HandOff", .timeLimit(.minutes(2)))
 struct HandOffDecisionTests {
     private let alive = RunningInstance(pid: 10, isTerminated: false)
     private let exited = RunningInstance(pid: 10, isTerminated: true)

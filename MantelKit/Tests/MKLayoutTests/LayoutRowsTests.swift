@@ -463,7 +463,7 @@ struct LayoutRowsTests {
     }
 }
 
-@Suite("Layout copy")
+@Suite("Layout copy", .timeLimit(.minutes(2)))
 struct LayoutCopyTests {
     @Test func theSectionsHaveTheirFooters() {
         #expect(LayoutCopy.footer(for: .shown) == "Always in the menu bar.")

@@ -1,7 +1,7 @@
 import MKCommands
 import Testing
 
-@Suite("Command-line parser")
+@Suite("Command-line parser", .timeLimit(.minutes(2)))
 struct CLIParserTests {
     private func parse(_ arguments: String...) -> Result<CLIInvocation, CLIUsageError> {
         CLIParser.parse(arguments)

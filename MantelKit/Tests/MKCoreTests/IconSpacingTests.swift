@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Icon spacing")
+@Suite("Icon spacing", .timeLimit(.minutes(2)))
 struct IconSpacingTests {
     private func values(_ spacing: Int, _ padding: Int) -> IconSpacingValues {
         IconSpacingValues(spacing: spacing, padding: padding)

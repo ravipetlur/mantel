@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Quitting on SIGTERM")
+@Suite("Quitting on SIGTERM", .timeLimit(.minutes(2)))
 struct TerminationSignalTests {
     @Test func theFirstSignalStartsAQuitAndSaysSo() {
         var signal = TerminationSignal()

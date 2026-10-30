@@ -6,7 +6,7 @@ import Testing
 @testable import MKLayout
 
 /// A read that is missing an app's icons isn't followed; two reads in a row that agree are the bar as it is.
-@Suite("Follow trust")
+@Suite("Follow trust", .timeLimit(.minutes(2)))
 struct FollowTrustTests {
     private func read(unclaimed: Int) -> Inventory {
         let bar = MenuBarGeometry(displayUUID: "main", rect: CGRect(x: 0, y: 0, width: 1000, height: 24), notch: nil)

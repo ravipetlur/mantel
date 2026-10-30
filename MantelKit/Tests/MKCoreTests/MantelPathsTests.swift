@@ -3,7 +3,7 @@ import MKCore
 import MKTestSupport
 import Testing
 
-@Suite("MantelPaths")
+@Suite("MantelPaths", .timeLimit(.minutes(2)))
 struct MantelPathsTests {
     private let fileManager = FileManager.default
 

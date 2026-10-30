@@ -19,7 +19,7 @@ private final class FakeTranslator: KeyTranslating {
 }
 
 @MainActor
-@Suite("KeyNames")
+@Suite("KeyNames", .timeLimit(.minutes(2)))
 struct KeyNamesTests {
     private func display(_ keyCode: UInt16, _ modifiers: ModifierSet, translator: some KeyTranslating = FakeTranslator()) -> String {
         KeyNames.display(KeyCombo(keyCode: keyCode, modifiers: modifiers), translator: translator)

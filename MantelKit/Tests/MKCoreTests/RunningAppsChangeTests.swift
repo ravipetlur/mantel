@@ -3,7 +3,7 @@ import MKCore
 import MKTestSupport
 import Testing
 
-@Suite("RunningAppsChange")
+@Suite("RunningAppsChange", .timeLimit(.minutes(2)))
 struct RunningAppsChangeTests {
     private let finder = RunningApp.fake(100, "com.example.finder", "Finder")
     private let notes = RunningApp.fake(200, "com.example.notes", "Notes")

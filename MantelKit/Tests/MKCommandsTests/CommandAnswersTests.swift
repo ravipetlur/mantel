@@ -2,7 +2,7 @@ import MKCommands
 import MKCore
 import Testing
 
-@Suite("Command answers")
+@Suite("Command answers", .timeLimit(.minutes(2)))
 struct CommandAnswersTests {
     @Test func showSaysWhatWasDone() {
         #expect(CommandAnswers.show(.hidden) == "Showing hidden icons.")

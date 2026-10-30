@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Dot menu opening")
+@Suite("Dot menu opening", .timeLimit(.minutes(2)))
 struct DotMenuOpeningTests {
     @Test func aMenuThatNeverOpenedIsNoticed() throws {
         var opening = DotMenuOpening()

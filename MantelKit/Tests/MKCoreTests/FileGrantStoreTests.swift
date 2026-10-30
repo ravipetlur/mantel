@@ -50,7 +50,7 @@ private final class Gate: Sendable {
     }
 }
 
-@Suite("ExpectedFile")
+@Suite("ExpectedFile", .timeLimit(.minutes(2)))
 struct ExpectedFileTests {
     private let home = URL(filePath: "/Users/someone", directoryHint: .isDirectory)
     /// Held by the suite, and so for the whole test.
@@ -96,7 +96,7 @@ struct ExpectedFileTests {
     }
 }
 
-@Suite("FileGrantError")
+@Suite("FileGrantError", .timeLimit(.minutes(2)))
 struct FileGrantErrorTests {
     @Test func theWrongFileMessageNamesTheFileToChoose() {
         let error = FileGrantError.wrongFile(expected: "com.apple.MenuBar.plist", got: "other.plist")

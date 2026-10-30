@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Onboarding copy")
+@Suite("Onboarding copy", .timeLimit(.minutes(2)))
 struct OnboardingCopyTests {
     private let installs: [InstallLocation.Verdict] = [.applications, .userApplications, .translocated, .elsewhere("/tmp/x")]
 

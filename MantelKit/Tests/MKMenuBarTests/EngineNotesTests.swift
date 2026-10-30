@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Engine notes")
+@Suite("Engine notes", .timeLimit(.minutes(2)))
 struct EngineNotesTests {
     @Test func sideEffectsNameAirDrop() {
         #expect(EngineNotes.sideEffects.contains("AirDrop"))

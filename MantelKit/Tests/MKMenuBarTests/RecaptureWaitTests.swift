@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Recapture wait")
+@Suite("Recapture wait", .timeLimit(.minutes(2)))
 struct RecaptureWaitTests {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 

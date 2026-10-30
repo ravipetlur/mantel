@@ -5,7 +5,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Opened system UI")
+@Suite("Opened system UI", .timeLimit(.minutes(2)))
 struct OpenedSystemUITests {
     private let notificationCenter = "com.apple.notificationcenterui"
 

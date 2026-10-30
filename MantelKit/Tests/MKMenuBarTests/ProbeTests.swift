@@ -1666,7 +1666,7 @@ struct RevealLatencyProbeTests {
 
 // MARK: Latency statistics
 
-@Suite("Latency statistics")
+@Suite("Latency statistics", .timeLimit(.minutes(2)))
 struct LatencyStatsTests {
     @Test func theMiddleOneTheNinetyFifthAndTheLongest() {
         let stats = LatencyStats(values: [50, 10, 30, 20, 40])

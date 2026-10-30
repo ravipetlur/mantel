@@ -4,7 +4,7 @@ import Testing
 // `ClickEventRule` is the test item's own source: the package's tests link `TestFixtures/MantelTestItem/ClickEventRule.swift` (see
 // `FixtureClickEventRule.swift`), so what is checked here is the code the test item runs. Nothing here starts the test item or reads an event.
 
-@Suite("The test item's reading of a click")
+@Suite("The test item's reading of a click", .timeLimit(.minutes(2)))
 struct ClickEventRuleTests {
     private func event(_ button: ClickEventRule.LastEvent.Button?, option: Bool = false, onTheItem: Bool = true,
                        age: TimeInterval = 0.01) -> ClickEventRule.LastEvent {

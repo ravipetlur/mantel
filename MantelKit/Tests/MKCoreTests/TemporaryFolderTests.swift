@@ -2,7 +2,7 @@ import Foundation
 import MKTestSupport
 import Testing
 
-@Suite("TemporaryFolder")
+@Suite("TemporaryFolder", .timeLimit(.minutes(2)))
 struct TemporaryFolderTests {
     private func exists(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.path)

@@ -4,7 +4,7 @@ import Testing
 /// `runModal()` called from a task or a queued block runs its loop inside that block, and nothing else queued on the main queue runs
 /// meanwhile (a SIGTERM's own block, a quit's cleanup). So every alert the app shows from code goes through `ModalLoop`, which starts it
 /// from the run loop. This reads the app's sources and fails for any that doesn't.
-@Suite("Modal alerts in the app")
+@Suite("Modal alerts in the app", .timeLimit(.minutes(2)))
 struct ModalSitesTests {
     /// A modal loop started by hand, however it is spelled: `x.runModal()`, `NSApp.runModal(for:)`, a modal session, `x . runModal ( )`, or
     /// a bare `runModal()`.

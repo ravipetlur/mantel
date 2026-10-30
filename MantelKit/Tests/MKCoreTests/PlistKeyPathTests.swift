@@ -38,7 +38,7 @@ private let approvals: PlistValue = .array([
     approval(true, [bundle("com.example.three"), bundle("com.example.three.helper")]),
 ])
 
-@Suite("Plist key paths")
+@Suite("Plist key paths", .timeLimit(.minutes(2)))
 struct PlistKeyPathTests {
     @Test func aPathIsWrittenAsOneSegmentForEachStep() {
         let path: PlistKeyPath = [.key("apps"), .index(2), .matching(key: "bundle", value: "com.example.one"), .key("a/b=c%")]

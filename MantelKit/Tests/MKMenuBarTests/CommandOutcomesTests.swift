@@ -3,7 +3,7 @@ import MKCore
 @testable import MKMenuBar
 import Testing
 
-@Suite("Command outcomes")
+@Suite("Command outcomes", .timeLimit(.minutes(2)))
 struct CommandOutcomesTests {
     @Test func aClickThatWasSentSaysSo() {
         for route in [IconClickRoute.pressedDrawn, .postedDrawn, .pressedInPlace, .shownMenu, .madeRoomThenPressed, .madeRoomThenPosted] {

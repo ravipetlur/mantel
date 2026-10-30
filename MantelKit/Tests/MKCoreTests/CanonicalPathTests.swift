@@ -4,7 +4,7 @@ import MKCore
 import MKTestSupport
 import Testing
 
-@Suite("CanonicalPath")
+@Suite("CanonicalPath", .timeLimit(.minutes(2)))
 struct CanonicalPathTests {
     /// `/tmp/mk-…`, which the system reaches through `/private`.
     private let folder = TemporaryFolder.shortForSockets()

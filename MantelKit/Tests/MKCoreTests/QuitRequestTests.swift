@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Asking for a quit")
+@Suite("Asking for a quit", .timeLimit(.minutes(2)))
 struct QuitRequestTests {
     @Test func theRequestIsScheduledOnceForTheRunLoopNotMadeAtOnce() {
         var scheduled: [(delay: TimeInterval, modes: [RunLoop.Mode])] = []

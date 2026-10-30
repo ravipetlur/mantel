@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKSearch
 
-@Suite("Icon query words")
+@Suite("Icon query words", .timeLimit(.minutes(2)))
 struct IconQueryWordsTests {
     @Test func aNoMatchNamesTheQuery() {
         #expect(IconQueryError.noMatch("zzz").answer(for: "zzz") == "Nothing in the menu bar matches “zzz”. Run “mantel icons” to see them.")

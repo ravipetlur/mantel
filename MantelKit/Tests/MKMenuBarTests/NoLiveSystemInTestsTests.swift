@@ -3,7 +3,7 @@ import Testing
 
 /// The real preferences, the real apps and the real pointer are never reached from a test: the types that do it are never made here, so
 /// a test that wants their behaviour is given a fake. This reads the test sources and fails for the first one that makes them.
-@Suite("No live system in tests")
+@Suite("No live system in tests", .timeLimit(.minutes(2)))
 struct NoLiveSystemInTestsTests {
     /// The calls that make a type that changes the person's real preferences, quits real apps or posts real clicks, that make the platform
     /// the probes run on (which holds all of them), and that reach the system's preferences or notifications by themselves. Written in two

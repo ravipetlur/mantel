@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("ClashDetector")
+@Suite("ClashDetector", .timeLimit(.minutes(2)))
 struct ClashDetectorTests {
     private let openSettings = HotkeyID.openSettings
     private let other = HotkeyID(rawValue: "another-action")

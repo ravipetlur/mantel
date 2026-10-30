@@ -6,7 +6,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("DisplayLayout")
+@Suite("DisplayLayout", .timeLimit(.minutes(2)))
 struct DisplayLayoutTests {
     private let deskMain = DisplayFixtures.deskMain
     private let portrait = DisplayFixtures.deskPortrait

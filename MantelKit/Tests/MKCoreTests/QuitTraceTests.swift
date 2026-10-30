@@ -6,7 +6,7 @@ import Testing
 @testable import MKCore
 
 /// What the log says of a quit, so that an overrun can be told from why.
-@Suite("Quit trace")
+@Suite("Quit trace", .timeLimit(.minutes(2)))
 struct QuitTraceTests {
     private final class Lines: Sendable {
         private let all = Mutex<[String]>([])
