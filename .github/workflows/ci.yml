@@ -111,8 +111,36 @@ jobs:
             exit 1
           fi
 
-      # One test at a time: the hosted runner has three cores, so Swift's thread pool has three threads, and the tests whose fakes
-      # hold a thread (a slow MenuBarAgent, on purpose) starve the rest when they run together. Run in parallel there, the suite
-      # stalled for an hour; one at a time it takes a few minutes.
+      # One test at a time: the hosted runner has three cores, so Swift's thread pool has three threads, and tests whose fakes hold a
+      # thread starve the rest when they run together. A watchdog stops a run that has printed nothing for five minutes: it takes a
+      # stack sample of every thread of the test process (macOS's `sample`), prints it, and fails, so a hang shows where it is instead
+      # of using up the job's hour.
       - name: Test MantelKit
-        run: swift test --package-path MantelKit --no-parallel
+        run: |
+          log=$RUNNER_TEMP/tests.log
+          swift test --package-path MantelKit --no-parallel > "$log" 2>&1 &
+          tests=$!
+          tail -f "$log" &
+          follower=$!
+          last=-1
+          idle=0
+          while kill -0 "$tests" 2> /dev/null; do
+            sleep 15
+            size=$(wc -c < "$log")
+            if [ "$size" -eq "$last" ]; then idle=$((idle + 15)); else idle=0; last=$size; fi
+            if [ "$idle" -ge 300 ]; then
+              kill "$follower" 2> /dev/null || true
+              echo "::error::The tests printed nothing for five minutes. The last test started is the one that hangs; its threads follow."
+              grep -E "started\.$" "$log" | tail -3 || true
+              for helper in $(pgrep -f swiftpm-testing-helper); do
+                echo "::group::Threads of the test process $helper"
+                sample "$helper" 3 -mayDie 2>&1 | head -2000
+                echo "::endgroup::"
+              done
+              kill "$tests" 2> /dev/null || true
+              pkill -f swiftpm-testing-helper || true
+              exit 1
+            fi
+          done
+          kill "$follower" 2> /dev/null || true
+          wait "$tests"
