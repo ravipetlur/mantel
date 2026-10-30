@@ -134,7 +134,7 @@ jobs:
               grep -E "started\.$" "$log" | tail -3 || true
               for helper in $(pgrep -f swiftpm-testing-helper); do
                 echo "::group::Threads of the test process $helper"
-                sample "$helper" 3 -mayDie 2>&1 | head -2000
+                /usr/bin/sample "$helper" 3 -mayDie 2>&1 | head -2000
                 echo "::endgroup::"
               done
               kill "$tests" 2> /dev/null || true
