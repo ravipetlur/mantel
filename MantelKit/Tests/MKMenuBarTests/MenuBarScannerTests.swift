@@ -96,7 +96,7 @@ private func makeScanner(_ fixture: Fixture, running: (@Sendable () -> [RunningA
                               isTrusted: trusted, clock: clock, readLimit: 8)
     }
     return MenuBarScanner(ax: fixture.ax, runningApps: apps, layout: { layout },
-                          ownBundleID: InventoryFixtures.ownBundleID, isTrusted: trusted, clock: clock)
+                          ownBundleID: InventoryFixtures.ownBundleID, isTrusted: trusted, clock: clock, readLimit: 8)
 }
 
 /// The agent and the apps with these bundle IDs.
@@ -410,7 +410,7 @@ struct MenuBarScannerTests {
         // MenuBarAgent has windows for the main display only: the portrait one has none (as when its bar is gone).
         let layout = DisplayLayout(displays: [DisplayFixtures.deskMain])
         let scanner = MenuBarScanner(ax: fixture.ax, runningApps: { fixture.running }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let inventory = await scanner.scan()
         #expect(inventory.bars.map(\.displayUUID) == [mainUUID])
         #expect(inventory.problems.isEmpty)
@@ -574,7 +574,7 @@ struct MenuBarScannerTests {
         let later = InventoryFixtures.desk(.init(windowsPerDisplay: 4))
         let displays = Mutex(DisplayLayout(displays: [DisplayFixtures.deskMain]))
         let scanner = MenuBarScanner(ax: later.ax, runningApps: { later.running }, layout: { displays.withLock { $0 } },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         _ = await scanner.scan(reasons: [.refresh])
         displays.withLock { $0 = .desk }
         let before = slotReads(later)
@@ -615,7 +615,7 @@ struct MenuBarScannerTests {
         let layout = before.layout
         let scanner = MenuBarScanner(ax: SwitchingAX(first: before.ax, second: after.ax, useFirst: phase), runningApps: { before.running },
                                      layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let first = await scanner.scan(reasons: [.refresh])
         #expect(slotNames(of: first).contains("weather.temp"), "the fifth window was the best")
         phase.set(false)
@@ -1227,7 +1227,7 @@ struct MenuBarScannerTests {
         let phase = Switch(true)
         let layout = shown.layout
         let scanner = MenuBarScanner(ax: SwitchingAX(first: shown.ax, second: hidden.ax, useFirst: phase), runningApps: { shown.running },
-                                     layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         #expect(await scanner.lookAtBar()?.drawnSlots == 17)
         phase.set(false)
         #expect(await scanner.lookAtBar()?.drawnSlots == 14)
@@ -1243,7 +1243,7 @@ struct MenuBarScannerTests {
         // MenuBarAgent has no window at all, or there is no display to look at.
         #expect(await makeScanner(InventoryFixtures.desk(.init(windowsPerDisplay: 0))).lookAtBar() == nil)
         let noDisplay = MenuBarScanner(ax: fixture.ax, runningApps: { fixture.running }, layout: { DisplayLayout(displays: []) },
-                                       ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                       ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         #expect(await noDisplay.lookAtBar() == nil)
     }
 
@@ -1350,7 +1350,7 @@ struct MenuBarScannerTests {
         // Both fixtures' trees are the same shape: the scanner is given the one that is current.
         let scanner = MenuBarScanner(ax: SwitchingAX(first: fixture.ax, second: hidden.ax, useFirst: phase), runningApps: { fixture.running },
                                      layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let shown = await scanner.scan()
         phase.set(false)
         let concealed = await scanner.scan()

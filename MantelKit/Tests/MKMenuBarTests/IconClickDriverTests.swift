@@ -1653,7 +1653,7 @@ private final class RoomBar: Sendable {
         let running: [RunningApp] = [.fake(Self.agent, MenuBarReader.menuBarAgentBundleID, "MenuBarAgent")]
             + Self.apps.map { .fake($0.pid, $0.bundle, $0.bundle) }
         return MenuBarScanner(ax: ax, runningApps: { running }, layout: { Self.layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                              isTrusted: { true }, clock: FakeClock())
+                              isTrusted: { true }, clock: FakeClock(), readLimit: 8)
     }
 
     /// A locator over this bar that the scans have learned: every icon drawn once (so that the places of the weather app's two are known),

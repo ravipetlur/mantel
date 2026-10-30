@@ -25,7 +25,7 @@ private struct Rig {
     func scanner(trusted: Bool = true) -> MenuBarScanner {
         let running = running
         return MenuBarScanner(ax: ax, runningApps: { running }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID,
-                              isTrusted: { trusted }, clock: FakeClock())
+                              isTrusted: { trusted }, clock: FakeClock(), readLimit: 8)
     }
 
     func item(_ key: ItemID.Key) -> ItemID { ItemID(bundleID: bundle, key: key) }
@@ -204,7 +204,7 @@ struct ScannerPressTests {
         let running: [RunningApp] = [.fake(agentPID, MenuBarReader.menuBarAgentBundleID), .fake(1500, "com.apple.controlcenter", "Control Center"),
                                      .fake(appPID, bundle, "Weather")]
         let scanner = MenuBarScanner(ax: ax, runningApps: { running }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
 
         try await scanner.press(.system("sound"))
 

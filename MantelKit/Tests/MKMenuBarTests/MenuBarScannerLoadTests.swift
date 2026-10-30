@@ -29,7 +29,7 @@ struct MenuBarScannerLoadTests {
             let layout = fixture.layout
             scanner = MenuBarScanner(ax: ax, extrasReader: AXAppExtrasReader(reader: AppExtrasReader(ax: ax)), runningApps: { fixture.running },
                                      layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: clock,
-                                     patience: patience)
+                                     patience: patience, readLimit: 8)
         }
 
         func pid(_ bundleID: String) -> pid_t { fixture.pid(of: bundleID)! }
@@ -108,7 +108,7 @@ struct MenuBarScannerLoadTests {
         let layout = rig.fixture.layout
         let fixture = rig.fixture
         let scanner = MenuBarScanner(ax: rig.slow, runningApps: { fixture.running }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { false }, clock: rig.clock)
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { false }, clock: rig.clock, readLimit: 8)
         let read = await scanner.scan()
         #expect(read.problems == [.accessibilityNotGranted])
         #expect(rig.clock.sleeperCount == 0)
