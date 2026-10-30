@@ -93,7 +93,7 @@ private func makeScanner(_ fixture: Fixture, running: (@Sendable () -> [RunningA
     if let latency {
         return MenuBarScanner(ax: fixture.ax, extrasReader: LatentExtrasReader(base: AppExtrasReader(ax: fixture.ax), clock: clock, latency: latency),
                               runningApps: apps, layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                              isTrusted: trusted, clock: clock)
+                              isTrusted: trusted, clock: clock, readLimit: 8)
     }
     return MenuBarScanner(ax: fixture.ax, runningApps: apps, layout: { layout },
                           ownBundleID: InventoryFixtures.ownBundleID, isTrusted: trusted, clock: clock)
@@ -804,7 +804,7 @@ struct MenuBarScannerTests {
         let layout = fixture.layout
         let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                      runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let first = Task { await scanner.scan(reasons: [.poll]) }
         let begun = await waitUntil { counter.value > 0 }
         #expect(begun, "the first scan began to read")
@@ -850,7 +850,7 @@ struct MenuBarScannerTests {
         let layout = fixture.layout
         let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                      runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let first = Task { await scanner.scan(reasons: [.poll]) }
         #expect(await waitUntil { counter.value > 0 }, "the first scan began to read")
 
@@ -885,7 +885,7 @@ struct MenuBarScannerTests {
         let layout = fixture.layout
         let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                      runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let first = Task { await scanner.scan(reasons: [.poll]) }
         #expect(await waitUntil { counter.value > 0 })
         let second = Task { await scanner.scan(reasons: [.appsChanged]) }
@@ -911,7 +911,7 @@ struct MenuBarScannerTests {
         let layout = fixture.layout
         let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                      runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let first = Task { await scanner.scan(reasons: [.poll]) }
         #expect(await waitUntil { counter.value > 0 })
         let second = Task { await scanner.scan(reasons: [.appsChanged], notVoting: Set(apps.compactMap(\.bundleID))) }
@@ -941,7 +941,7 @@ struct MenuBarScannerTests {
             let layout = fixture.layout
             let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                          runningApps: { apps }, layout: { layout },
-                                         ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                         ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
             let first = Task { await scanner.scan(reasons: running) }
             #expect(await waitUntil { counter.value > 0 })
             let calls = newcomers.map { reasons in Task { await scanner.scan(reasons: reasons) } }
@@ -968,7 +968,7 @@ struct MenuBarScannerTests {
         let layout = fixture.layout
         let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
                                      runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock())
+                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let first = Task { await scanner.scan(reasons: [.poll]) }
         #expect(await waitUntil { counter.value > 0 })
         let second = Task { await scanner.scan() }
@@ -1272,7 +1272,7 @@ struct MenuBarScannerTests {
         let apps = fixture.running
         let layout = fixture.layout
         return MenuBarScanner(ax: fixture.ax, extrasReader: reader, runningApps: { apps }, layout: { layout },
-                              ownBundleID: InventoryFixtures.ownBundleID, isTrusted: trusted, clock: FakeClock())
+                              ownBundleID: InventoryFixtures.ownBundleID, isTrusted: trusted, clock: FakeClock(), readLimit: 8)
     }
 
     @Test func theFramesOfTheAppsAskedAreTheirItemsFramesAndNoOtherAppIsAsked() async throws {

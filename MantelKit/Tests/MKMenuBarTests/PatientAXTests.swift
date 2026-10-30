@@ -400,7 +400,9 @@ struct PatientAXTests {
     @Test func readsLeaveThreadsFreeForWhatMustRun() {
         #expect(ReadConcurrency.limit(processors: 8) == 4)
         #expect(ReadConcurrency.limit(processors: 12) == 8)
-        #expect(ReadConcurrency.limit(processors: 4) == 4, "never fewer than four")
+        #expect(ReadConcurrency.limit(processors: 4) == 2, "a small machine: half, so that the reads never take every thread")
+        #expect(ReadConcurrency.limit(processors: 3) == 1)
+        #expect(ReadConcurrency.limit(processors: 1) == 1, "at least one")
         #expect(ReadConcurrency.limit(processors: 32) == 8, "never more than eight")
     }
 }
