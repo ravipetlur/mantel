@@ -345,9 +345,13 @@ struct ControlSocketServerTests {
         try server.start()
         defer { server.stop() }
 
-        for _ in 0..<12 {
+        let calls = calls
+        for sent in 1...12 {
             let client = try RawClient(path: socketURL)
             try await client.send(request(.version))
+            // The server has read it before the next one connects: twelve at once would fill the queue of connections it
+            // hasn't accepted (its backlog), and a slow machine would refuse one before the test is about anything.
+            #expect(await waitUntil { calls.commands.count == sent })
             // It goes before the handler is done, and without reading anything.
         }
         await gate.open()
