@@ -78,10 +78,10 @@ enum DiagnosticsReport {
         FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false).trimmingTrailingSlash()
     }
 
-    /// What "Copy diagnostics" copies: the rows, then what hiding changes and how each app answered (by bundle ID), then the probes.
-    static func text(rows: [DiagnosticsRow], state: MenuBarState?, probes: [ProbeName: ProbeReport]) -> String {
+    /// What "Copy diagnostics" copies: the rows, then what hiding changes and how each app answered (by bundle ID).
+    static func text(rows: [DiagnosticsRow], state: MenuBarState?) -> String {
         DiagnosticsText.render(checks: rows.map(\.check), blocks: HidingDiagnostics.blocks(engine: state?.engine, inventory: state?.inventory),
-                               probes: probes, home: homeFolder)
+                               home: homeFolder)
     }
 
     /// What `mantel diagnostics` answers, besides the build.
@@ -90,7 +90,7 @@ enum DiagnosticsReport {
         let rows = merged(polled: await rows(for: coordinator), live: liveRows(state: state))
         return DiagnosticsText.json(checks: rows.map(\.check),
                                     blocks: HidingDiagnostics.blocks(engine: state?.engine, inventory: state?.inventory),
-                                    probes: await coordinator.probes.latestReports(), home: homeFolder)
+                                    home: homeFolder)
     }
 
     // MARK: The checks

@@ -102,7 +102,7 @@ struct ClickReplayLifecycle: Equatable {
 /// moment later.
 ///
 /// - **`onClick` runs first and before anything is scheduled.** It runs where `hold` is called, which is inside the event tap's
-///   callback, so that whatever the caller does about the click (the probe lifts the allowlist) is done before the replay is
+///   callback, so that whatever the caller does about the click (the click driver lifts the allowlist) is done before the replay is
 ///   even queued, and not when the caller next gets round to looking.
 /// - **The click is posted again `delay` after,** a down and then an up (`pressDuration` later), and `onReplay` is called right
 ///   after the down has been posted.

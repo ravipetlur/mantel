@@ -12,7 +12,6 @@ struct NestedPlistCodecTests {
     @Test func binaryRoundTripIsIdentical() throws {
         // A list written in one order only (no dictionary here has two keys): written again it is the same bytes.
         let blob = BlobFixtures.plainBinary()
-        #expect(try NestedPlistCodec.reencoded(blob) == blob)
         // Setting what is there changes nothing either, and the format stays binary.
         let same = try codec.setting(.bool(true), at: [.index(1), .key("allowed")], in: blob)
         #expect(same == blob)
@@ -25,7 +24,6 @@ struct NestedPlistCodecTests {
         <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0"><array><dict><key>isAllowed</key><true/><key>menuItemLocations</key><array><dict><key>bundle</key><dict><key>_0</key><string>com.example.one</string></dict></dict></array></dict></array></plist>
         """.utf8)
-        #expect(try NestedPlistCodec.reencoded(xml) != xml, "the check means something: writing it again would change its bytes")
         let flag: PlistKeyPath = entry("com.example.one") + [.key("isAllowed")]
 
         // What is there is asked for: nothing is written, and the bytes are the very bytes that came in.
@@ -52,7 +50,6 @@ struct NestedPlistCodecTests {
         #expect(changed.starts(with: Data("<?xml".utf8)), "XML stays XML")
         #expect(try codec.value(at: [.index(0), .key("allowed")], in: changed) == .bool(false))
         #expect(try codec.value(at: [.index(1), .key("order")], in: changed) == .integer(2), "the rest of it is as it was")
-        #expect(try NestedPlistCodec.reencoded(blob) == blob)
     }
 
     @Test func setsAtMatchingPath() throws {
@@ -153,12 +150,10 @@ struct NestedPlistCodecTests {
         #expect(throws: PlistBlobCodecError.isAnArchive) { try codec.value(at: [], in: archive) }
         #expect(throws: PlistBlobCodecError.isAnArchive) { try codec.setting(.bool(false), at: [.key("$objects")], in: archive) }
         #expect(PlistBlobCodecError.isAnArchive.errorDescription == message)
-        #expect(throws: PlistBlobCodecError.isAnArchive) { try NestedPlistCodec.reencoded(archive) }
     }
 
     @Test func somethingThatIsNotAPropertyListIsRefused() {
         #expect(throws: PlistBlobCodecError.notAPropertyList) { try codec.value(at: [], in: Data("not a list".utf8)) }
-        #expect(throws: PlistBlobCodecError.notAPropertyList) { try NestedPlistCodec.reencoded(Data()) }
     }
 
     @Test func theFileAccessCanUseItForAPlaceInABlob() async throws {

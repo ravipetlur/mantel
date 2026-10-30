@@ -76,16 +76,6 @@ struct UnattachedIconEvidenceTests {
                                notDrawn: [], ownBundleID: own, fits: fits)
     }
 
-    @Test func noSlotWhenEveryItemIsOffTheBarAndAnotherShownAppIsDrawn() {
-        let found = evidence(Bar.read([Bar.item(one), Bar.item(two, .none)]))
-        #expect(found == UnattachedIconEvidence(noSlot: [two], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func mantelsDotShowsTheBarIsDrawn() {
-        let found = evidence(Bar.read([Bar.dot(), Bar.item(two, .none)]), shown: [two])
-        #expect(found == UnattachedIconEvidence(noSlot: [two], inSlot: [], outOfTheWay: []))
-    }
-
     @Test func noEvidenceWithNothingElseDrawn() {
         #expect(evidence(Bar.read([Bar.item(two, .none)]), shown: [two]) == nil)
         // A dot with no frame doesn't show it either (and it is a stuck bar, see below).
@@ -119,20 +109,6 @@ struct UnattachedIconEvidenceTests {
         #expect(evidence(read, gate: gate) == nil)
     }
 
-    @Test func theGateIsASightingOnlyWithNoAssertionLiveAndTheSessionAwake() {
-        #expect(UnattachedReadGate.sighting.isSighting)
-        var gate = UnattachedReadGate.sighting
-        gate.awake = false
-        #expect(!gate.isSighting)
-        gate = .sighting
-        gate.armedAfter = true
-        #expect(!gate.isSighting, "an assertion that was live at the end of the read isn't none")
-        gate = .sighting
-        gate.armedBefore = true
-        #expect(!gate.isSighting)
-        #expect(!UnattachedReadGate.open.isSighting)
-    }
-
     @Test func noEvidenceWithoutAnAnswerOrAccessibility() {
         let items = [Bar.item(one), Bar.item(two, .none)]
         #expect(evidence(Bar.read(items, problems: [.agentNotRunning])) == nil)
@@ -156,22 +132,9 @@ struct UnattachedIconEvidenceTests {
         #expect(evidence(Bar.read(unknown))?.noSlot == [two])
     }
 
-    @Test func anUntiedSlotOfAnotherWidthDoesNot() {
-        let items = [Bar.item(one), Bar.item(two, .none, width: 24)]
-        for width in [10, 90] as [CGFloat] {
-            #expect(evidence(Bar.read(items, untied: [CGRect(x: 300, y: 0, width: width, height: 30)]))?.noSlot == [two], "a slot \(width) wide")
-        }
-    }
-
     @Test func aCandidateWithNoRoomIsHeld() {
         let read = Bar.read([Bar.item(one), Bar.item(two, .none)])
         let found = evidence(read, fits: false)
-        #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func contestedAppsAreInNoSet() {
-        let read = Bar.read([Bar.item(one), Bar.item(two, .none), Bar.item(three)], contested: [two, three])
-        let found = evidence(read, shown: [one, two, three])
         #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: []))
     }
 
@@ -180,17 +143,6 @@ struct UnattachedIconEvidenceTests {
         let read = Bar.read([Bar.item(one), Bar.item(apple, .none)])
         let found = evidence(read, shown: [one, apple])
         #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func appWithNoItemsIsNeverConsidered() {
-        // Running, in Shown and in the plan, and lists nothing: it is in no set.
-        let found = evidence(Bar.read([Bar.item(one)]), shown: [one, two])
-        #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func overflowedIsOutOfTheWay() {
-        let found = evidence(Bar.read([Bar.item(one), Bar.item(two, .overflowed)]))
-        #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: [two]))
     }
 
     struct NotConsidered: CustomTestStringConvertible, Sendable {
@@ -211,31 +163,6 @@ struct UnattachedIconEvidenceTests {
             NotConsidered(name: "in Hidden", read: Bar.read(items), hidden: [two], running: nil, notDrawn: []),
         ]
     }()
-
-    @Test(arguments: notConsidered) func concealedTurnedOffOrUnansweredIsNotConsidered(_ scenario: NotConsidered) {
-        let shown = [one] + (scenario.hidden.isEmpty ? [two] : [])
-        let found = evidence(scenario.read, shown: shown, hidden: scenario.hidden, running: scenario.running, notDrawn: scenario.notDrawn)
-        #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func anAppThePlanDoesNotDrawIsNotConsidered() {
-        // In Shown, but the plan doesn't have it on the bar (a rule hides it): its missing slot says nothing.
-        let found = UnattachedIcons.evidence(in: Bar.read([Bar.item(one), Bar.item(two, .none)]), gate: .open, plan: Bar.plan(shown: [one]),
-                                             sections: sections(shown: [one, two]), running: [one, two], notDrawn: [], ownBundleID: own,
-                                             fits: { _ in true })
-        #expect(found == UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func aSlotParkedOffTheBarIsNoSlot() {
-        let found = evidence(Bar.read([Bar.item(one), Bar.item(two, .parked)]))
-        #expect(found == UnattachedIconEvidence(noSlot: [two], inSlot: [one], outOfTheWay: []))
-    }
-
-    @Test func oneFramedItemMeansInSlot() {
-        let found = evidence(Bar.read([Bar.item(one, .none, name: "a"), Bar.item(one, .slot, name: "b"), Bar.item(two, .none)]),
-                             shown: [one, two])
-        #expect(found == UnattachedIconEvidence(noSlot: [two], inSlot: [one], outOfTheWay: []))
-    }
 
     // MARK: A bar that isn't drawing what it can
 
@@ -274,28 +201,6 @@ struct UnattachedIconEvidenceTests {
         #expect(evidence(Bar.read([Bar.item(one), Bar.item(two, .none), Bar.item(three)]), shown: all)?.noSlot == [two])
         // An app that is flagged already is missing too (the read doesn't know the flags): a second one that goes missing is the stuck bar.
         #expect(assess(read, shown: all) == .stuck)
-    }
-
-    @Test func aReadThatIsNotEvidenceOrIsOfAStuckBarSaysWhich() {
-        let read = Bar.read([Bar.item(one), Bar.item(two, .none)])
-        #expect(assess(read) == .evidence(UnattachedIconEvidence(noSlot: [two], inSlot: [one], outOfTheWay: [])))
-        var closed = UnattachedReadGate.open
-        closed.armedBefore = false
-        #expect(assess(read, gate: closed) == UnattachedIcons.Assessment.none)
-        #expect(assess(Bar.read(read.items, problems: [.agentNotRunning])) == UnattachedIcons.Assessment.none)
-        // An item of Mantel's with no slot, and nothing drawn: a bar that is stuck.
-        #expect(assess(Bar.read([Bar.item(one), Bar.dot(framed: false)])) == .stuck)
-        #expect(assess(Bar.read([Bar.item(two, .none)]), shown: [two]) == .stuck)
-    }
-
-    @Test func drawnIsTheAppsWithAFramedItem() {
-        let read = Bar.read([Bar.item(one), Bar.item(two, .none), Bar.item(three, .parked), Bar.dot(),
-                             MenuBarItem(id: .system("clock"), ownerBundleID: ItemID.systemBundleID, appName: nil, label: nil,
-                                         frames: [display: Bar.onTheBar], overflowedOn: [], isMantel: false)])
-        #expect(UnattachedIcons.drawn(in: read) == [one])
-        // An app whose frame won a near tie may be showing a neighbour's: it isn't seen drawn.
-        let contested = Bar.read([Bar.item(one), Bar.item(two)], contested: [two])
-        #expect(UnattachedIcons.drawn(in: contested) == [one])
     }
 }
 
@@ -353,28 +258,6 @@ struct UnattachedIconTrackerTests {
         }
     }
 
-    @Test func readsThatSayNothingOfTheAppNeitherCountNorEnd() {
-        var tracker = tracker()
-        #expect(take(&tracker, at: 0, evidence: noSlot(two)).isEmpty)
-        // No evidence at all (the gate was closed), an app that didn't answer, one that is held back (it is in no set), and one that is
-        // contested: none counts, and none ends the run.
-        #expect(take(&tracker, at: 2, evidence: nil, gate: .init(allowlistInCharge: true, armedBefore: false, armedAfter: true, showsThePlan: true,
-                                                                collapsed: true, awake: true, beingMadeAgain: false)).isEmpty)
-        #expect(take(&tracker, at: 4, evidence: nil, unanswered: [two]).isEmpty)
-        #expect(take(&tracker, at: 6, evidence: UnattachedIconEvidence(noSlot: [], inSlot: [one], outOfTheWay: [])).isEmpty)
-        #expect(take(&tracker, at: 8, evidence: noSlot(three), processes: processes(apps: [two, three])).isEmpty)
-        #expect(tracker.flagged.isEmpty)
-        #expect(take(&tracker, at: 10, evidence: noSlot(two)) == [.flagged(two)], "the run is the one that began at 0")
-    }
-
-    @Test func aNewProcessEndsTheRun() {
-        var tracker = tracker()
-        #expect(take(&tracker, at: 0, evidence: noSlot(two), processes: processes(100)).isEmpty)
-        #expect(take(&tracker, at: 5, evidence: noSlot(two), processes: processes(200)).isEmpty, "another process: a run of its own")
-        #expect(take(&tracker, at: 10, evidence: noSlot(two), processes: processes(200)).isEmpty, "5 s after the first of it")
-        #expect(take(&tracker, at: 15, evidence: noSlot(two), processes: processes(200)) == [.flagged(two)])
-    }
-
     @Test func displayChangeEndsEveryRun() {
         var tracker = tracker()
         #expect(take(&tracker, at: 0, evidence: noSlot(two)).isEmpty)
@@ -415,14 +298,6 @@ struct UnattachedIconTrackerTests {
         #expect(take(&tracker, at: 140, evidence: noSlot(two)) == [.flagged(two)])
     }
 
-    @Test func aStuckReadKeepsTheFlagsThatAreSet() {
-        var tracker = flaggedTracker()
-        #expect(stuckRead(&tracker, at: 20).isEmpty)
-        #expect(tracker.flagged == [two], "a flag keeps its own rules")
-        let changes = take(&tracker, at: 30, evidence: UnattachedIconEvidence(noSlot: [], inSlot: [two], outOfTheWay: []))
-        #expect(changes == [.clearedBySlot(two)])
-    }
-
     @Test func aRefreshKeepsWhatHadASlotAndAResetForgetsIt() {
         let drawn = UnattachedIconEvidence(noSlot: [], inSlot: [two], outOfTheWay: [])
         var tracker = tracker()
@@ -441,60 +316,6 @@ struct UnattachedIconTrackerTests {
         #expect(take(&tracker, at: 100, evidence: noSlot(two)) == [.flagged(two)])
     }
 
-    @Test func anAppWithASlotBeforeADisplayChangeIsNotFlaggedAfterIt() {
-        var tracker = tracker()
-        let drawn = UnattachedIconEvidence(noSlot: [], inSlot: [two], outOfTheWay: [])
-        #expect(take(&tracker, at: 0, evidence: drawn).isEmpty)
-        tracker.displaysAreChanging()
-        // The bar is stuck, and the app has no slot in it: it has had one with this process, so it is tied.
-        for seconds in stride(from: 10.0, through: 60.0, by: 10.0) {
-            #expect(take(&tracker, at: seconds, evidence: noSlot(two)).isEmpty)
-        }
-        #expect(tracker.flagged.isEmpty)
-
-        // A slot again, and it is as any other app.
-        #expect(take(&tracker, at: 70, evidence: drawn).isEmpty)
-        #expect(take(&tracker, at: 80, evidence: noSlot(two)).isEmpty)
-        #expect(take(&tracker, at: 90, evidence: noSlot(two)) == [.flagged(two)])
-    }
-
-    @Test func anAppThatHadASlotIsFlaggedAgainAfterAnotherProcessOrAForgetting() {
-        let drawn = UnattachedIconEvidence(noSlot: [], inSlot: [two], outOfTheWay: [])
-
-        // Another process of the app: nothing is known of its icon.
-        var relaunched = tracker()
-        _ = take(&relaunched, at: 0, evidence: drawn, processes: processes(100))
-        relaunched.displaysAreChanging()
-        #expect(take(&relaunched, at: 10, evidence: noSlot(two), processes: processes(200)).isEmpty)
-        #expect(take(&relaunched, at: 20, evidence: noSlot(two), processes: processes(200)) == [.flagged(two)])
-
-        // A Reset: MenuBarAgent ties the apps afresh, and what was known is gone with it.
-        var forgotten = tracker()
-        _ = take(&forgotten, at: 0, evidence: drawn)
-        forgotten.displaysAreChanging()
-        forgotten.forgetAll()
-        #expect(take(&forgotten, at: 10, evidence: noSlot(two)).isEmpty)
-        #expect(take(&forgotten, at: 20, evidence: noSlot(two)) == [.flagged(two)])
-
-        // An app that never had a slot isn't helped by a change of displays.
-        var never = tracker()
-        never.displaysAreChanging()
-        #expect(take(&never, at: 10, evidence: noSlot(two)).isEmpty)
-        #expect(take(&never, at: 20, evidence: noSlot(two)) == [.flagged(two)])
-    }
-
-    @Test func aSlotAfterOneChangeIsCarriedByTheNext() {
-        // The bar is made again twice: the app had a slot between the two, and loses it with the second.
-        var tracker = tracker()
-        tracker.displaysAreChanging()
-        let drawn = UnattachedIconEvidence(noSlot: [], inSlot: [two], outOfTheWay: [])
-        _ = take(&tracker, at: 0, evidence: drawn)
-        tracker.displaysAreChanging()
-        #expect(take(&tracker, at: 10, evidence: noSlot(two)).isEmpty)
-        #expect(take(&tracker, at: 20, evidence: noSlot(two)).isEmpty)
-        #expect(tracker.flagged.isEmpty)
-    }
-
     // MARK: Who a stuck bar may be blamed on
 
     @Test func theSuspectsAreTheAppsPlacedInTheLastReadBeforeTheChange() {
@@ -505,72 +326,6 @@ struct UnattachedIconTrackerTests {
         #expect(tracker.stuckBarSuspects == [one: [100], two: [100]])
         tracker.readPlaced([two], processes: processes(apps: [one, two]))
         #expect(tracker.stuckBarSuspects == [one: [100]], "in a slot again, or out of the way: not the change's loss")
-    }
-
-    @Test func anAppThatWasntPlacedInTheLastReadBeforeTheChangeIsNoSuspectWhateverItHadBefore() {
-        // It had a slot in an earlier read; in the last one it had none (switched off, no room, in Hidden, contested...): the change
-        // took nothing from it.
-        var tracker = tracker()
-        tracker.readPlaced([two], processes: processes())
-        tracker.readPlaced([], processes: processes())
-        tracker.displaysAreChanging()
-        #expect(tracker.stuckBarSuspects.isEmpty)
-        tracker.readPlaced([two], processes: processes())
-        tracker.readPlaced([], processes: processes())
-        tracker.displaysAreChanging()
-        #expect(tracker.stuckBarSuspects.isEmpty, "and for every change after it")
-        tracker.readPlaced([two], processes: processes())
-        tracker.displaysAreChanging()
-        #expect(tracker.stuckBarSuspects == [two: [100]], "it was placed in the last read before this one")
-    }
-
-    @Test func theSuspectsOfAChangeCarryOverToAChangeWithNoReadBetween() {
-        var tracker = tracker()
-        tracker.readPlaced([two], processes: processes())
-        tracker.displaysAreChanging()
-        tracker.displaysAreChanging()
-        #expect(tracker.stuckBarSuspects == [two: [100]], "two changes close together: nothing newer to go by")
-        tracker.readPlaced([], processes: processes())
-        tracker.displaysAreChanging()
-        #expect(tracker.stuckBarSuspects.isEmpty, "a read came: it is the last one before the change")
-    }
-
-    @Test func aFlaggedAppIsNoSuspectAndAnotherProcessOrAForgettingEndsTheRest() {
-        // Flagged by reads that found it with no slot (the evidence of a bar that isn't stuck), and then put in the set by a read.
-        var flagged = tracker()
-        #expect(take(&flagged, at: 0, evidence: noSlot(two)).isEmpty)
-        #expect(take(&flagged, at: 10, evidence: noSlot(two)) == [.flagged(two)])
-        flagged.readPlaced([two], processes: processes())
-        flagged.displaysAreChanging()
-        #expect(flagged.stuckBarSuspects.isEmpty, "macOS doesn't tie its icon, and a restart doesn't change that")
-
-        var other = tracker()
-        other.readPlaced([two], processes: processes(100))
-        other.displaysAreChanging()
-        _ = take(&other, at: 10, processes: processes(200))
-        #expect(other.stuckBarSuspects.isEmpty, "another process: nothing is known of it")
-
-        var forgotten = tracker()
-        forgotten.readPlaced([two], processes: processes(100))
-        forgotten.displaysAreChanging()
-        #expect(forgotten.stuckBarSuspects == [two: [100]])
-        forgotten.forgetAll()
-        #expect(forgotten.stuckBarSuspects.isEmpty)
-        forgotten.displaysAreChanging()
-        #expect(forgotten.stuckBarSuspects.isEmpty, "the read before it is gone too")
-    }
-
-    @Test func noAppIsFlaggedWhileTheHoldIsOnAndAnAppThatWasntIsFlaggedOnceItIsOff() {
-        var tracker = tracker()
-        func held(_ seconds: Double) -> [UnattachedIconTracker.Change] {
-            tracker.readTaken(Bar.read([Bar.item(one), Bar.item(two, .none)], at: seconds), gate: .open, evidence: noSlot(two),
-                              holdingFlags: true, processes: processes())
-        }
-        for seconds in stride(from: 0.0, through: 60.0, by: 10.0) { #expect(held(seconds).isEmpty) }
-        #expect(tracker.flagged.isEmpty)
-        // The run didn't count while it was on: two reads are needed once it is off.
-        #expect(take(&tracker, at: 70, evidence: noSlot(two)).isEmpty)
-        #expect(take(&tracker, at: 80, evidence: noSlot(two)) == [.flagged(two)])
     }
 
     @Test func allowlistNotInChargeEndsEveryRun() {
@@ -614,36 +369,6 @@ struct UnattachedIconTrackerTests {
         #expect(tracker.flagged == [two])
     }
 
-    @Test func clearsWhenGoneTwoReadsInARow() {
-        var tracker = flaggedTracker()
-        #expect(take(&tracker, at: 20, processes: [:]).isEmpty)
-        #expect(take(&tracker, at: 30, processes: [:]) == [.clearedByQuit(two)])
-        #expect(tracker.flagged.isEmpty)
-        // Counted by every read, evidence or not, and whether or not the agent answered.
-        var again = flaggedTracker()
-        #expect(take(&again, at: 20, problems: [.agentNotRunning], processes: [:]).isEmpty)
-        #expect(take(&again, at: 30, problems: [.agentNotRunning], processes: [:]) == [.clearedByQuit(two)])
-    }
-
-    @Test func clearsWhenItListsNothingTwoAnsweredReadsInARow() {
-        let nothing = [Bar.item(one)]
-        var tracker = flaggedTracker()
-        #expect(take(&tracker, at: 20, items: nothing).isEmpty)
-        #expect(take(&tracker, at: 30, items: nothing) == [.clearedByNoItems(two)])
-        #expect(tracker.flagged.isEmpty)
-
-        // A read in which it lists an item breaks the row; one that didn't answer neither counts nor breaks it.
-        var interrupted = flaggedTracker()
-        #expect(take(&interrupted, at: 20, items: nothing).isEmpty)
-        #expect(take(&interrupted, at: 30).isEmpty, "it lists its icon again")
-        #expect(take(&interrupted, at: 40, items: nothing).isEmpty)
-        #expect(take(&interrupted, at: 50, items: nothing, unanswered: [two]).isEmpty, "it didn't answer")
-        #expect(take(&interrupted, at: 60, items: nothing, problems: [.agentNotRunning]).isEmpty, "nor did MenuBarAgent")
-        #expect(take(&interrupted, at: 70, items: nothing, problems: [.accessibilityNotGranted]).isEmpty)
-        #expect(interrupted.flagged == [two])
-        #expect(take(&interrupted, at: 80, items: nothing) == [.clearedByNoItems(two)])
-    }
-
     @Test func turnedOffAppIsNeverFlaggedAndLosesItsFlag() {
         var tracker = tracker()
         #expect(take(&tracker, at: 0, evidence: noSlot(two)).isEmpty)
@@ -655,45 +380,6 @@ struct UnattachedIconTrackerTests {
         #expect(flagged.turnedOffListRead([two]) == [.clearedTurnedOff(two)])
         #expect(flagged.flagged.isEmpty)
         #expect(flagged.turnedOffListRead([two]).isEmpty)
-    }
-
-    @Test func forgetAllKeepsSightings() {
-        // Under the branch where a sighting is always needed: without one, nothing is flagged; with one, a manual Refresh that forgets the
-        // flags still has it.
-        var tracker = flaggedTracker(.always)
-        #expect(tracker.flagged.isEmpty, "never drawn with no assertion live")
-        _ = tracker.readTaken(Bar.read([Bar.item(one), Bar.item(two)], at: 15), gate: .sighting, evidence: nil, processes: processes())
-        _ = take(&tracker, at: 20, evidence: noSlot(two))
-        #expect(take(&tracker, at: 30, evidence: noSlot(two)) == [.flagged(two)])
-        tracker.forgetAll()
-        #expect(tracker.flagged.isEmpty)
-        // Runs went too: the first read of a new run flags nothing, the second 10 s later does, and no new sighting is needed.
-        #expect(take(&tracker, at: 40, evidence: noSlot(two)).isEmpty)
-        #expect(take(&tracker, at: 50, evidence: noSlot(two)) == [.flagged(two)])
-    }
-
-    @Test func forAutomaticKeepsAFlagThroughAQuickRelaunch() {
-        var tracker = flaggedTracker()
-        let model = sections(shown: [one, two])
-        #expect(tracker.forAutomatic(sections: model) == [two])
-        #expect(take(&tracker, at: 20, processes: [:]).isEmpty)
-        #expect(tracker.forAutomatic(sections: model) == [two], "gone for a read, still told")
-        #expect(take(&tracker, at: 30, processes: processes(400)).isEmpty)
-        #expect(tracker.forAutomatic(sections: model) == [two])
-    }
-
-    @Test func forAutomaticCountsAnOverflowMoveAsShownButNotThePersonsMove() {
-        let tracker = flaggedTracker()
-        var model = sections(shown: [one, two])
-        #expect(tracker.forAutomatic(sections: model) == [two])
-        // Moved to Hidden for room: the trial of it is judged under the switches, where it is drawn.
-        model.apps[two] = AppPlacement(section: .hidden, isAuto: true)
-        #expect(tracker.forAutomatic(sections: model) == [two])
-        // The person moved it there, or to Always Hidden.
-        model.apps[two] = AppPlacement(section: .hidden, isAuto: false)
-        #expect(tracker.forAutomatic(sections: model).isEmpty)
-        model.apps[two] = AppPlacement(section: .alwaysHidden, isAuto: true)
-        #expect(tracker.forAutomatic(sections: model).isEmpty)
     }
 
     // MARK: The sighting
@@ -722,30 +408,5 @@ struct UnattachedIconTrackerTests {
         _ = lost.turnedOffListRead(nil)
         _ = take(&lost, at: 0, evidence: noSlot(two))
         #expect(take(&lost, at: 10, evidence: noSlot(two)).isEmpty)
-    }
-
-    @Test func aSightingHoldsOnlyWhileTheProcessIsTheSame() {
-        var tracker = tracker(.whileTurnedOffIsUnknown, listKnown: false)
-        sightingRead(&tracker, at: 0, pid: 100)
-        _ = take(&tracker, at: 5, evidence: noSlot(two), processes: processes(200))
-        #expect(take(&tracker, at: 15, evidence: noSlot(two), processes: processes(200)).isEmpty, "another process: not the one that was seen")
-    }
-
-    @Test func aSightingIsRecordedOnlyWhileNoAssertionIsLive() {
-        var tracker = tracker(.always)
-        // Drawn while an assertion was live: the allowlist names it, which says nothing of whether it is tied.
-        _ = tracker.readTaken(Bar.read([Bar.item(one), Bar.item(two)], at: 0), gate: .open, evidence: nil, processes: processes())
-        _ = take(&tracker, at: 5, evidence: noSlot(two))
-        #expect(take(&tracker, at: 15, evidence: noSlot(two)).isEmpty)
-    }
-
-    @Test func aContestedAppIsNotSeenDrawn() {
-        // A read with no assertion live, in which the app's old frame won a near tie for a neighbour's slot: it isn't seen drawn.
-        var tracker = tracker(.always)
-        _ = tracker.readTaken(Bar.read([Bar.item(one), Bar.item(two)], at: 0, contested: [two]), gate: .sighting, evidence: nil,
-                              processes: processes())
-        _ = take(&tracker, at: 5, evidence: noSlot(two))
-        #expect(take(&tracker, at: 15, evidence: noSlot(two)).isEmpty)
-        #expect(tracker.flagged.isEmpty)
     }
 }

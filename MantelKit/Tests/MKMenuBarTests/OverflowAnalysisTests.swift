@@ -11,7 +11,7 @@ struct OverflowAnalysisTests {
     private func snapshot(slots: [AgentSlot] = [], apps: [AppExtras]) -> MenuBarSnapshot {
         MenuBarSnapshot(capturedAt: Date(timeIntervalSince1970: 0), layout: .laptop,
                         agentWindows: [AgentWindow(frame: CGRect(x: 0, y: 0, width: 1512, height: 32), slots: slots)],
-                        apps: apps, rawAgentTree: nil)
+                        apps: apps)
     }
 
     private func chevronSlot() -> AgentSlot {
@@ -27,19 +27,19 @@ struct OverflowAnalysisTests {
         ExtraItem(index: index, frame: frame, identifier: nil, title: nil, description: nil)
     }
 
-    @Test func aFramelessExtraIsOverflowed() {
-        let snapshot = snapshot(slots: [chevronSlot()], apps: [
-            app("com.example.a", items: [item(0, frame: CGRect(x: 100, y: 0, width: 30, height: 31)), item(1, frame: nil)]),
+    /// One app's items, with or without the chevron: a frameless extra is overflowed; so is a frame inside the chevron; and without a
+    /// chevron only the frameless are, a frame with no area counting as none.
+    @Test(arguments: [
+        (chevron: true, frames: [CGRect(x: 100, y: 0, width: 30, height: 31), nil], overflowed: [1]),
+        (chevron: true, frames: [CGRect(x: 1005, y: 2, width: 20, height: 27), CGRect(x: 100, y: 0, width: 30, height: 31)], overflowed: [0]),
+        (chevron: false, frames: [CGRect(x: 1005, y: 2, width: 20, height: 27), nil], overflowed: [1]),
+        (chevron: false, frames: [CGRect(x: 5, y: 5, width: 0, height: 0)], overflowed: [0]),
+    ])
+    func anExtraWithoutAFrameOrInsideTheChevronIsOverflowed(chevron hasChevron: Bool, frames: [CGRect?], overflowed: [Int]) {
+        let snapshot = snapshot(slots: hasChevron ? [chevronSlot()] : [], apps: [
+            app("com.example.a", items: frames.enumerated().map { item($0, frame: $1) }),
         ])
-        #expect(OverflowAnalysis.overflowed(in: snapshot) == [ExtraItemRef(bundleID: "com.example.a", index: 1)])
-    }
-
-    @Test func aFrameInsideTheChevronIsOverflowed() {
-        let inside = CGRect(x: 1005, y: 2, width: 20, height: 27)
-        let snapshot = snapshot(slots: [chevronSlot()], apps: [
-            app("com.example.a", items: [item(0, frame: inside), item(1, frame: CGRect(x: 100, y: 0, width: 30, height: 31))]),
-        ])
-        #expect(OverflowAnalysis.overflowed(in: snapshot) == [ExtraItemRef(bundleID: "com.example.a", index: 0)])
+        #expect(OverflowAnalysis.overflowed(in: snapshot) == overflowed.map { ExtraItemRef(bundleID: "com.example.a", index: $0) })
     }
 
     @Test func normalItemsAreNotOverflowed() {
@@ -48,18 +48,6 @@ struct OverflowAnalysisTests {
             app("com.example.b", pid: 2, items: [item(0, frame: CGRect(x: 200, y: 0, width: 30, height: 31))]),
         ])
         #expect(OverflowAnalysis.overflowed(in: snapshot).isEmpty)
-    }
-
-    @Test func withoutAChevronOnlyTheFramelessAreOverflowed() {
-        let snapshot = snapshot(apps: [
-            app("com.example.a", items: [item(0, frame: CGRect(x: 1005, y: 2, width: 20, height: 27)), item(1, frame: nil)]),
-        ])
-        #expect(OverflowAnalysis.overflowed(in: snapshot) == [ExtraItemRef(bundleID: "com.example.a", index: 1)])
-    }
-
-    @Test func aFrameWithNoAreaCountsAsNone() {
-        let snapshot = snapshot(apps: [app("com.example.a", items: [item(0, frame: CGRect(x: 5, y: 5, width: 0, height: 0))])])
-        #expect(OverflowAnalysis.overflowed(in: snapshot) == [ExtraItemRef(bundleID: "com.example.a", index: 0)])
     }
 
     @Test func aFramelessSlotWithAnOwnerIsOverflowedByItsOwnersIndex() {

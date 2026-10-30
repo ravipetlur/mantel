@@ -24,7 +24,7 @@ private nonisolated final class SessionLink: Sendable {
 ///
 /// It owns the scanner, the three engines and the controller that keeps one in charge, the session, the model of the session's state, the
 /// reveal controller, the dots, the pointer monitors and the clock-click controller. (The one source of running apps, and the engine
-/// that works through the System Settings switches, are the coordinator's: the probes use them too.) The session is the only caller
+/// that works through the System Settings switches, are the coordinator's.) The session is the only caller
 /// of the engines, apart from the clock-click controller, which lifts the allowlist for a click on the clock and puts it back.
 ///
 /// - **Events go to the session in order,** through a queue of their own: a start or quit of an app, a change of displays, another app in
@@ -51,7 +51,7 @@ final class MenuBarController: MenuBarCommanding {
     private let takeover: MenuBarTakeover
     private let sessionStart: SessionStart
     private let resetter: MenuBarResetter
-    /// What restarts MenuBarAgent by itself when a change of displays leaves the menu bar stuck: the same restarter, probe check and flag as a reset.
+    /// What restarts MenuBarAgent by itself when a change of displays leaves the menu bar stuck: the same restarter and flag as a reset.
     private let stuckBarRecovery: StuckBarRecovery
     private let reveal: RevealController
     private let dots: DotsController
@@ -111,30 +111,29 @@ final class MenuBarController: MenuBarCommanding {
     ///   - store: where the sections are kept (`profiles.json`).
     ///   - approvals: the engine that works through the System Settings switches; it also says which apps are turned off there.
     ///   - runningApps: the one list of the apps that are running. It is started by `start()`.
-    ///   - scanner: what reads the menu bar. It is the coordinator's, and not made here, because the probes find items and press them through
-    ///     the same one: what its scans learned of where each app's items are, while they were all drawn, is what lets it say which slot an
-    ///     item that was concealed has been drawn in.
+    ///   - scanner: what reads the menu bar. It is the coordinator's, and not made here: what its scans learned of where each app's items
+    ///     are, while they were all drawn, is what lets it say which slot an item that was concealed has been drawn in.
     ///   - layout: the displays as they are now.
     ///   - reveal, hiding, dots, secondBar: the person's settings.
     ///   - ownImages: the folder the pictures chosen for the dots are in.
     ///   - itemImagesFolder: the folder the pictures captured of the menu bar's icons are kept in.
     ///   - replayJournal: puts back what the journal still holds (a reset does it, between taking everything down and restarting the menu bar).
-    ///   - resetRefusal: why a reset can't be made now, if it can't (a platform test is changing the menu bar). Asked at the start of each.
-    ///   - resetActivity: set while a reset is under way, for the probes.
+    ///   - resetActivity: set while a reset is under way.
     ///   - layoutRules, layout: how macOS keeps the order table, and the person's layout settings. The rules are built once, by the
     ///     coordinator, and given to the applier and the session alike.
     ///   - plist, grants, journal, home: what writes the order table through the layout file's grant (`home` is where the file is expected).
-    ///   - probeChangingMenuBar: whether a platform test is changing the menu bar, which holds writes of the order back.
     ///   - openSettings, openDiagnostics: what the dots' menu opens.
+    ///   - updates: the menu's update item; nil in a build that can't update itself, which has none.
     ///   - activation: the owner of Mantel's activation policy, which a takeover of the menu bar is one reason for.
     ///   - recordsChecked: moves the settings of the icons whose records a check of an app's saved icons took out.
     init(store: SettingsStore, approvals: ApprovalsEngine, runningApps: RunningAppsSource, scanner: MenuBarScanner,
          layout: @escaping @Sendable () -> DisplayLayout, reveal revealSettings: RevealSettings, hiding hidingSettings: HidingSettings,
          dots dotSettings: DotSettings, secondBar secondBarSettings: SecondBarSettings, ownImages: URL, itemImagesFolder: URL,
-         replayJournal: @escaping @Sendable () async -> Void, resetRefusal: @escaping @Sendable () async -> String?,
+         replayJournal: @escaping @Sendable () async -> Void,
          resetActivity: ResetActivity, layoutRules: LayoutRules, layout layoutSettings: LayoutSettings, plist: PlistFileAccess,
-         grants: FileGrantStore, journal: Journal, home: URL, probeChangingMenuBar: @escaping @Sendable () async -> Bool,
-         openSettings: @escaping () -> Void, openDiagnostics: @escaping () -> Void, activation: ActivationPolicyOwner,
+         grants: FileGrantStore, journal: Journal, home: URL,
+         openSettings: @escaping () -> Void, openDiagnostics: @escaping () -> Void, updates: DotsController.Updates?,
+         activation: ActivationPolicyOwner,
          recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved) {
         self.store = store
         self.runningApps = runningApps
@@ -180,7 +179,7 @@ final class MenuBarController: MenuBarCommanding {
         sessionLink.session = session
 
         // The order table: written by the applier on a task of its own, which reads the bar through the session, tells it when the bar is
-        // settling, and waits while a platform test or the wide spacer has the menu bar.
+        // settling, and waits while the wide spacer has the menu bar.
         let writer = LayoutTableWriter(access: plist, reader: LayoutTableReader(access: plist, grants: grants), grants: grants,
                                        journal: journal, home: home, broken: layoutRules.broken)
         let windows = LiveWindowList()
@@ -190,7 +189,7 @@ final class MenuBarController: MenuBarCommanding {
             phase: { pending, settling, revision in
                 await sessionLink.session?.setLayoutPhase(pending: pending, settling: settling, revision: revision)
             },
-            held: { LayoutHold.reason(probeChangingMenuBar: await probeChangingMenuBar(), engine: await sessionLink.session?.engineStatus().kind) })
+            held: { LayoutHold.reason(engine: await sessionLink.session?.engineStatus().kind) })
 
         // The pictures of the icons: taken at the moments the session names, kept in the store, and handed out by the loader.
         let imageStore = ItemImageStore(folder: itemImagesFolder, clock: SystemClock())
@@ -201,9 +200,9 @@ final class MenuBarController: MenuBarCommanding {
         itemImages = ItemImages(store: imageStore, folder: itemImagesFolder, ownBundleID: ownBundleID)
         // MenuBarAgent is found in the list of running apps when it is asked to restart, and only it is signalled.
         let restarter = MenuBarAgentRestarter(runningApps: { runningApps.all })
-        resetter = MenuBarResetter(session: session, restarter: restarter, replayJournal: replayJournal, refusal: resetRefusal,
+        resetter = MenuBarResetter(session: session, restarter: restarter, replayJournal: replayJournal,
                                    activity: resetActivity)
-        stuckBarRecovery = StuckBarRecovery(restarter: restarter, refusal: resetRefusal, activity: resetActivity)
+        stuckBarRecovery = StuckBarRecovery(restarter: restarter, activity: resetActivity)
 
         let classifier = PointerClassifier(windows: LiveWindowList(), layout: layout)
         self.classifier = classifier
@@ -217,7 +216,7 @@ final class MenuBarController: MenuBarCommanding {
             openSettings: openSettings,
             toggleFocusMode: { reveal.send(.toggleFocusMode) },
             refresh: { events.enqueue { await session.refresh() } },
-            openDiagnostics: openDiagnostics),
+            openDiagnostics: openDiagnostics, updates: updates),
             settings: dotSettings, imageFolder: ownImages)
         let ownItems = OwnItemsController(imageFolder: ownImages)
         self.ownItems = ownItems
@@ -335,15 +334,6 @@ final class MenuBarController: MenuBarCommanding {
             if let front { await session.frontAppChanged(pid: front, activeScreenWidth: width) }
             await classifier.update(appMenuFrames: await session.frontAppMenuFrames())
         }
-    }
-
-    // MARK: Where Mantel's own items are
-
-    /// Where Mantel's own items' buttons are, by the name the system keeps each one's place under, in CoreGraphics global points (the
-    /// platform test compares them with the slots macOS draws).
-    func ownItemFrames() -> [String: CGRect] {
-        let displays = layout()
-        return dots.buttonFrames().merging(ownItems.buttonFrames()) { first, _ in first }.mapValues { displays.cgRect(fromAppKit: $0) }
     }
 
     // MARK: What the session is told
@@ -491,7 +481,7 @@ final class MenuBarController: MenuBarCommanding {
         sessionEvents.enqueue { await session.forget(app: bundleID) }
     }
 
-    /// The person gave Mantel a file, or put back what a platform test left: what can be used, and what is turned off in System Settings,
+    /// The person gave Mantel a file, or put back what an earlier run left: what can be used, and what is turned off in System Settings,
     /// are asked again (`MenuBarSession.permissionsChanged`).
     func permissionsChanged() {
         guard isStarted, !isShutDown else { return }
@@ -645,12 +635,11 @@ final class MenuBarController: MenuBarCommanding {
         clockClicks.shutDown()
     }
 
-    /// What quitting does to the menu bar, before the journal is replayed:
-    /// 1. the tap that holds clicks on the clock is stopped for good;
-    /// 2. the pointer monitors are removed;
-    /// 3. a takeover of the menu bar is ended;
-    /// 4. the session stops delivering plans and reads, and takes the engine down (which shows everything and puts back what the engine
-    ///    changed), waiting for that for at most 1.5 seconds.
+    /// Whether an order change is being written (`MenuBarSession.layoutWriteIsUnderWay`).
+    func layoutWriteIsUnderWay() async -> Bool {
+        await session.layoutWriteIsUnderWay()
+    }
+
     /// Writes the order change that is still in its debounce, before anything that can take long (`MenuBarSession.flushLayoutForQuit`).
     func flushLayoutForQuit() async {
         await session.flushLayoutForQuit()
@@ -662,6 +651,12 @@ final class MenuBarController: MenuBarCommanding {
         await session.finishSettingsMovesForQuit(then: following)
     }
 
+    /// What quitting does to the menu bar, before the journal is replayed:
+    /// 1. the tap that holds clicks on the clock is stopped for good;
+    /// 2. the pointer monitors are removed;
+    /// 3. a takeover of the menu bar is ended;
+    /// 4. the session stops delivering plans and reads, and takes the engine down (which shows everything and puts back what the engine
+    ///    changed), waiting for that for at most 1.5 seconds.
     func tearDownForQuit() async {
         clockClicks.shutDown()
         isShutDown = true

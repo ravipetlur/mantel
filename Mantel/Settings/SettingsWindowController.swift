@@ -63,6 +63,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         visibilityChanged(true)
     }
 
+    /// Whether the window is open on the About page, where a check asked for from Settings answers.
+    var isShowingAbout: Bool {
+        window?.isVisible == true && model.selection == .about
+    }
+
     func windowWillClose(_ notification: Notification) {
         content.drop()
         visibilityChanged(false)

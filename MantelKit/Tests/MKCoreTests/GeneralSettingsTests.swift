@@ -37,6 +37,24 @@ struct GeneralSettingsTests {
         #expect(try decode(#"{"onboardingCompleted":true}"#) == GeneralSettings(onboardingCompleted: true, settingsPage: nil))
     }
 
+    /// "Check for updates automatically" is on unless the file says it is off: a missing key, and one that isn't a true or false,
+    /// mean on, and the rest of the file is read as it is.
+    @Test(arguments: [("{}", true), (#"{"checkForUpdatesAutomatically":false}"#, false), (#"{"checkForUpdatesAutomatically":true}"#, true),
+                      (#"{"checkForUpdatesAutomatically":"no"}"#, true), (#"{"checkForUpdatesAutomatically":null}"#, true),
+                      (#"{"checkForUpdatesAutomatically":0}"#, true)])
+    func checkingForUpdatesIsOnUnlessTheFileSaysOff(json: String, expected: Bool) throws {
+        #expect(try decode(json).checkForUpdatesAutomatically == expected)
+    }
+
+    /// A value that isn't a true or false doesn't spoil the rest of the file, and what is turned off is written and read back off.
+    @Test func theRestOfTheFileIsReadAsItIsAndAnOffIsKept() throws {
+        #expect(try decode(#"{"onboardingCompleted":true,"checkForUpdatesAutomatically":"no"}"#).onboardingCompleted)
+        var settings = GeneralSettings()
+        settings.checkForUpdatesAutomatically = false
+        let again = try JSONDecoder().decode(GeneralSettings.self, from: JSONEncoder().encode(settings))
+        #expect(!again.checkForUpdatesAutomatically)
+    }
+
     @Test func newKeysDefaultWhenMissing() throws {
         let settings = GeneralSettings()
         #expect(settings.layout == LayoutSettings())

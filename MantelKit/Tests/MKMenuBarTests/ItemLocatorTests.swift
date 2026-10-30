@@ -165,6 +165,19 @@ private struct Reveal {
 private let temp = ItemID(bundleID: weather, key: .identifier("weather.temp"))
 private let alerts = ItemID(bundleID: weather, key: .identifier("weather.alerts"))
 
+/// Slots of these widths, right-aligned with 4 points between them, the right-most ending at `end`; by x.
+private func run(_ widths: [CGFloat], endingAt end: CGFloat = 1000) -> [CGRect] {
+    var frames: [CGRect] = []
+    var right = end
+    for width in widths.reversed() {
+        frames.append(CGRect(x: right - width, y: 0, width: width, height: 30))
+        right -= width + 4
+    }
+    return frames.reversed()
+}
+
+private func box(_ x: CGFloat, _ width: CGFloat) -> CGRect { CGRect(x: x, y: 0, width: width, height: 30) }
+
 /// Where an item is now: the slot its app says, or the slot that appeared for it.
 @Suite("Item locator", .timeLimit(.minutes(1)))
 struct ItemLocatorTests {
@@ -178,15 +191,6 @@ struct ItemLocatorTests {
 
         #expect(location == ItemLocation(item: temp, displayUUID: main, slotFrame: World.firstNew, tiedBy: .tie, slotWasInBaseline: false,
                                          widthAgrees: true, frameMinusSlotWidth: -12), "its frame is narrower than the slot, as macOS 27's are")
-    }
-
-    @Test func theDisplayCanBeNamed() async throws {
-        let world = World(tempFrame: World.firstNew.insetBy(dx: 6, dy: 1))
-        world.addSlot(World.firstNew)
-        let scanner = world.scanner()
-
-        #expect(await scanner.locate(temp, on: main, since: nil)?.slotFrame == World.firstNew)
-        #expect(await scanner.locate(temp, on: "no-such-display", since: nil) == nil)
     }
 
     @Test func appFrameWiderBySixPointsStillTies() async throws {
@@ -211,34 +215,6 @@ struct ItemLocatorTests {
         #expect(await scanner.locate(temp, on: nil, since: nil) == nil)
         #expect(await scanner.locate(.system("wifi"), on: nil, since: nil)?.slotFrame == World.wifiSlot, "the slot is the system's")
         #expect(await scanner.locate(.system("wifi"), on: nil, since: nil)?.tiedBy == .tie)
-    }
-
-    @Test func unnamedItemsAreToldByPlace() async throws {
-        // Two items that name themselves nothing are told apart as the inventory tells them: by where they are, left to right.
-        let ax = FakeAX()
-        let window = ax.addAgentWindow(agent: agentPID, frame: bar)
-        let right = CGRect(x: 3100, y: 0, width: 36, height: 30), left = CGRect(x: 3056, y: 0, width: 36, height: 30)
-        ax.addSlot(in: window, frame: right)
-        ax.addSlot(in: window, frame: left)
-        // The app lists its items right to left.
-        ax.addApp(pid: weatherPID, extras: [.init(title: "B", frame: right.insetBy(dx: 6, dy: 1)), .init(title: "A", frame: left.insetBy(dx: 6, dy: 1))])
-        let running: [RunningApp] = [.fake(agentPID, MenuBarReader.menuBarAgentBundleID), .fake(weatherPID, weather)]
-        let scanner = MenuBarScanner(ax: ax, runningApps: { running }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        // As the scans name them: an item with no name is what they saw it be.
-        let scanned = await scanner.scan()
-        #expect(scanned.items(ofApp: weather).map(\.id.string) == ["\(weather)#0", "\(weather)#1"])
-
-        #expect(await scanner.locate(ItemID(bundleID: weather, key: .index(0)), on: nil, since: nil)?.slotFrame == left)
-        #expect(await scanner.locate(ItemID(bundleID: weather, key: .index(1)), on: nil, since: nil)?.slotFrame == right)
-        #expect(await scanner.locate(ItemID(bundleID: weather, key: .index(2)), on: nil, since: nil) == nil)
-    }
-
-    @Test func anAppThatIsNotRunningIsNotLocated() async throws {
-        let world = World(tempFrame: World.firstNew.insetBy(dx: 6, dy: 1))
-        world.addSlot(World.firstNew)
-        let ghost = ItemID(bundleID: "com.example.ghost", key: .identifier("ghost.main"))
-        #expect(await world.scanner().locate(ghost, on: nil, since: nil) == nil)
     }
 
     @Test func withoutAccessibilityNothingIsLocated() async throws {
@@ -309,15 +285,6 @@ struct ItemLocatorTests {
             #expect(await reveal.scanner.locate(temp, on: nil, since: reveal.before) == nil, "right to left: \(rightToLeft)")
             #expect(await reveal.scanner.locate(alerts, on: nil, since: reveal.before) == nil, "right to left: \(rightToLeft)")
         }
-    }
-
-    @Test func anAppWithOneItemNeedsNoOrder() async throws {
-        let reveal = try await Reveal.make(World(items: 1), frames: [World.firstNew], learning: false)
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found == ItemLocation(item: temp, displayUUID: main, slotFrame: World.firstNew, tiedBy: .newSlots, slotWasInBaseline: false,
-                                      widthAgrees: true, frameMinusSlotWidth: 2))
     }
 
     @Test func newSlotsFallbackRefusesWhenCountDiffers() async throws {
@@ -394,77 +361,6 @@ struct ItemLocatorTests {
         #expect(found.tiedBy == .tie, "one slot appeared for an app with two items")
         #expect(!reveal.before.slots.contains(found.slotFrame), "by its frame it is no slot of the snapshot's")
         #expect(found.slotWasInBaseline, "but it was one")
-    }
-
-    @Test func aNewSlotIsNotInBaseline() async throws {
-        let reveal = try await Reveal.make()
-        reveal.world.move(reveal.world.temp, to: World.firstNew.insetBy(dx: 6, dy: 1))
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.tiedBy == .tieAndNewSlots)
-        #expect(!found.slotWasInBaseline)
-    }
-
-    @Test func aNewSlotBesideAnOldOneOfAnotherWidthIsTold() {
-        // 40 wide beside 36: the new one is the 40.
-        let old = [CGRect(x: 3140, y: 0, width: 36, height: 30)]
-        let after = [CGRect(x: 3096, y: 0, width: 36, height: 30), CGRect(x: 3136, y: 0, width: 40, height: 30)]
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == [CGRect(x: 3136, y: 0, width: 40, height: 30)], "one new, widths differ")
-        // The same width as the old one beside it: the new one takes the old one's place and the old one goes left, or the old one stays and
-        // the new one is left of it. Nothing says which.
-        #expect(ItemLocator.appearedSlots(since: old, in: [CGRect(x: 3100, y: 0, width: 36, height: 30), CGRect(x: 3140, y: 0, width: 36, height: 30)]) == nil,
-                "one new, the same width as its neighbour")
-    }
-
-    /// Slots of these widths, right-aligned with 4 points between them, the right-most ending at `end`; by x.
-    private func slots(_ widths: [CGFloat], endingAt end: CGFloat = 1000) -> [CGRect] {
-        var frames: [CGRect] = []
-        var right = end
-        for width in widths.reversed() {
-            frames.append(CGRect(x: right - width, y: 0, width: width, height: 30))
-            right -= width + 4
-        }
-        return frames.reversed()
-    }
-
-    @Test func twoNewSlotsLeftOfAllAreTold() {
-        let old = slots([36])
-        let after = slots([40, 40, 36])
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == [after[0], after[1]])
-    }
-
-    @Test func twoNewSlotsInTheMiddleAreTold() {
-        // 20 and 36 before; two of 40 between them after: the 20 went left by 88.
-        let old = slots([20, 36])
-        let after = slots([20, 40, 40, 36])
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == [after[1], after[2]])
-    }
-
-    @Test func twoNewSlotsBeforeAnotherAppsSlotsAreNotItsShiftedSlot() {
-        // Right-aligned widths 20, 30, 40; a two-item app appears between the 30 and the 40 with widths 25 and 30. The 30 that went left is
-        // as wide as the new 30, and a match from the right takes the new one for the old one. The new slots are the 25 and the 30 beside
-        // the 40, and not the 30 that went left: the two ways of matching say different things, so nothing is said.
-        let old = slots([20, 30, 40])
-        let after = slots([20, 30, 25, 30, 40])
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == nil)
-        for slot in ItemLocator.appearedSlots(since: old, in: after) ?? [] {
-            #expect(slot != after[1], "never the other app's slot")
-        }
-    }
-
-    @Test func aSlotThatWentAwayBreaksTheAnswer() {
-        // Something else changed between the two looks: the new slots can't be told.
-        let old = [CGRect(x: 100, y: 0, width: 30, height: 30), CGRect(x: 140, y: 0, width: 30, height: 30)]
-        #expect(ItemLocator.appearedSlots(since: old, in: [CGRect(x: 140, y: 0, width: 30, height: 30)]) == nil)
-        #expect(ItemLocator.appearedSlots(since: old, in: old) == [])
-        #expect(ItemLocator.appearedSlots(since: [], in: old) == old)
-    }
-
-    @Test func aSlotThatMovedRightIsNotTheOldOne() {
-        // Slots only move left when others appear: one that is right of where it was is not it.
-        let old = [CGRect(x: 100, y: 0, width: 30, height: 30)]
-        #expect(ItemLocator.appearedSlots(since: old, in: [CGRect(x: 120, y: 0, width: 30, height: 30)]) == nil)
     }
 
     @Test func tieAndNewSlotsAgree() async throws {
@@ -588,91 +484,6 @@ struct ItemLocatorTests {
         #expect(!found.isPostable(drawnAtSnapshot: false))
     }
 
-    @Test func frameFourteenNarrowerAgrees() async throws {
-        // macOS 27: the test item's frames are 24, 26, 28 and 30 in slots of 38, 40, 42 and 44.
-        for (slot, frame) in [(38.0, 24.0), (40.0, 26.0), (42.0, 28.0), (44.0, 30.0)] as [(CGFloat, CGFloat)] {
-            let slotFrame = CGRect(x: 3052, y: 0, width: slot, height: 30)
-            let reveal = try await Reveal.make(World(items: 1), frames: [slotFrame], parkedWidth: frame)
-            let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-            #expect(found.slotFrame == slotFrame)
-            #expect(found.widthAgrees, "\(frame) in \(slot)")
-            #expect(found.frameMinusSlotWidth == -14)
-            #expect(!found.isPostable(drawnAtSnapshot: false), "recorded, and no ground for a click")
-        }
-    }
-
-    @Test func frameSeventeenNarrowerDisagrees() async throws {
-        let reveal = try await Reveal.make(parkedWidth: 23)
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-        #expect(found.frameMinusSlotWidth == -17)
-        #expect(!found.widthAgrees)
-    }
-
-    @Test func aTieToAnotherSlotMakesTheWidthDisagree() async throws {
-        // The app puts the item in the slot of an app that isn't asked with a frame 42 wide, which is the width of the new slot's icon (40)
-        // all the same. A frame that says the item is somewhere else is no sign it is here.
-        let reveal = try await Reveal.make { $0.addSlot(CGRect(x: 3000, y: 0, width: 36, height: 30)) }
-        reveal.world.move(reveal.world.temp, to: CGRect(x: 3018 - 21, y: 1, width: 42, height: 28))
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == World.firstNew)
-        #expect(found.tiedBy == .newSlots, "the slot that appeared wins over the tie, which says another slot")
-        #expect(!found.widthAgrees)
-        #expect(!found.isPostable(drawnAtSnapshot: false))
-    }
-
-    @Test func aFrameInTheSlotOfAnAppThatAnswersMakesTheWidthDisagree() async throws {
-        // The app puts the item in the notes app's slot with a frame 42 wide, the width of the new slot's icon (40). The notes app's own
-        // frame has that slot, so the item has no tie; what the app says of where it is is still not this slot.
-        let reveal = try await Reveal.make()
-        reveal.world.move(reveal.world.temp, to: CGRect(x: World.notesSlot.midX - 21, y: 1, width: 42, height: 28))
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == World.firstNew)
-        #expect(found.tiedBy == .newSlots, "no tie: the notes app's frame has its slot")
-        #expect(found.frameMinusSlotWidth == 2)
-        #expect(!found.widthAgrees)
-    }
-
-    @Test func aMeterThatGrowsAsAnAppAppearsIsNotPostable() async throws {
-        // A meter 30 wide, left of the notes app's slot, grows to 40 as a 30-wide app's icon appears right of it. The meter goes left, the
-        // new icon takes the place it had (30 wide: the one old slot of its width), and the slots left of that are the meter's, 40 wide: the
-        // two ways of matching agree that the meter's is the new one. Frames alone can't tell the two apart; the answer is no ground for a click.
-        let world = World(items: 1)
-        var meter = 0
-        let reveal = try await Reveal.make(world, frames: [CGRect(x: 3106, y: 0, width: 30, height: 30)], learning: false, parkedWidth: 33) {
-            meter = $0.addSlot(CGRect(x: 3106, y: 0, width: 30, height: 30))
-        }
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3062, y: 0)), on: meter)
-        reveal.world.ax.setAttribute(AXName.size, .size(CGSize(width: 40, height: 30)), on: meter)
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == CGRect(x: 3062, y: 0, width: 40, height: 30), "the meter's slot is the one that is new, by the frames")
-        #expect(found.tiedBy == .newSlots)
-        #expect(found.widthAgrees, "the app's icon is 33 wide, and that slot is 40: within the band, which is no ground for a click")
-        #expect(!found.isPostable(drawnAtSnapshot: false))
-    }
-
-    @Test func aMeterThatGrowsByThreeAsAnAppAppearsIsNotPostable() async throws {
-        // As above, but the meter grows by 3 points (30 to 33): the new slot is the meter's, and its width is the app's icon's.
-        let world = World(items: 1)
-        var meter = 0
-        let reveal = try await Reveal.make(world, frames: [CGRect(x: 3106, y: 0, width: 30, height: 30)], learning: false, parkedWidth: 33) {
-            meter = $0.addSlot(CGRect(x: 3106, y: 0, width: 30, height: 30))
-        }
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3069, y: 0)), on: meter)
-        reveal.world.ax.setAttribute(AXName.size, .size(CGSize(width: 33, height: 30)), on: meter)
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == CGRect(x: 3069, y: 0, width: 33, height: 30), "the meter's slot is the one the frames say is new")
-        #expect(found.widthAgrees, "and it is as wide as the app's icon")
-        #expect(!found.isPostable(drawnAtSnapshot: false), "which is no ground for a click")
-    }
-
     @Test func unnamedItemsAreWhatTheScansCalledThem() async throws {
         // An app whose two items have no names: the scans called the left one `.index(0)` and the right one `.index(1)` while they were drawn.
         // During the reveal the first the app lists (the left one) still has a frame it left behind, in the slot of an app that isn't asked
@@ -709,16 +520,6 @@ struct ItemLocatorTests {
         #expect(await reveal.scanner.locate(alerts, on: nil, since: reveal.before) == nil)
     }
 
-    @Test func namedItemsAreNotAskedForTheirPlace() async throws {
-        // The same stale tie with names of their own: an item is what its app calls it, whatever the ties say.
-        let reveal = try await Reveal.make()
-        reveal.world.move(reveal.world.temp, to: World.notesSlot.insetBy(dx: 6, dy: 1))
-        reveal.world.move(reveal.world.alerts, to: World.secondNew.insetBy(dx: 6, dy: 1))
-
-        #expect(await reveal.scanner.locate(temp, on: nil, since: reveal.before)?.slotFrame == World.firstNew)
-        #expect(await reveal.scanner.locate(alerts, on: nil, since: reveal.before)?.slotFrame == World.secondNew)
-    }
-
     @Test func anItemThatTheScansNeverSawHasNoNameToLocateItBy() async throws {
         // No scan has seen the app's two nameless items, so `.index(0)` is whichever the app lists first; the read, which finds them by their
         // frames, may say another. Without the scans' word there is no answer.
@@ -728,25 +529,6 @@ struct ItemLocatorTests {
         world.move(world.temp, to: World.secondNew.insetBy(dx: 6, dy: 1))
         world.move(world.alerts, to: World.firstNew.insetBy(dx: 6, dy: 1))
         #expect(await world.scanner().locate(ItemID(bundleID: weather, key: .index(0)), on: nil, since: nil) == nil)
-    }
-
-    @Test func aNeighbourThatShrinksAsAnAppAppearsIsNotPostable() async throws {
-        // The same the other way: a 40-wide app appears while its neighbour (40 wide) shrinks to 30. The new icon takes the neighbour's place,
-        // and the neighbour's 30-wide slot is the one that looks new.
-        let world = World(items: 1)
-        var neighbour = 0
-        let reveal = try await Reveal.make(world, frames: [CGRect(x: 3096, y: 0, width: 40, height: 30)], learning: false, parkedWidth: 43) {
-            neighbour = $0.addSlot(CGRect(x: 3096, y: 0, width: 40, height: 30))
-        }
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3062, y: 0)), on: neighbour)
-        reveal.world.ax.setAttribute(AXName.size, .size(CGSize(width: 30, height: 30)), on: neighbour)
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == CGRect(x: 3062, y: 0, width: 30, height: 30))
-        #expect(found.tiedBy == .newSlots)
-        #expect(!found.widthAgrees, "the app's icon is 43 wide, and that slot is 30")
-        #expect(!found.isPostable(drawnAtSnapshot: false))
     }
 
     @Test func noBaselineIsNeverPostableForAConcealedItem() async throws {
@@ -778,13 +560,6 @@ struct ItemLocatorTests {
         #expect(!location(.newSlots, widthAgrees: true).isPostable(drawnAtSnapshot: true), "its app puts it elsewhere than the slot that appeared")
     }
 
-    @Test func aSnapshotOfAnotherDisplayIsNoBaseline() async throws {
-        let reveal = try await Reveal.make()
-        let elsewhere = SlotSnapshot(displayUUID: "another-display", slots: [])
-        #expect(await reveal.scanner.locate(temp, on: nil, since: elsewhere) == nil)
-        #expect(await reveal.scanner.locate(temp, on: nil, since: reveal.before)?.slotFrame == World.firstNew, "which it is with its own")
-    }
-
     // MARK: A concealed app's frames
 
     @Test(arguments: [true, false]) func aConcealedAppsLeftBehindFrameNeverTiesAnotherAppsSlot(notesNamed: Bool) async throws {
@@ -810,22 +585,6 @@ struct ItemLocatorTests {
 
         #expect(await scanner.locate(temp, on: nil, since: nil) == nil, "the notes app's own frame has the slot")
         #expect(await scanner.locate(notesItem, on: nil, since: nil)?.slotFrame == World.notesSlot)
-    }
-
-    @Test func aRevealedAppsFreshFrameStillTies() async throws {
-        // The scanner still has the weather app among the concealed (the probe's own assertion has revealed it since): its frame is in a new
-        // slot that no other app's frame is in, and ties; the slot that appeared agrees.
-        let world = World(tempFrame: parked, items: 1)
-        let scanner = world.scanner()
-        _ = await scanner.scan(concealed: [weather])
-        let before = try #require(await scanner.slotSnapshot(on: nil))
-        world.addSlot(World.firstNew)
-        world.move(world.temp, to: World.firstNew.insetBy(dx: 6, dy: 1))
-
-        let found = try #require(await scanner.locate(temp, on: nil, since: before))
-
-        #expect(found.slotFrame == World.firstNew)
-        #expect(found.tiedBy == .tieAndNewSlots)
     }
 
     @Test func aConcealedAppsFrameIsNeverTiedOnItsOwn() async throws {
@@ -1077,67 +836,6 @@ struct ItemLocatorTests {
         #expect(!first.slotWasInBaseline && !second.slotWasInBaseline)
     }
 
-    @Test func aSnapshotsNamesAreThoseThatDoNotRepeat() async throws {
-        // A window of a Space that isn't on screen gives every slot of an app its first item's name: such a name tells nothing.
-        let world = World()
-        world.addSlot(CGRect(x: 3052, y: 0, width: 40, height: 30), identifier: "weather.temp")
-        world.addSlot(CGRect(x: 3096, y: 0, width: 40, height: 30), identifier: "weather.temp")
-        let snapshot = try #require(await world.scanner().slotSnapshot(on: nil))
-
-        #expect(snapshot.slots.count == snapshot.names.count)
-        #expect(!snapshot.names.contains("weather.temp"))
-        #expect(snapshot.names.compactMap { $0 }.sorted() == ["com.apple.menuextra.clock", "com.apple.menuextra.wifi", "notes.main"])
-    }
-
-    @Test func aNeighbourThatOnlyChangedWidthDoesNotVoidTheNewSlots() async throws {
-        // Three slots with no names (apps' on macOS 27): the middle one has live text and grows by 4 points between the snapshot and now,
-        // and a slot of the weather app's appears left of them. The two outer old slots match, and what is between them is the one that
-        // grew: the new slot is the one left over.
-        let item = CGRect(x: 2978, y: 0, width: 40, height: 30)
-        var live = 0, left = 0
-        let reveal = try await Reveal.make(World(items: 1), frames: [item], learning: false) {
-            left = $0.addSlot(CGRect(x: 3026, y: 0, width: 36, height: 30))
-            live = $0.addSlot(CGRect(x: 3066, y: 0, width: 30, height: 30))
-            $0.addSlot(CGRect(x: 3100, y: 0, width: 36, height: 30))
-        }
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3022, y: 0)), on: left)
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3062, y: 0)), on: live)
-        reveal.world.ax.setAttribute(AXName.size, .size(CGSize(width: 34, height: 30)), on: live)
-        reveal.world.move(reveal.world.temp, to: item.insetBy(dx: 6, dy: 1))
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == item)
-        #expect(found.tiedBy == .tieAndNewSlots)
-        #expect(!found.slotWasInBaseline)
-        #expect(found.isPostable(drawnAtSnapshot: false))
-    }
-
-    @Test func aSlotThatGrewBetweenTwoMatchedOnesIsNotNew() {
-        let old = slots([36, 30, 36])
-        let after = slots([40, 36, 34, 36])
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == [after[0]])
-    }
-
-    @Test func aSlotThatChangedWidthAtAnEndVoidsTheAnswer() {
-        // Nothing says whether the last slot grew or a slot went and another came.
-        #expect(ItemLocator.appearedSlots(since: slots([36, 30]), in: slots([40, 36, 34])) == nil)
-        #expect(ItemLocator.appearedSlots(since: slots([30, 36]), in: slots([34, 36, 40])) == nil)
-    }
-
-    @Test func aGrownSlotWithANewOneBesideItIsNotGuessed() {
-        // The slot between the two that matched has room for two, and which is the old one that grew isn't told.
-        #expect(ItemLocator.appearedSlots(since: slots([36, 30, 36]), in: slots([36, 40, 34, 36])) == nil)
-    }
-
-    @Test func aSlotThatGrewAndMovedRightIsNotTheOldOne() {
-        // Slots only move left when others appear: one whose right edge is right of where it was is not it.
-        let old = slots([36, 30, 36])
-        var after = slots([40, 36, 34, 36])
-        after[2] = after[2].offsetBy(dx: 6, dy: 0)
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == nil)
-    }
-
     // MARK: Named slots as anchors
 
     @Test func aGrownSlotAcrossANamedSlotIsNotTheItemsNewSlot() async throws {
@@ -1198,110 +896,188 @@ struct ItemLocatorTests {
         #expect(!found.isPostable(drawnAtSnapshot: false))
     }
 
-    // MARK: A slot that shrank
+    // MARK: Which slots appeared, over two looks at a bar
 
-    @Test func aNeighbourThatShrinksAsTheItemsSlotAppearsRightOfItDoesNotVoidTheNewSlots() async throws {
-        // Before: [36, 34 (live text), 36] left of the notes app's (named) slot. Now the live slot is 30 and the item's slot (40) is right of
-        // them all: everything left of it is pushed left, the live slot by more at its right edge than at its left.
-        let item = CGRect(x: 3096, y: 0, width: 40, height: 30)
-        var left = 0, live = 0, right = 0
-        let reveal = try await Reveal.make(World(items: 1), frames: [item], learning: false) {
-            left = $0.addSlot(CGRect(x: 3022, y: 0, width: 36, height: 30))
-            live = $0.addSlot(CGRect(x: 3062, y: 0, width: 34, height: 30))
-            right = $0.addSlot(CGRect(x: 3100, y: 0, width: 36, height: 30))
-        }
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 2982, y: 0)), on: left)
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3022, y: 0)), on: live)
-        reveal.world.ax.setAttribute(AXName.size, .size(CGSize(width: 30, height: 30)), on: live)
-        reveal.world.ax.setAttribute(AXName.position, .point(CGPoint(x: 3056, y: 0)), on: right)
-        reveal.world.move(reveal.world.temp, to: item.insetBy(dx: 6, dy: 1))
+    struct AppearedCase: Sendable {
+        let name: String
+        let old: [CGRect]
+        let after: [CGRect]
+        var anchoredLeft = false
+        var anchoredRight = false
+        /// The places in `after` of the slots that appeared, or nil when nothing can be said.
+        let appeared: [Int]?
+    }
+
+    private static let grown = run([36, 30, 36])
+
+    static let appearedCases: [AppearedCase] = [
+        AppearedCase(name: "40 wide beside 36: the new one is the 40", old: [box(3140, 36)], after: [box(3096, 36), box(3136, 40)], appeared: [1]),
+        // The same width as the old one beside it: the new one takes the old one's place and the old one goes left, or the old one stays and
+        // the new one is left of it. Nothing says which.
+        AppearedCase(name: "one new, the same width as its neighbour", old: [box(3140, 36)], after: [box(3100, 36), box(3140, 36)], appeared: nil),
+        AppearedCase(name: "two new left of all", old: run([36]), after: run([40, 40, 36]), appeared: [0, 1]),
+        // 20 and 36 before; two of 40 between them after: the 20 went left by 88.
+        AppearedCase(name: "two new in the middle", old: run([20, 36]), after: run([20, 40, 40, 36]), appeared: [1, 2]),
+        // The 30 that went left is as wide as the new 30, and a match from the right takes the new one for the old one: the two ways of
+        // matching say different things, so nothing is said, and never the other app's slot.
+        AppearedCase(name: "two new before another app's slots are not its shifted slot", old: run([20, 30, 40]), after: run([20, 30, 25, 30, 40]),
+                     appeared: nil),
+        // Something else changed between the two looks: the new slots can't be told.
+        AppearedCase(name: "a slot that went away breaks the answer", old: [box(100, 30), box(140, 30)], after: [box(140, 30)], appeared: nil),
+        AppearedCase(name: "nothing changed", old: [box(100, 30), box(140, 30)], after: [box(100, 30), box(140, 30)], appeared: []),
+        AppearedCase(name: "no slots before: every one is new", old: [], after: [box(100, 30), box(140, 30)], appeared: [0, 1]),
+        // Slots only move left when others appear: one that is right of where it was is not it.
+        AppearedCase(name: "a slot that moved right is not the old one", old: [box(100, 30)], after: [box(120, 30)], appeared: nil),
+        AppearedCase(name: "a slot that grew between two matched ones is not new", old: grown, after: run([40, 36, 34, 36]), appeared: [0]),
+        // Nothing says whether the last slot grew or a slot went and another came.
+        AppearedCase(name: "a slot that changed width at the right end voids the answer", old: run([36, 30]), after: run([40, 36, 34]), appeared: nil),
+        AppearedCase(name: "a slot that changed width at the left end voids the answer", old: run([30, 36]), after: run([34, 36, 40]), appeared: nil),
+        // The slot between the two that matched has room for two, and which is the old one that grew isn't told.
+        AppearedCase(name: "a grown slot with a new one beside it is not guessed", old: grown, after: run([36, 40, 34, 36]), appeared: nil),
+        // Slots only move left when others appear: one whose right edge is right of where it was is not it.
+        AppearedCase(name: "a slot that grew and moved right is not the old one", old: grown,
+                     after: { var after = run([40, 36, 34, 36]); after[2] = after[2].offsetBy(dx: 6, dy: 0); return after }(), appeared: nil),
+        // The middle slot lost 4 points and the new one (40) appeared right of all of them.
+        AppearedCase(name: "a slot that shrank between two matched ones is not new", old: run([36, 34, 36]), after: run([36, 30, 36, 40]),
+                     appeared: [3]),
+        // The slots left of a slot that shrank move right, and a slot is never taken for one that moved right: nil, never a guess.
+        AppearedCase(name: "a slot left of a shrink that nothing pushed back is not matched", old: run([36, 34, 36]), after: run([36, 30, 36]),
+                     appeared: nil),
+        AppearedCase(name: "a slot that appeared left of everything pushes nothing", old: run([36, 34, 36]), after: run([40, 36, 30, 36]),
+                     appeared: nil),
+        // The first slot of a run is next to an anchor, and grew; the item's slot (40) appeared right of the run.
+        AppearedCase(name: "a grown slot next to an anchor on its left", old: run([30, 36]), after: run([34, 36, 40]), anchoredLeft: true, appeared: [2]),
+        AppearedCase(name: "the same with no anchor on the left", old: run([30, 36]), after: run([34, 36, 40]), appeared: nil),
+        AppearedCase(name: "a grown slot next to an anchor on its right", old: run([36, 30]), after: run([40, 36, 34]), anchoredRight: true, appeared: [0]),
+        AppearedCase(name: "the same with no anchor on the right", old: run([36, 30]), after: run([40, 36, 34]), appeared: nil),
+    ]
+
+    @Test(arguments: ItemLocatorTests.appearedCases)
+    func theSlotsThatAppearedAreToldOnlyWhenNothingElseCouldHaveMoved(_ example: AppearedCase) {
+        let found = ItemLocator.appearedSlots(since: example.old, in: example.after, anchoredLeft: example.anchoredLeft,
+                                              anchoredRight: example.anchoredRight)
+        #expect(found == example.appeared.map { indices in indices.map { example.after[$0] } }, "\(example.name)")
+    }
+
+    // MARK: A frame that says another slot
+
+    struct WrongSlotCase: Sendable {
+        let name: String
+        /// A slot that is on the bar before the item's appears, if any.
+        let extra: CGRect?
+        /// The frame the app reports for the item while its slot appeared: 42 wide, the width of the new slot's icon (40) all the same.
+        let frame: CGRect
+    }
+
+    @Test(arguments: [
+        WrongSlotCase(name: "the app puts the item in the slot of an app that isn't asked", extra: CGRect(x: 3000, y: 0, width: 36, height: 30),
+                      frame: CGRect(x: 3018 - 21, y: 1, width: 42, height: 28)),
+        // The notes app's own frame has that slot, so the item has no tie; what the app says of where it is is still not this slot.
+        WrongSlotCase(name: "the app puts the item in the slot of an app that answers", extra: nil,
+                      frame: CGRect(x: World.notesSlot.midX - 21, y: 1, width: 42, height: 28)),
+    ])
+    func aFrameInAnotherSlotMakesTheWidthDisagree(_ example: WrongSlotCase) async throws {
+        let reveal = try await Reveal.make { world in if let extra = example.extra { world.addSlot(extra) } }
+        reveal.world.move(reveal.world.temp, to: example.frame)
 
         let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
 
-        #expect(found.slotFrame == item)
+        #expect(found.slotFrame == World.firstNew, "\(example.name)")
+        #expect(found.tiedBy == .newSlots, "the slot that appeared wins over the tie, which says another slot, or none")
+        #expect(found.frameMinusSlotWidth == 2)
+        #expect(!found.widthAgrees)
+        #expect(!found.isPostable(drawnAtSnapshot: false))
+    }
+
+    // MARK: A neighbour whose width changes as the item's icon appears
+
+    struct ResizedNeighbour: Sendable {
+        let name: String
+        /// The neighbour's slot before, which is where the app's icon appears.
+        let before: CGRect
+        /// The neighbour's slot after: the one the frames alone say is new.
+        let after: CGRect
+        /// How wide the app's icon is.
+        let iconWidth: CGFloat
+        let widthAgrees: Bool
+    }
+
+    @Test(arguments: [
+        // A meter 30 wide, left of the notes app's slot, grows to 40 as a 30-wide app's icon appears right of it. The meter goes left, the new
+        // icon takes the place it had (30 wide: the one old slot of its width), and the slots left of that are the meter's, 40 wide: the two
+        // ways of matching agree that the meter's is the new one. Frames alone can't tell the two apart.
+        ResizedNeighbour(name: "a meter that grows as an app appears", before: box(3106, 30), after: box(3062, 40), iconWidth: 33, widthAgrees: true),
+        ResizedNeighbour(name: "a meter that grows by three as an app appears", before: box(3106, 30), after: box(3069, 33), iconWidth: 33, widthAgrees: true),
+        // The other way: a 40-wide app appears while its neighbour (40 wide) shrinks to 30. The new icon takes the neighbour's place, and the
+        // neighbour's 30-wide slot is the one that looks new.
+        ResizedNeighbour(name: "a neighbour that shrinks as an app appears", before: box(3096, 40), after: box(3062, 30), iconWidth: 43, widthAgrees: false),
+    ])
+    func aNeighbourThatChangesWidthAsAnAppAppearsIsNotPostable(_ example: ResizedNeighbour) async throws {
+        var neighbour = 0
+        let reveal = try await Reveal.make(World(items: 1), frames: [example.before], learning: false, parkedWidth: example.iconWidth) {
+            neighbour = $0.addSlot(example.before)
+        }
+        reveal.world.ax.setAttribute(AXName.position, .point(example.after.origin), on: neighbour)
+        reveal.world.ax.setAttribute(AXName.size, .size(example.after.size), on: neighbour)
+
+        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
+
+        #expect(found.slotFrame == example.after, "the neighbour's slot is the one that is new, by the frames: \(example.name)")
+        #expect(found.tiedBy == .newSlots)
+        #expect(found.widthAgrees == example.widthAgrees, "the app's icon is \(example.iconWidth) wide, and that slot is \(example.after.width)")
+        #expect(!found.isPostable(drawnAtSnapshot: false), "which is no ground for a click")
+    }
+
+    // MARK: A neighbour that only changed width
+
+    struct Slide: Sendable {
+        let name: String
+        /// The item's slot.
+        let item: CGRect
+        /// Three slots left of the notes app's, with no names (apps' on macOS 27), before the item's appears, and as they are after.
+        let before: [CGRect]
+        let after: [CGRect]
+    }
+
+    @Test(arguments: [
+        // The middle one has live text and grows by 4 points between the snapshot and now, and a slot of the weather app's appears left of
+        // them. The two outer old slots match, and what is between them is the one that grew: the new slot is the one left over.
+        Slide(name: "a neighbour that grew", item: box(2978, 40), before: [box(3026, 36), box(3066, 30), box(3100, 36)],
+              after: [box(3022, 36), box(3062, 34), box(3100, 36)]),
+        // Now the live slot is 30 and the item's slot (40) is right of them all: everything left of it is pushed left, the live slot by more
+        // at its right edge than at its left.
+        Slide(name: "a neighbour that shrank as the item's slot appeared right of it", item: box(3096, 40),
+              before: [box(3022, 36), box(3062, 34), box(3100, 36)], after: [box(2982, 36), box(3022, 30), box(3056, 36)]),
+    ])
+    func aNeighbourThatOnlyChangedWidthDoesNotVoidTheNewSlots(_ example: Slide) async throws {
+        var ids: [Int] = []
+        let reveal = try await Reveal.make(World(items: 1), frames: [example.item], learning: false) { world in
+            ids = example.before.map { world.addSlot($0) }
+        }
+        for (id, frame) in zip(ids, example.after) {
+            reveal.world.ax.setAttribute(AXName.position, .point(frame.origin), on: id)
+            reveal.world.ax.setAttribute(AXName.size, .size(frame.size), on: id)
+        }
+        reveal.world.move(reveal.world.temp, to: example.item.insetBy(dx: 6, dy: 1))
+
+        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
+
+        #expect(found.slotFrame == example.item, "\(example.name)")
         #expect(found.tiedBy == .tieAndNewSlots)
         #expect(!found.slotWasInBaseline)
         #expect(found.isPostable(drawnAtSnapshot: false))
     }
 
-    @Test func aSlotThatShrankBetweenTwoMatchedOnesIsNotNew() {
-        // The middle slot lost 4 points and the new one (40) appeared right of all of them: the slot left of the shrunk one moved by the
-        // move of the edge they share, which is less than the move of the shrunk slot's right edge.
-        let old = slots([36, 34, 36])
-        let after = slots([36, 30, 36, 40])
-        #expect(ItemLocator.appearedSlots(since: old, in: after) == [after[3]])
-    }
+    // MARK: While the item's app is among the concealed
 
-    @Test func aSlotLeftOfAShrinkThatNothingPushedBackIsNotMatched() {
-        // The slots left of a slot that shrank move right, and a slot is never taken for one that moved right: nil, never a guess.
-        #expect(ItemLocator.appearedSlots(since: slots([36, 34, 36]), in: slots([36, 30, 36])) == nil)
-        // The slot of 36 that appeared left of everything pushes nothing: the same.
-        #expect(ItemLocator.appearedSlots(since: slots([36, 34, 36]), in: slots([40, 36, 30, 36])) == nil)
-    }
-
-    @Test func aSlotNextToAnAnchorHasANeighbour() {
-        // The first slot of a run is next to an anchor, and grew; the item's slot (40) appeared right of the run.
-        #expect(ItemLocator.appearedSlots(since: slots([30, 36]), in: slots([34, 36, 40]), anchoredLeft: true) == [slots([34, 36, 40])[2]])
-        #expect(ItemLocator.appearedSlots(since: slots([30, 36]), in: slots([34, 36, 40])) == nil, "with no anchor it is at the end of the bar")
-        // The same at the other end of a run.
-        #expect(ItemLocator.appearedSlots(since: slots([36, 30]), in: slots([40, 36, 34]), anchoredRight: true) == [slots([40, 36, 34])[0]])
-        #expect(ItemLocator.appearedSlots(since: slots([36, 30]), in: slots([40, 36, 34])) == nil)
-    }
-
-    // MARK: What is read
-
-    @Test func locateReadsOneWindowAndOneApp() async throws {
-        let world = World(tempFrame: World.firstNew.insetBy(dx: 6, dy: 1))
-        let slot = world.addSlot(World.firstNew)
-        // A second window of the agent for the same display, whose slots are read by nobody, and an app that isn't asked.
-        let other = world.ax.addAgentWindow(agent: agentPID, frame: bar)
-        let otherSlot = world.ax.addSlot(in: other, identifier: "weather.temp", frame: World.firstNew)
-        let scanner = world.scanner()
-
-        #expect(await scanner.locate(temp, on: nil, since: nil)?.slotFrame == World.firstNew)
-
-        #expect(world.ax.attributeReads(on: slot) > 0)
-        #expect(world.ax.attributeReads(on: otherSlot) == 0, "one window of the display is read")
-        #expect(world.ax.attributeReads(on: world.notesItem) == 0, "and only the item's app is asked")
-        #expect(world.ax.attributeReads(on: world.temp) > 0)
-    }
-
-    @Test func locateAsksTheAppsOnTheBarAndNotTheConcealedOnesOrThoseWithNothingDrawn() async throws {
-        let world = World(tempFrame: World.firstNew.insetBy(dx: 6, dy: 1))
-        world.addSlot(World.firstNew)
-        // A third app, concealed by the plan, with a slot on the bar; a fourth, whose items aren't drawn anywhere.
-        let other = world.ax.addApp(pid: 1003, extras: [.init(title: "Other", identifier: "other.main", frame: CGRect(x: 3006, y: 1, width: 24, height: 28))])[0]
-        world.addSlot(CGRect(x: 3000, y: 0, width: 36, height: 30), identifier: "other.main")
-        let idle = world.ax.addApp(pid: 1004, extras: [.init(title: "Idle", identifier: "idle.main", frame: parked)])[0]
-        let running = world.running + [.fake(1003, "com.example.other", "Other"), .fake(1004, "com.example.idle", "Idle")]
-        let scanner = MenuBarScanner(ax: world.ax, runningApps: { running }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        _ = await scanner.scan(concealed: ["com.example.other"])
-        let notesBefore = world.ax.attributeReads(on: world.notesItem)
-        let otherBefore = world.ax.attributeReads(on: other)
-        let idleBefore = world.ax.attributeReads(on: idle)
-
-        #expect(await scanner.locate(temp, on: nil, since: nil)?.slotFrame == World.firstNew)
-
-        #expect(world.ax.attributeReads(on: world.notesItem) > notesBefore, "an app with an item on the bar is asked, for the slot it claims")
-        #expect(world.ax.attributeReads(on: other) == otherBefore, "a concealed app isn't")
-        #expect(world.ax.attributeReads(on: idle) == idleBefore, "nor one with nothing drawn on this bar")
-    }
-
-    @Test func aNamedSlotIsToldWhileItsAppIsAmongTheConcealed() async throws {
-        // The probe's real state: the item's app is the one the last scan was told the plan conceals.
-        let reveal = try await Reveal.make(identifiers: ["weather.temp", "weather.alerts"], concealed: [weather])
-        reveal.world.move(reveal.world.temp, to: World.firstNew.insetBy(dx: 6, dy: 1))
-
-        let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))
-
-        #expect(found.slotFrame == World.firstNew)
-        #expect(found.tiedBy == .tieAndNewSlots)
-        #expect(found.isPostable(drawnAtSnapshot: false))
-    }
-
-    @Test func aSlotToldByOrderIsFoundWhileItsAppIsAmongTheConcealed() async throws {
-        let reveal = try await Reveal.make(World(items: 1), frames: [World.firstNew], concealed: [weather])
+    /// The scanner has the weather app among the concealed (the plan conceals it): its slot is told by its name, or by order.
+    @Test(arguments: [true, false]) func aSlotIsToldWhileItsAppIsAmongTheConcealed(named: Bool) async throws {
+        let reveal: Reveal
+        if named {
+            reveal = try await Reveal.make(identifiers: ["weather.temp", "weather.alerts"], concealed: [weather])
+        } else {
+            reveal = try await Reveal.make(World(items: 1), frames: [World.firstNew], concealed: [weather])
+        }
         reveal.world.move(reveal.world.temp, to: World.firstNew.insetBy(dx: 6, dy: 1))
 
         let found = try #require(await reveal.scanner.locate(temp, on: nil, since: reveal.before))

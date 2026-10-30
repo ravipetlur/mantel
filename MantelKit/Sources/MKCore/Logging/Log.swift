@@ -38,6 +38,26 @@ public enum Log {
     }
 }
 
+extension Log {
+    /// The calls of one category, for a part of the app that logs under a name of its own: `Log.update.info("…")` is `Log.info("update", "…")`.
+    /// `debug` goes to the unified log only, never to the file.
+    public struct Category: Sendable {
+        public let name: String
+
+        public init(_ name: String) {
+            self.name = name
+        }
+
+        public func info(_ message: String) { Log.info(name, message) }
+        public func warning(_ message: String) { Log.warning(name, message) }
+        public func error(_ message: String) { Log.error(name, message) }
+        public func debug(_ message: String) { Log.logger(name).debug("\(message, privacy: .public)") }
+    }
+
+    /// The updater's lines.
+    public static let update = Category("update")
+}
+
 /// What `Log` does, as a type of its own so that tests can have a router they don't share with anyone.
 final class LogRouter: Sendable {
     private let subsystem: String

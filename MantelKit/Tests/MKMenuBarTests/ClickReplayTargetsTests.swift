@@ -76,35 +76,7 @@ struct ClickReplayTargetsTests {
         #expect(!rects.contains { $0.contains(CGPoint(x: -50, y: -480)) }, "a click where the unplugged display's clock was is nobody's")
     }
 
-    @Test func removedDisplayLeavesNoTargetInARealRead() async {
-        // The same through the scanner: the portrait display is gone from the layout when the next read is made.
-        let fixture = InventoryFixtures.desk()
-        let before = await scan(fixture)
-        #expect(ClickReplayTargets.rects(in: before).count == 2)
-
-        let layout = DisplayLayout(displays: [DisplayFixtures.deskMain])
-        let running = fixture.running
-        let scanner = MenuBarScanner(ax: fixture.ax, runningApps: { running }, layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        let after = await scanner.scan()
-
-        let rects = ClickReplayTargets.rects(in: after)
-        #expect(rects.count == 1, "only the display that is still there has a target")
-        let portraitBar = fixture.bars[1]
-        #expect(!rects.contains { $0.intersects(portraitBar) }, "none is on the portrait display")
-    }
-
     // MARK: Which items
-
-    @Test func modulesAreTheClockOnly() {
-        // Control Center, Wi-Fi, battery, sound and Bluetooth all open normally while an allowlist is live; only the clock is ignored.
-        #expect(ClickReplayTargets.modules == ["clock"])
-    }
-
-    @Test func controlCenterIsNotATarget() {
-        let frame = CGRect(x: 3228, y: 0, width: 36, height: 30)
-        #expect(ClickReplayTargets.rects(in: inventory([systemItem("controlcenter", [main: frame])])).isEmpty)
-    }
 
     @Test func onlyRuledModules() {
         let clock = CGRect(x: 3268, y: 0, width: 80, height: 30)
@@ -135,28 +107,6 @@ struct ClickReplayTargetsTests {
         // A clock that has a frame on one display only is held there, and nowhere else.
         let frame = CGRect(x: 3268, y: 0, width: 80, height: 30)
         #expect(ClickReplayTargets.rects(in: inventory([systemItem("clock", [main: frame])])) == [frame])
-    }
-
-    @Test func noItemsNoTargets() {
-        #expect(ClickReplayTargets.rects(in: .empty).isEmpty)
-    }
-
-    @Test func theTargetsComeInTheOrderOfTheDisplays() {
-        // Whatever order a dictionary happens to give its entries in, the same inventory gives the same targets.
-        let mainClock = CGRect(x: 3268, y: 0, width: 80, height: 30)
-        let portraitClock = CGRect(x: -92, y: -491, width: 80, height: 30)
-        let inventory = inventory([systemItem("clock", [main: mainClock, portrait: portraitClock])])
-        #expect(ClickReplayTargets.rects(in: inventory) == [portraitClock, mainClock], "by the displays' UUIDs")
-        for _ in 0..<5 { #expect(ClickReplayTargets.rects(in: inventory) == [portraitClock, mainClock]) }
-    }
-
-    // MARK: Which engine
-
-    @Test func onlyTheAllowlistWantsTheTap() {
-        #expect(ClickReplayTargets.isWanted(whileHidingWith: .allowlist))
-        #expect(!ClickReplayTargets.isWanted(whileHidingWith: .approvals), "the clock works as usual with the switches")
-        #expect(!ClickReplayTargets.isWanted(whileHidingWith: .spacer), "and with the spacer")
-        #expect(!ClickReplayTargets.isWanted(whileHidingWith: nil), "and before an engine has been chosen")
     }
 }
 

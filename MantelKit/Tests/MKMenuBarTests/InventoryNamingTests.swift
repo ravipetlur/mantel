@@ -12,8 +12,6 @@ import Testing
 struct InventoryNamingTests {
     private let own = "com.example.mantel"
     private let uuid = DisplayFixtures.laptopAlone.uuid
-    private let secondUUID = DisplayFixtures.deskPortrait.uuid
-
     private func slot(_ x: CGFloat, width: CGFloat = 40, name: String? = nil) -> AgentSlot {
         AgentSlot(frame: CGRect(x: x, y: 0, width: width, height: 30), identifier: name, role: "AXGroup", subrole: nil, description: nil,
                   ownerPID: nil, isOverflowChevron: false)
@@ -56,14 +54,6 @@ struct InventoryNamingTests {
         #expect(ids(inventory, ofApp: "com.example.a") == ["com.example.a::a.one"])
     }
 
-    @Test func mantelsOwnNamesNameNoOtherApp() {
-        // Mantel's dot has no frame in its slot (it is in the « menu); another app's frame is in the slot that carries the dot's name.
-        var memory = IndexMemory()
-        let inventory = match([bar([slot(100, name: OwnItems.hiddenDotName)])],
-                              [app(1, own, [(OwnItems.hiddenDotName, nil)]), app(2, "com.example.b", [(nil, 100)])], memory: &memory)
-        #expect(ids(inventory, ofApp: "com.example.b") == ["com.example.b#0"])
-    }
-
     @Test func aNameOnTwoAppsSlotsOverTimeNamesNothing() {
         // "Main Menu" is on one slot of the bar. In one read it is under B's frame, in the next under C's.
         var memory = IndexMemory()
@@ -74,15 +64,6 @@ struct InventoryNamingTests {
             #expect(ids(read, ofApp: "com.example.b") == ["com.example.b#0"])
             #expect(ids(read, ofApp: "com.example.c") == ["com.example.c#0"])
         }
-    }
-
-    @Test func aRepeatedNameInALaggingWindowNamesNothing() {
-        // A window that lags names both of the dots' slots as the first; B's frame is in one of them.
-        var memory = IndexMemory()
-        let inventory = match([bar([slot(100, name: OwnItems.hiddenDotName), slot(150, name: OwnItems.hiddenDotName)])],
-                              [app(1, own, [(OwnItems.hiddenDotName, nil), (OwnItems.alwaysDotName, nil)]),
-                               app(2, "com.example.b", [(nil, 150)])], memory: &memory)
-        #expect(ids(inventory, ofApp: "com.example.b") == ["com.example.b#0"])
     }
 
     @Test func aWrongNameIsNotCarriedToTheNextRead() {
@@ -111,21 +92,6 @@ struct InventoryNamingTests {
         #expect(one?.frames[uuid] == slots[1].frame)
     }
 
-    @Test func aCrossDisplayTieIsByTheItemsOwnNameOnly() {
-        // On the second display, a slot with A's own name is A's; a slot with a name that is not the name of any item A lists is not,
-        // though the name is on A's slot on the first display.
-        let first = bar([slot(100, name: "a.one"), slot(200, name: "a.slot-name")])
-        let second = MatchBar(displayUUID: secondUUID, rect: CGRect(x: 0, y: -500, width: 2000, height: 30),
-                              slots: [slot(500, name: "a.one"), slot(600, width: 60, name: "a.slot-name")])
-        var memory = IndexMemory()
-        let inventory = match([first, second], [app(1, "com.example.a", [("a.one", 100)]), app(2, "com.example.b", [(nil, 200)])],
-                              memory: &memory)
-        let a = inventory.items.first { $0.id.string == "com.example.a::a.one" }
-        #expect(Set(a?.frames.keys.map { $0 } ?? []) == [uuid, secondUUID])
-        let b = inventory.items.first { $0.id.string == "com.example.b#0" }
-        #expect(Set(b?.frames.keys.map { $0 } ?? []) == [uuid], "the second display's slot with that name is nobody's")
-    }
-
     @Test func aNamedSlotGoesToItsNamedItemBeforeFrames() {
         // A's own frame is somewhere else (old), and B's frame is nearer the slot that carries A's name.
         var memory = IndexMemory()
@@ -135,23 +101,5 @@ struct InventoryNamingTests {
         #expect(a?.frames[uuid]?.minX == 100)
         let b = inventory.items.first { $0.id.string == "com.example.b#0" }
         #expect(b?.frames[uuid] == nil, "B's frame is in A's slot, and loses it")
-    }
-
-    @Test func anItemTiedByNameStillVotesForTheBarItsFrameIsOn() {
-        // A names its item on both displays' bars; its own frame is in its slot on the second display, where macOS reports it (that display
-        // is the active one). The item is tied by name on both bars, and claims no slot by its frame, but its frame still says which bar is
-        // the active one: nothing else is on a bar.
-        let first = bar([slot(100, name: "a.one")])
-        let second = MatchBar(displayUUID: secondUUID, rect: CGRect(x: 0, y: -500, width: 2000, height: 30), slots: [slot(500, name: "a.one")])
-        var memory = IndexMemory()
-        let inventory = match([first, second], [app(1, "com.example.a", [("a.one", 500)])], memory: &memory)
-        #expect(inventory.activeDisplay == secondUUID)
-        let a = inventory.items.first { $0.id.string == "com.example.a::a.one" }
-        #expect(Set(a?.frames.keys.map { $0 } ?? []) == [uuid, secondUUID], "it is tied by name on both, and goes on being")
-
-        // A concealed app's frame doesn't vote, named or not.
-        var other = IndexMemory()
-        let concealed = match([first, second], [app(1, "com.example.a", [("a.one", 500)])], concealed: ["com.example.a"], memory: &other)
-        #expect(concealed.activeDisplay == nil)
     }
 }

@@ -47,6 +47,9 @@ targets:
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities
         NSHumanReadableCopyright: Copyright © The Mantel Authors. Apache License 2.0.
+        # The GitHub repository (owner/repo) the app checks for updates, from MANTEL_UPDATE_REPO in Config/Defaults.xcconfig or
+        # Config/Local.xcconfig. Empty, the build has no updater: no menu item, no Settings rows, no timer and no network.
+        MantelUpdateRepository: $(MANTEL_UPDATE_REPO)
         # The type a drag in the layout editor carries (`LayoutDrag`), declared so that macOS knows it and logs nothing for it. It never
         # leaves the app: the drag's data is visible to this process only.
         UTExportedTypeDeclarations:
@@ -77,6 +80,8 @@ targets:
         product: MKMenuBar
       - package: MantelKit
         product: MKSearch
+      - package: MantelKit
+        product: MKUpdate
       # The command-line tool goes into the app at Contents/Helpers/mantel, signed again as it is copied (keeping the
       # identifier it was built with), and the app only lets a program in over the control socket that is signed as this
       # tool is (see `PeerPolicy`). Not in Contents/MacOS: the volume is not case-sensitive, so `mantel` there would
@@ -128,52 +133,10 @@ targets:
         product: MKCommands
       - package: MantelKit
         product: MKCore
-  # A tiny menu-bar-only app with two status items, for the probes to hide, show and move instead of the person's own apps (`make
-  # install-fixtures` puts it in /Applications, which is where the system honours an allowlist). Debug only: it is not in the
-  # Mantel scheme, nothing embeds it, and its own scheme is Debug for every action, so no Release build makes one.
-  #
-  # Its name differs from Mantel's by more than case, and so do its product and build folders.
-  MantelTestItem:
-    type: application
-    platform: macOS
-    sources:
-      - path: TestFixtures/MantelTestItem
-    info:
-      path: TestFixtures/MantelTestItem/Info.plist
-      properties:
-        CFBundleDisplayName: MantelTestItem
-        CFBundleShortVersionString: $(MARKETING_VERSION)
-        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        LSUIElement: true
-        LSApplicationCategoryType: public.app-category.developer-tools
-        NSHumanReadableCopyright: Copyright © The Mantel Authors. Apache License 2.0.
-    settings:
-      base:
-        PRODUCT_NAME: MantelTestItem
-        # Mantel's identifier with `.testitem` after it: the suffix is how a probe knows it may touch the app.
-        PRODUCT_BUNDLE_IDENTIFIER: $(PRODUCT_BUNDLE_IDENTIFIER).testitem
-        GENERATE_INFOPLIST_FILE: NO
-        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
-        SWIFT_APPROACHABLE_CONCURRENCY: YES
-        SWIFT_STRICT_CONCURRENCY: complete
 schemes:
   Mantel:
     build:
       targets:
         Mantel: all
     run:
-      config: Debug
-  MantelTestItem:
-    build:
-      targets:
-        MantelTestItem: all
-    run:
-      config: Debug
-    test:
-      config: Debug
-    profile:
-      config: Debug
-    analyze:
-      config: Debug
-    archive:
       config: Debug

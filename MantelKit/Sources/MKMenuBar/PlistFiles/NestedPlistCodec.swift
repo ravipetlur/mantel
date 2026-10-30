@@ -5,8 +5,8 @@ import MKCore
 /// format it had (binary stays binary, XML stays XML).
 ///
 /// Writing a list again is not a promise that nothing else about its bytes changes (the order a writer puts a dictionary's keys in
-/// is its own), which `approvals-flip` measures for the real list and records as `reencodedIdentical`. A blob that is a keyed
-/// archive can't be held (`PlistValue` has no object references): it is refused, and `BinaryPlistFlip` is the codec for it.
+/// is its own). A blob that is a keyed archive can't be held (`PlistValue` has no object references): it is refused, and
+/// `BinaryPlistFlip` is the codec for it.
 ///
 /// A path is followed as `PlistValue` follows it, `matchingPath` included (the one entry of a list in which a way to a string reaches
 /// the app's ID, wherever macOS has put it; none, or two, is an error): the list is read whole, the entry's place is changed, and every
@@ -28,13 +28,6 @@ public struct NestedPlistCodec: PlistBlobCodec {
         return try Self.encode(updated, as: format)
     }
 
-    /// The blob written again as it is, in its own format: what a change to nothing would write. The bytes of a blob that this
-    /// doesn't write the same way tell that re-encoding it changes more than the place.
-    public static func reencoded(_ blob: Data) throws -> Data {
-        let (value, format) = try Self.decode(blob)
-        return try encode(value, as: format)
-    }
-
     private func decode(_ blob: Data) throws -> (value: PlistValue, format: PropertyListSerialization.PropertyListFormat) {
         try Self.decode(blob)
     }
@@ -54,7 +47,7 @@ public struct NestedPlistCodec: PlistBlobCodec {
             throw PlistBlobCodecError.tooLarge
         case .unrepresentable:
             // Something in it isn't a value of Mantel's: an archive's references are the one thing a list can hold that it isn't.
-            throw (try? PlistNode.parse(blob).root.archiveObjects) != nil ? PlistBlobCodecError.isAnArchive : PlistBlobCodecError.containsReferences
+            throw (try? PlistNode.parse(blob).archiveObjects) != nil ? PlistBlobCodecError.isAnArchive : PlistBlobCodecError.containsReferences
         }
     }
 

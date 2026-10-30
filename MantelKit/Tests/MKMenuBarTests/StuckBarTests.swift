@@ -60,24 +60,32 @@ struct StuckBarLookTests {
         #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()])) == .stuck(StuckBarFinding(apps: [one], ownItems: false)))
     }
 
-    @Test func anAppThatNeverHadASlotIsNotStuck() {
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()]), hadASlot: [two: pidTwo]) == .whole)
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()]), hadASlot: [:]) == .whole)
+    /// Each way an app with no slot is no finding: it never had a slot, it had one in another process, there is no room for it or it
+    /// is out of the way, its slot is untied or contested, it isn't drawn, or it isn't answering.
+    enum NotStuck: CaseIterable, CustomTestStringConvertible {
+        case neverHadASlotAndNobodyDid, neverHadASlotWhileTheOtherDid, hadASlotInAnotherProcess, hasNoRoom, isOutOfTheWay
+        case hasAnUntiedSlot, isContested, isNotDrawn, isNotAnswering
+
+        var testDescription: String { String(describing: self) }
     }
 
-    @Test func anAppThatHadASlotInAnotherProcessIsNotStuck() {
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()]), processes: [one: [999], two: pidTwo]) == .whole)
-    }
-
-    @Test func anAppThatHasNoRoomOrIsOutOfTheWayIsNotStuck() {
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()]), fits: { _ in false }) == .whole)
-        #expect(look(Bar.read([Bar.item(one, .overflowed), Bar.item(two), Bar.dot()])) == .whole)
-    }
-
-    @Test func anAppWithAnUntiedSlotOrContestedIsNotStuck() {
+    @Test(arguments: NotStuck.allCases)
+    func anAppThatIsNotInTheWayIsNotStuck(_ notStuck: NotStuck) {
         let untied = [CGRect(x: 10, y: 0, width: 38, height: 30)]
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()], untied: untied)) == .whole)
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()], contested: [one])) == .whole)
+        func bar(_ place: Bar.Place = .none, untied: [CGRect] = [], contested: Set<String> = [], unanswered: Set<String> = []) -> Inventory {
+            Bar.read([Bar.item(one, place), Bar.item(two), Bar.dot()], unanswered: unanswered, untied: untied, contested: contested)
+        }
+        switch notStuck {
+        case .neverHadASlotAndNobodyDid: #expect(look(bar(), hadASlot: [two: pidTwo]) == .whole)
+        case .neverHadASlotWhileTheOtherDid: #expect(look(bar(), hadASlot: [:]) == .whole)
+        case .hadASlotInAnotherProcess: #expect(look(bar(), processes: [one: [999], two: pidTwo]) == .whole)
+        case .hasNoRoom: #expect(look(bar(), fits: { _ in false }) == .whole)
+        case .isOutOfTheWay: #expect(look(bar(.overflowed)) == .whole)
+        case .hasAnUntiedSlot: #expect(look(bar(untied: untied)) == .whole)
+        case .isContested: #expect(look(bar(contested: [one])) == .whole)
+        case .isNotDrawn: #expect(look(bar(), notDrawn: [one]) == .whole)
+        case .isNotAnswering: #expect(look(bar(unanswered: [one])) == .whole)
+        }
     }
 
     @Test func oneUntiedSlotExcusesOneMissingAppAndNotTwo() {
@@ -107,11 +115,6 @@ struct StuckBarLookTests {
         var closed = UnattachedReadGate.open
         closed.awake = false
         #expect(noSlot(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()]), gate: closed) == nil)
-    }
-
-    @Test func anAppThatIsNotDrawnOrNotAnsweringIsNotStuck() {
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()]), notDrawn: [one]) == .whole)
-        #expect(look(Bar.read([Bar.item(one, .none), Bar.item(two), Bar.dot()], unanswered: [one])) == .whole)
     }
 
     @Test func aDotWithNoSlotAndRoomIsStuckWhateverTheApps() {

@@ -37,28 +37,6 @@ public enum SettingsPage: String, Codable, Sendable, CaseIterable {
     }
 }
 
-/// The probes, which measure what macOS does. The raw values are how the command line spells them.
-public enum ProbeName: String, Codable, Sendable, CaseIterable {
-    case allowlistInfo = "allowlist-info", allowlistActivate = "allowlist-activate", inventory
-    case approvalsRead = "approvals-read", approvalsToggle = "approvals-toggle"
-    case layoutRead = "layout-read", layoutMove = "layout-move"
-    case capture, clickReplay = "click-replay", overflow, screenShare = "screen-share", menuBarHeight = "menu-bar-height"
-    case grantPersistence = "grant-persistence"
-    case revealLatency = "reveal-latency", approvalsDecode = "approvals-decode", approvalsFlip = "approvals-flip"
-    case notchCoordinates = "notch-coordinates"
-    /// What a click on an icon that is concealed does: where it shows up, whether a press or a posted click opens its menu, and what
-    /// the item received.
-    case clickPath = "click-path"
-    /// Pictures of the icons on each bar, with what is learned making them.
-    case iconCapture = "icon-capture"
-    /// How the order table's distances relate to where the icons are.
-    case layoutMap = "layout-map"
-    /// Whether writing the order table re-sorts the menu bar, how fast, and what else it does to the icons.
-    case layoutOrder = "layout-order"
-    /// Whether the icon spacing preferences change how wide icons are.
-    case spacing
-}
-
 /// How much of what is put away `mantel show` brings onto the bar.
 public enum ShowTarget: String, Codable, Sendable, CaseIterable {
     /// The icons in Hidden.
@@ -94,14 +72,13 @@ public enum BarChange: String, Codable, Sendable, CaseIterable {
 ///
 /// On the wire a command is one JSON object named by its `command` key, with its arguments beside it:
 /// `{"command":"ping"}`, `{"command":"openSettings","page":"general"}`, `{"command":"show","target":"hidden"}`,
-/// `{"command":"focus","change":"toggle"}`, `{"command":"probe","name":"inventory","options":{"allow-any":"true"}}`,
+/// `{"command":"focus","change":"toggle"}`,
 /// `{"command":"icon","action":"click","query":"Notes","kind":"right"}`, `{"command":"bar","change":"open","all":true}`.
 public enum MantelCommand: Codable, Sendable, Equatable {
     case ping
     case version
     case openSettings(SettingsPage?)
     case diagnostics
-    case probe(ProbeName, options: [String: String])
     /// Shows that much of what is hidden, or hides it again.
     case show(ShowTarget)
     case focus(FocusChange)
@@ -122,15 +99,13 @@ public enum MantelCommand: Codable, Sendable, Equatable {
     /// Puts the menu bar's icons back in the order they had before Mantel changed it.
     case restoreLayout
 
-    /// What the log says of a command: its name, and a probe's name. Never the options, which are the caller's words, and never an icon's
-    /// words (`icon show` and `icon click` are all that is said).
+    /// What the log says of a command: its name. Never an icon's words (`icon show` and `icon click` are all that is said).
     public var name: String {
         switch self {
         case .ping: "ping"
         case .version: "version"
         case .openSettings: "settings"
         case .diagnostics: "diagnostics"
-        case .probe(let probe, _): "probe \(probe.rawValue)"
         case .show: "show"
         case .focus: "focus"
         case .refresh: "refresh"
@@ -145,7 +120,7 @@ public enum MantelCommand: Codable, Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case command, page, name, options, target, change, filter, action, query, kind, all
+        case command, page, target, change, filter, action, query, kind, all
     }
 
     public init(from decoder: any Decoder) throws {
@@ -159,9 +134,6 @@ public enum MantelCommand: Codable, Sendable, Equatable {
             self = .diagnostics
         case "openSettings":
             self = .openSettings(try container.decodeIfPresent(SettingsPage.self, forKey: .page))
-        case "probe":
-            self = .probe(try container.decode(ProbeName.self, forKey: .name),
-                          options: try container.decodeIfPresent([String: String].self, forKey: .options) ?? [:])
         case "show":
             self = .show(try container.decode(ShowTarget.self, forKey: .target))
         case "focus":
@@ -201,10 +173,6 @@ public enum MantelCommand: Codable, Sendable, Equatable {
         case .openSettings(let page):
             try container.encode("openSettings", forKey: .command)
             try container.encodeIfPresent(page, forKey: .page)
-        case .probe(let probe, let options):
-            try container.encode("probe", forKey: .command)
-            try container.encode(probe, forKey: .name)
-            try container.encode(options, forKey: .options)
         case .show(let target):
             try container.encode("show", forKey: .command)
             try container.encode(target, forKey: .target)

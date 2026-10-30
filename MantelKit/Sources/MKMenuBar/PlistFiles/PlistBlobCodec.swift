@@ -27,7 +27,7 @@ public struct PathEdit: Sendable, Equatable {
     }
 }
 
-/// The codecs the app registers with `PlistFileAccess`, by the IDs a journal entry and a probe name them by: `nested` (a blob that is a
+/// The codecs the app registers with `PlistFileAccess`, by the IDs a journal entry names them by: `nested` (a blob that is a
 /// property list, read and written whole), `flip` (a true or false changed in place in a binary property list or a keyed archive) and
 /// `approvals` (the nested one, for the "Allow in the Menu Bar" list: `ApprovalsCodec`).
 public enum PlistBlobCodecs {

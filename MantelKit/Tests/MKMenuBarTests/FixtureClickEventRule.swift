@@ -1,1 +1,0 @@
-../../../TestFixtures/MantelTestItem/ClickEventRule.swift

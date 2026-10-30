@@ -8,7 +8,7 @@ public struct RelaunchCandidate: Sendable, Equatable, Identifiable {
     public let name: String
     public let pid: pid_t
     public let bundleURL: URL
-    /// Passed when the app is opened again (the probes reopen the test item with its extra items).
+    /// Passed when the app is opened again.
     public var arguments: [String]
 
     public init(id: String, name: String, pid: pid_t, bundleURL: URL, arguments: [String] = []) {

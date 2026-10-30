@@ -1,6 +1,5 @@
 import CoreGraphics
 import Foundation
-import MKCommands
 import MKCore
 import Synchronization
 
@@ -23,9 +22,6 @@ public struct MenuBarReader: Sendable {
     public static let menuBarAgentBundleID = "com.apple.MenuBarAgent"
     /// How long an app that timed out is left alone.
     static let skipDuration: TimeInterval = 30
-    /// How deep the raw dump of MenuBarAgent's tree goes, and how many elements it holds at most.
-    static let rawTreeDepth = 6
-    static let rawTreeNodeLimit = 2000
     /// How many apps are asked at the same time (`ReadConcurrency`).
     static var concurrency: Int { ReadConcurrency.current }
 
@@ -41,73 +37,21 @@ public struct MenuBarReader: Sendable {
         self.clock = clock
     }
 
-    /// The frames of the menus of the app with this process ID (its `AXMenuBar`'s children), in CoreGraphics global points: empty when it has
-    /// none or doesn't answer in time.
-    public func menuFrames(ofPID pid: pid_t) async -> [CGRect] {
-        await AgentWindowReader(ax: ax).menuFrames(pid: pid)
-    }
-
     // MARK: Snapshot
 
     @concurrent
-    public func snapshot(layout: DisplayLayout, includeRawTree: Bool) async -> MenuBarSnapshot {
+    public func snapshot(layout: DisplayLayout) async -> MenuBarSnapshot {
         let capturedAt = clock.now()
         let running = runningApps()
         let agent = running.first { $0.bundleID == Self.menuBarAgentBundleID }
 
         async let extras = readExtras(of: running.filter { $0.bundleID != nil && $0.bundleID != Self.menuBarAgentBundleID },
                                       now: capturedAt)
-        async let agentRead = readAgent(agent, includeRawTree: includeRawTree)
+        async let agentRead = readAgent(agent)
         let (apps, extrasNotTrusted) = await extras
         let agentResult = await agentRead
         return Self.assemble(capturedAt: capturedAt, layout: layout, running: running, agentIsRunning: agent != nil,
                              agentResult: agentResult, apps: apps, notTrusted: extrasNotTrusted)
-    }
-
-    /// MenuBarAgent's windows and slots alone: no app is asked for its own list of items, and there is no raw tree. It is what
-    /// a poll that watches for a change reads, because a change shows in the slots, and it costs one app's reads and not
-    /// every app's. The snapshot has no `apps`, so a slot's owner is told by its identifier only, never by its frame.
-    @concurrent
-    public func agentSnapshot(layout: DisplayLayout) async -> MenuBarSnapshot {
-        let capturedAt = clock.now()
-        let running = runningApps()
-        let agent = running.first { $0.bundleID == Self.menuBarAgentBundleID }
-        let agentResult = await readAgent(agent, includeRawTree: false)
-        return Self.assemble(capturedAt: capturedAt, layout: layout, running: running, agentIsRunning: agent != nil,
-                             agentResult: agentResult, apps: [], notTrusted: false)
-    }
-
-    /// The frames of the status items one app lists in its own extras menu bar, in its order (nil for an item with no frame); nil
-    /// when the app has no extras menu bar, or doesn't answer. It asks that app and nobody else, and not MenuBarAgent, whose
-    /// windows take about half a second to read: it is what a poll that times a change in one app's items reads.
-    public func extrasFrames(ofPID pid: pid_t) -> [CGRect?]? {
-        let root = ax.application(pid: pid)
-        guard case .elements(let bars)? = try? ax.attribute(AXName.extrasMenuBar, of: root), let bar = bars.first,
-              let children = try? ax.children(of: bar), !children.isEmpty else { return nil }
-        return children.map { frame(of: $0) }
-    }
-
-    /// What each of MenuBarAgent's windows says of itself: its frame, its window-level attributes and how many slots it has. Nothing
-    /// is read of the slots but how many there are.
-    @concurrent
-    public func agentWindowDetails() async -> [AgentWindowDetail] {
-        guard let agent = runningApps().first(where: { $0.bundleID == Self.menuBarAgentBundleID }) else { return [] }
-        let root = ax.application(pid: agent.pid)
-        guard case .elements(let windows)? = try? ax.attribute(AXName.windows, of: root) else { return [] }
-        let named = [AXName.role, AXName.subrole, AXName.main, AXName.focused, AXName.identifier]
-        return windows.map { window in
-            var attributes: [String: JSONValue] = [:]
-            for name in Set(named).union((try? ax.attributeNames(of: window)) ?? []).sorted() {
-                switch try? ax.attribute(name, of: window) {
-                case .bool(let flag)?: attributes[name] = .bool(flag)
-                case .string(let text)? where named.contains(name): attributes[name] = .string(text)
-                case .number(let number)? where named.contains(name): attributes[name] = .number(number)
-                default: break
-                }
-            }
-            return AgentWindowDetail(frame: frame(of: window) ?? .zero, attributes: attributes,
-                                     slotCount: ((try? ax.children(of: window)) ?? []).count)
-        }
     }
 
     private static func assemble(capturedAt: Date, layout: DisplayLayout, running: [RunningApp], agentIsRunning: Bool,
@@ -121,7 +65,7 @@ public struct MenuBarReader: Sendable {
             AgentWindow(frame: window.frame, slots: window.slots.map { slot(from: $0, apps: apps, running: running) })
         }
         return MenuBarSnapshot(capturedAt: capturedAt, layout: layout, agentWindows: windows, apps: apps,
-                               rawAgentTree: agentResult.rawTree, problems: problems)
+                               problems: problems)
     }
 
     // MARK: Apps
@@ -192,11 +136,10 @@ public struct MenuBarReader: Sendable {
 
     private struct AgentRead: Sendable {
         var windows: [RawWindow] = []
-        var rawTree: JSONValue?
         var notTrusted = false
     }
 
-    private func readAgent(_ agent: RunningApp?, includeRawTree: Bool) async -> AgentRead {
+    private func readAgent(_ agent: RunningApp?) async -> AgentRead {
         guard let agent else { return AgentRead() }
         var result = AgentRead()
         let root = ax.application(pid: agent.pid)
@@ -209,10 +152,6 @@ public struct MenuBarReader: Sendable {
             }
         } catch {
             if error == .notTrusted { result.notTrusted = true }
-        }
-        if includeRawTree, !result.notTrusted {
-            var budget = Self.rawTreeNodeLimit
-            result.rawTree = dump(root, depth: 0, budget: &budget)
         }
         return result
     }
@@ -265,41 +204,6 @@ public struct MenuBarReader: Sendable {
     /// Two frames are the same item's when they start and end within a point of each other.
     private static func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) <= 1 && abs(a.width - b.width) <= 1 && abs(a.minY - b.minY) <= 1
-    }
-
-    // MARK: Raw tree
-
-    /// An element and what is below it, as JSON: the attributes the reader uses, the names of all the attributes, and the
-    /// children, down to `rawTreeDepth`.
-    private func dump(_ element: AXElementRef, depth: Int, budget: inout Int) -> JSONValue {
-        budget -= 1
-        var node: [String: JSONValue] = [:]
-        for (key, name) in [("role", AXName.role), ("subrole", AXName.subrole), ("identifier", AXName.identifier),
-                            ("description", AXName.description), ("title", AXName.title)] {
-            if let value = string(name, of: element) { node[key] = .string(value) }
-        }
-        if let frame = frame(of: element) {
-            node["frame"] = .object(["x": .number(frame.minX), "y": .number(frame.minY),
-                                     "width": .number(frame.width), "height": .number(frame.height)])
-        }
-        if let names = try? ax.attributeNames(of: element) {
-            node["attributes"] = .array(names.map(JSONValue.string))
-        }
-        let children = (try? ax.children(of: element)) ?? []
-        if depth >= Self.rawTreeDepth {
-            if !children.isEmpty { node["childCount"] = .number(Double(children.count)) }
-        } else {
-            var dumped: [JSONValue] = []
-            for child in children {
-                guard budget > 0 else {
-                    node["truncated"] = .bool(true)
-                    break
-                }
-                dumped.append(dump(child, depth: depth + 1, budget: &budget))
-            }
-            node["children"] = .array(dumped)
-        }
-        return .object(node)
     }
 
     // MARK: Attributes

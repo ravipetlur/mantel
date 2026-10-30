@@ -70,42 +70,37 @@ struct ClashDetectorTests {
         #expect(clashes(spotlight.combo, system: [second, first]) == [.system(first), .system(second)])
     }
 
-    @Test func optionOnlyIsFlagged() {
-        let combo = KeyCombo(keyCode: KeyCode.k, modifiers: .option)
-        #expect(clashes(combo) == [.optionOnly])
+    /// What a combo of one key and its modifiers is flagged for. Registered, ⌥+Fn is ⌥; Fn alone is no modifier. The message asks for ⌘, ⌃
+    /// or ⌥: ⇧K would take every capital K typed anywhere. A function key needs no modifier.
+    struct Combo: Sendable {
+        var keyCode: UInt16
+        var modifiers: ModifierSet
+        var flagged: [HotkeyClash]
+
+        init(_ keyCode: UInt16, _ modifiers: ModifierSet, _ flagged: [HotkeyClash]) {
+            self.keyCode = keyCode
+            self.modifiers = modifiers
+            self.flagged = flagged
+        }
     }
 
-    @Test func optionShiftOnlyIsFlagged() {
-        let combo = KeyCombo(keyCode: KeyCode.k, modifiers: [.option, .shift])
-        #expect(clashes(combo) == [.optionOnly])
-    }
-
-    @Test func optionWithCommandOrControlIsNotFlagged() {
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: [.option, .command])).isEmpty)
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: [.option, .control])).isEmpty)
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: [.option, .shift, .command])).isEmpty)
-    }
-
-    @Test func functionIsLeftOutWhenDecidingWhatTheModifiersAre() {
-        // Registered, ⌥+Fn is ⌥.
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: [.option, .function])) == [.optionOnly])
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: [.command, .function])).isEmpty)
-    }
-
-    @Test func functionKeyAloneIsAllowed() {
-        #expect(clashes(KeyCombo(keyCode: KeyCode.f5, modifiers: [])).isEmpty)
-        #expect(clashes(KeyCombo(keyCode: KeyCode.f20, modifiers: [])).isEmpty)
-        #expect(clashes(KeyCombo(keyCode: KeyCode.f1, modifiers: .shift)).isEmpty)
-    }
-
-    @Test func plainLetterIsNoModifier() {
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: [])) == [.noModifier])
-    }
-
-    @Test func shiftAloneIsNoModifierToo() {
-        // The message asks for ⌘, ⌃ or ⌥: ⇧K would take every capital K typed anywhere.
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: .shift)) == [.noModifier])
-        #expect(clashes(KeyCombo(keyCode: KeyCode.k, modifiers: .function)) == [.noModifier])
+    @Test(arguments: [
+        Combo(KeyCode.k, .option, [.optionOnly]),
+        Combo(KeyCode.k, [.option, .shift], [.optionOnly]),
+        Combo(KeyCode.k, [.option, .command], []),
+        Combo(KeyCode.k, [.option, .control], []),
+        Combo(KeyCode.k, [.option, .shift, .command], []),
+        Combo(KeyCode.k, [.option, .function], [.optionOnly]),
+        Combo(KeyCode.k, [.command, .function], []),
+        Combo(KeyCode.f5, [], []),
+        Combo(KeyCode.f20, [], []),
+        Combo(KeyCode.f1, .shift, []),
+        Combo(KeyCode.k, [], [.noModifier]),
+        Combo(KeyCode.k, .shift, [.noModifier]),
+        Combo(KeyCode.k, .function, [.noModifier]),
+    ])
+    func aComboIsFlaggedForItsModifiers(_ combo: Combo) {
+        #expect(clashes(KeyCombo(keyCode: combo.keyCode, modifiers: combo.modifiers)) == combo.flagged)
     }
 
     @Test func aComboWithoutAModifierIsOnlyThat() {

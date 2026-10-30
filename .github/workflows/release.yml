@@ -8,7 +8,14 @@
 #
 # The notes open with a "What's new" section, which is release-notes/1.2.0.md (write it before pushing the tag; without
 # the file the section is a one-line default), then the install and verify sections, then GitHub's generated list of
-# changes. Mantel has no updater: a new version is a new download.
+# changes. The app's update window shows the notes only up to the "## Install" heading, so "What's new" is all a person
+# updating sees.
+#
+# The signed release is what installed copies offer: they check this repository's latest release once a day, and
+# GitHub's releases/latest leaves pre-releases out, so a pre-release is never offered. For the same reason a tag that
+# isn't a pre-release can't be published unsigned: every installed copy would be offered a build it can't install. A
+# pre-release's app carries its final version's number (v1.2.0-beta.1 builds 1.2.0), so a copy of it is never offered
+# 1.2.0 itself: install the final release by hand.
 #
 # Run it by hand (Actions › Release › Run workflow) with a version for a dry run: the same build, signing and DMG,
 # uploaded as a workflow artifact. A dry run attests nothing and publishes nothing.
@@ -38,7 +45,10 @@
 # so it can't disagree with it, and it must belong to MACOS_TEAM_ID. The repository variable RELEASE_BUNDLE_ID sets the
 # signed build's bundle identifier (com.example.mantel when unset); an unsigned build always keeps com.example.mantel.
 # macOS keys the app's permissions and preferences to the bundle identifier, so changing RELEASE_BUNDLE_ID or the
-# signing team asks everyone who installed an earlier release to grant them again.
+# signing team asks everyone who installed an earlier release to grant them again. It also breaks in-app updates for
+# every installed copy, because the updater only installs an app with the same bundle identifier signed by the same
+# team. A signed build gets this repository as the one its updater checks (MANTEL_UPDATE_REPO); an unsigned build leaves
+# it empty and has no updater.
 #
 # The secrets reach only the steps that need them, through env, and are never printed. The files made from them (the
 # .p12, the .p8, the temporary keychain, Config/Local.xcconfig, the app's zip) are deleted at the end however the run
@@ -118,6 +128,11 @@ jobs:
             prerelease=true
           else
             prerelease=false
+            # A release is what the app's updater offers, and it reads exactly three numbers without leading zeros.
+            if ! [[ $version =~ ^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}$ ]]; then
+              echo "::error::A release's version is three numbers without leading zeros, like 1.2.0 (not 1.02.0 or 01.2.0)."
+              exit 1
+            fi
           fi
           {
             echo "version=$version"
@@ -160,12 +175,17 @@ jobs:
           NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          EVENT: ${{ github.event_name }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           count=0
           for name in CERTIFICATE CERTIFICATE_PASSWORD TEAM_ID NOTARY_KEY NOTARY_KEY_ID NOTARY_ISSUER_ID; do
             if [ -n "${!name}" ]; then count=$((count + 1)); fi
           done
-          if [ "$count" -eq 0 ]; then
+          if [ "$count" -eq 0 ] && [ "$EVENT" = push ] && [ "$PRERELEASE" != true ]; then
+            echo "::error::A release must be signed: installed copies are offered the latest release and install only a signed one. Set the six signing secrets (see the top of release.yml), or push a pre-release tag."
+            exit 1
+          elif [ "$count" -eq 0 ]; then
             echo "developer-id=false" >> "$GITHUB_OUTPUT"
             echo "No signing secrets: the app is signed ad hoc, and the release notes say it's unsigned."
           elif [ "$count" -eq 6 ]; then
@@ -184,6 +204,7 @@ jobs:
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
           BUNDLE_ID: ${{ vars.RELEASE_BUNDLE_ID || 'com.example.mantel' }}
+          UPDATE_REPO: ${{ github.repository }}
         run: |
           # The temporary keychain's path, for the signing steps and the clean-up.
           echo "KEYCHAIN=$RUNNER_TEMP/signing.keychain-db" >> "$GITHUB_ENV"
@@ -238,6 +259,8 @@ jobs:
             echo "CODE_SIGN_IDENTITY = $identity"
             echo "DEVELOPMENT_TEAM = $TEAM_ID"
             echo "OTHER_CODE_SIGN_FLAGS = --timestamp --keychain $KEYCHAIN"
+            # The repository the signed build checks for updates; unsigned builds leave it empty, so they never check.
+            echo "MANTEL_UPDATE_REPO = $UPDATE_REPO"
           } > Config/Local.xcconfig
           echo "hash=$hash" >> "$GITHUB_OUTPUT"
           echo "Signing as $identity, bundle identifier $BUNDLE_ID."
@@ -286,6 +309,15 @@ jobs:
           echo "$bundle_id $short ($build)"
           [ "$short" = "${VERSION%%-*}" ] || fail "CFBundleShortVersionString is $short, not ${VERSION%%-*}."
           [ "$build" = "$BUILD_NUMBER" ] || fail "CFBundleVersion is $build, not $BUILD_NUMBER."
+          # The updater's repository (MANTEL_UPDATE_REPO): a Developer ID build names one, an unsigned build doesn't.
+          update_repo=$(plutil -extract MantelUpdateRepository raw "$info") || fail "The app has no MantelUpdateRepository key."
+          if [ "$DEVELOPER_ID" = true ]; then
+            # The repository this run publishes to: the updater reads its releases, so a build that names another one
+            # would never find this one.
+            [ "$update_repo" = "$GITHUB_REPOSITORY" ] || fail "MantelUpdateRepository is '$update_repo' in the Developer ID build, not $GITHUB_REPOSITORY."
+          else
+            [ -z "$update_repo" ] || fail "MantelUpdateRepository is $update_repo in the unsigned build, not empty."
+          fi
 
       - name: Write the notary key
         if: steps.signing.outputs.developer-id == 'true'
@@ -388,7 +420,8 @@ jobs:
           DEVELOPER_ID: ${{ steps.signing.outputs.developer-id }}
         run: |
           notes="$RUNNER_TEMP/notes.md"
-          # "What's new" comes first. It is this version's file in release-notes/, if there is one.
+          # "What's new" comes first: the app's update window shows the notes up to the "## Install" heading and no
+          # further. It is this version's file in release-notes/, if there is one.
           whats_new="release-notes/$VERSION.md"
           if [ ! -s "$whats_new" ]; then
             echo "::warning::There is no $whats_new, so the release says only 'Bug fixes and improvements.' under What's new."

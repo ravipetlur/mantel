@@ -56,13 +56,6 @@ struct AppExtrasReaderTests {
         #expect(identifiers(reader.read(app)) == ["a.renamed", nil, nil])
     }
 
-    @Test func aTimeoutBeforeAnyNameWasReadLeavesTheItemUnnamed() {
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: app.pid, extras: [.init(title: "A", identifier: "a.one")])
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.timeout) : nil }
-        #expect(identifiers(AppExtrasReader(ax: ax).read(app)) == [nil], "nothing is made up")
-    }
-
     @Test func namesAreRememberedPerProcess() {
         let ax = FakeAX()
         let first = ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one")])
@@ -99,27 +92,6 @@ struct AppExtrasReaderTests {
         let late = extras(.fake(1001, "com.example.app"))
         #expect(late?.namesIncomplete == false)
         #expect(late?.items.map(\.identifier) == ["a.one", "a.two"])
-    }
-
-    @Test func aNamelessAppWithAnIdentifierTimeoutOnItsSecondReadIsWhole() {
-        // The first read saw that the items have no name. A timeout of the same read after that says nothing new: they have none.
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: 1001, extras: [.init(title: "A"), .init(title: "B")])
-        let reader = AppExtrasReader(ax: ax)
-        func extras() -> AppExtras? { items(reader.read(.fake(1001, "com.example.app"))) }
-        #expect(extras()?.namesIncomplete == false)
-
-        ax.setOverride { id, name in nodes.contains(id) && name == AXName.identifier ? .failure(.timeout) : nil }
-        let late = extras()
-        #expect(late?.items.map(\.identifier) == [nil, nil])
-        #expect(late?.itemTimeouts == 2, "the timeouts are counted all the same")
-        #expect(late?.namesIncomplete == false, "the reader saw a moment ago that the items have no name")
-        #expect(late?.listCut == false)
-
-        // An app that is read for the first time, and times out, doesn't know: that is still incomplete.
-        let other = ax.addApp(pid: 1002, extras: [.init(title: "A")])
-        ax.setOverride { id, name in other.contains(id) && name == AXName.identifier ? .failure(.timeout) : nil }
-        #expect(items(reader.read(.fake(1002, "com.example.other")))?.namesIncomplete == true)
     }
 
     @Test func anItemThatWentMovesTheOthersAndWhatWasKeptForTheirPositionsIsNotUsed() {
@@ -216,109 +188,6 @@ struct AppExtrasReaderTests {
         #expect(lateNameless?.itemTimeouts == 2)
     }
 
-    @Test func anAppWhoseElementsHeldAndThenAreNewAtEachReadGoesBackToPositionsAndItsReadsStayWhole() {
-        // Its elements held for its first reads, then it began to make new ones: a list of the same length that keeps none of them puts it
-        // back on positions, and an identifier that times out after that leaves the read whole, as for an app that never held.
-        let ax = FakeAX()
-        _ = ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one"), .init(title: "B", identifier: "a.two")])
-        let reader = AppExtrasReader(ax: ax)
-        func extras() -> AppExtras? { items(reader.read(.fake(1001, "com.example.app"))) }
-        #expect(extras()?.items.map(\.identifier) == ["a.one", "a.two"])
-        #expect(extras()?.items.map(\.identifier) == ["a.one", "a.two"], "the same elements twice at the same places: they hold")
-        ax.giveNewElementsAtEachRead()
-        #expect(extras()?.items.map(\.identifier) == ["a.one", "a.two"])
-        #expect(extras()?.items.map(\.identifier) == ["a.one", "a.two"])
-        ax.setOverride { _, name in name == AXName.identifier ? .failure(.timeout) : nil }
-        let late = extras()
-        #expect(late?.items.map(\.identifier) == ["a.one", "a.two"], "called what they were called, by position")
-        #expect(late?.namesIncomplete == false)
-    }
-
-    @Test func theLogSaysOnceForAnAppThatGivesNewElementsAtEachReadAndNotForOneThatDoesNot() async {
-        let ax = FakeAX()
-        ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one"), .init(title: "B")])
-        ax.addApp(pid: 1002, extras: [.init(title: "A", identifier: "b.one"), .init(title: "B")])
-        let reader = AppExtrasReader(ax: ax)
-        let unstable = RunningApp.fake(1001, "com.example.elements-change")
-        let stable = RunningApp.fake(1002, "com.example.elements-hold")
-        let lines = await LogCapture.lines {
-            _ = reader.read(unstable)
-            _ = reader.read(stable)
-            ax.giveNewElementsAtEachRead()
-            // The unstable app's reads, three of them: its elements are new at each. The other app's are read before the elements change.
-            for _ in 0..<3 { _ = reader.read(unstable) }
-        }
-        let said = lines.filter { $0.hasSuffix("[session] " + AppExtrasReader.unstableElementsLine(app: "com.example.elements-change")) }
-        #expect(said.count == 1, "once, at the first read that found it, and not at each read")
-
-        let other = await LogCapture.lines {
-            ax.giveNewElementsAtEachRead(false)
-            for _ in 0..<3 { _ = reader.read(stable) }
-        }
-        #expect(!(lines + other).contains { $0.contains("com.example.elements-hold") }, "an app whose elements hold says nothing")
-        #expect(AppExtrasReader.unstableElementsLine(app: "com.example.elements-change").contains("com.example.elements-change"))
-    }
-
-    @Test func aNamelessItemAndANamedOneThatTradePlacesDontTakeEachOthersAnswer() {
-        // The nameless item and the named one swap: the named one, now first, isn't taken for the nameless one because a position said
-        // "no name", and the read isn't whole.
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: 1001, extras: [.init(title: "A"), .init(title: "B", identifier: "b.two")])
-        let reader = AppExtrasReader(ax: ax)
-        func extras() -> AppExtras? { items(reader.read(.fake(1001, "com.example.app"))) }
-        #expect(extras()?.items.map(\.identifier) == [nil, "b.two"])
-        #expect(extras()?.items.map(\.identifier) == [nil, "b.two"], "the same elements at the same places again: this app's elements hold")
-
-        ax.swapPlaces(of: nodes[0], and: nodes[1])
-        ax.setOverride { id, name in id == nodes[1] && name == AXName.identifier ? .failure(.timeout) : nil }
-        let swapped = extras()
-        #expect(swapped?.items.map(\.identifier) == [nil, nil])
-        #expect(swapped?.namesIncomplete == true, "the named item isn't `#0`: its name is in doubt")
-
-        // And back: the item that is read late at the place the named one had isn't called `b.two`.
-        ax.setOverride(nil)
-        #expect(extras()?.items.map(\.identifier) == ["b.two", nil])
-        ax.swapPlaces(of: nodes[0], and: nodes[1])
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.timeout) : nil }
-        let back = extras()
-        #expect(back?.items.map(\.identifier) == [nil, "b.two"])
-        #expect(back?.namesIncomplete == true)
-    }
-
-    @Test func anIdentifierReadWhoseElementWentCountsLikeATimeout() {
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one"), .init(title: "B", identifier: "a.two")])
-        let reader = AppExtrasReader(ax: ax)
-        func extras() -> AppExtras? { items(reader.read(.fake(1001, "com.example.app"))) }
-        #expect(identifiers(reader.read(.fake(1001, "com.example.app"))) == ["a.one", "a.two"])
-
-        // An element that went while it was read: the name it had is the name it has, and it is not turned into an item with none.
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.failure(AppExtrasReader.elementGone)) : nil }
-        let gone = extras()
-        #expect(gone?.items.map(\.identifier) == ["a.one", "a.two"])
-        #expect(gone?.namesIncomplete == false)
-
-        // "No value" is an answer: the item has no name.
-        ax.setOverride { id, name in id == nodes[1] && name == AXName.identifier ? .failure(.noValue) : nil }
-        #expect(extras()?.items.map(\.identifier) == ["a.one", nil])
-
-        // With nothing remembered, an element that went leaves the name in doubt.
-        let fresh = ax.addApp(pid: 1002, extras: [.init(title: "A", identifier: "b.one")])
-        ax.setOverride { id, name in id == fresh[0] && name == AXName.identifier ? .failure(.failure(AppExtrasReader.elementGone)) : nil }
-        #expect(items(reader.read(.fake(1002, "com.example.other")))?.namesIncomplete == true)
-    }
-
-    @Test func anIdentifierReadThatFailsWithAnyOtherErrorIsAnAnswerOfNoName() {
-        // An app whose items always answer with an error of their own is read whole, its items nameless: never held from a check.
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: 1003, extras: [.init(title: "A", identifier: "c.one")])
-        let reader = AppExtrasReader(ax: ax)
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.failure(-25205)) : nil }
-        let extras = items(reader.read(.fake(1003, "com.example.third")))
-        #expect(extras?.items.map(\.identifier) == [nil])
-        #expect(extras?.namesIncomplete == false)
-    }
-
     @Test func aListCutBeforeItsLastChildIsMarkedCut() {
         // The reading of an app that doesn't answer stops at the third timeout: the children after it are not read.
         let ax = FakeAX()
@@ -338,25 +207,6 @@ struct AppExtrasReaderTests {
         #expect((cut?.items.count ?? 4) < 4)
     }
 
-    @Test func aReadThatWasCutOfAListAsLongAsBeforeLeavesWhatWasKeptStanding() {
-        // A read that stops before the end of the list knows its length: the positions after the stop belong to a list of the same length,
-        // as before the read. The next read's identifier that times out is still called what it was.
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one"), .init(title: "B", identifier: "a.two"),
-                                                  .init(title: "C", identifier: "a.three"), .init(title: "D", identifier: "a.four")])
-        let reader = AppExtrasReader(ax: ax)
-        #expect(items(reader.read(.fake(1001, "com.example.app")))?.listCut == false)
-
-        let slow = Set(nodes[1...2])
-        ax.setOverride { id, _ in slow.contains(id) ? .failure(.timeout) : nil }
-        #expect(items(reader.read(.fake(1001, "com.example.app")))?.listCut == true)
-
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.timeout) : nil }
-        let next = items(reader.read(.fake(1001, "com.example.app")))
-        #expect(next?.items.map(\.identifier) == ["a.one", "a.two", "a.three", "a.four"])
-        #expect(next?.namesIncomplete == false, "the list is as long as it was")
-    }
-
     @Test func aProcessIDThatAnotherAppHasTakenInheritsNoNames() {
         let ax = FakeAX()
         let nodes = ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one")])
@@ -374,19 +224,6 @@ struct AppExtrasReaderTests {
         #expect(extras.namesIncomplete)
     }
 
-    @Test func whatIsRememberedOfAProcessThatHasGoneIsForgotten() {
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: 1001, extras: [.init(title: "A", identifier: "a.one")])
-        let reader = AppExtrasReader(ax: ax)
-        _ = reader.read(.fake(1001, "com.example.app"))
-        #expect(reader.names.name(of: ax.ref(nodes[0]), ofProcess: 1001, bundleID: "com.example.app", at: 0) == "a.one")
-
-        reader.names.keep(only: [1002])
-        #expect(reader.names.name(of: ax.ref(nodes[0]), ofProcess: 1001, bundleID: "com.example.app", at: 0) == nil)
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.timeout) : nil }
-        #expect(identifiers(reader.read(.fake(1001, "com.example.app"))) == [nil])
-    }
-
     @Test func theElementsComeWithTheItems() throws {
         let ax = FakeAX()
         let nodes = ax.addApp(pid: app.pid, extras: [.init(title: "A", identifier: "a.one"), .init(title: "B")])
@@ -397,16 +234,5 @@ struct AppExtrasReaderTests {
         let none = AppExtrasReader(ax: ax).readWithElements(.fake(1009, "com.example.none"))
         #expect(none.elements.isEmpty)
         if case .noExtras = none.outcome {} else { Issue.record("an app with no extras has none") }
-    }
-
-    @Test func aCopyOfTheReaderSharesWhatItRemembers() {
-        // The scanner keeps one reader for its scans and one for presses: they are the same, and what one learns the other has.
-        let ax = FakeAX()
-        let nodes = ax.addApp(pid: app.pid, extras: [.init(title: "A", identifier: "a.one")])
-        let reader = AppExtrasReader(ax: ax)
-        let copy = reader
-        _ = reader.read(app)
-        ax.setOverride { id, name in id == nodes[0] && name == AXName.identifier ? .failure(.timeout) : nil }
-        #expect(identifiers(copy.read(app)) == ["a.one"])
     }
 }

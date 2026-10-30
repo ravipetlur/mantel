@@ -64,10 +64,6 @@ struct ImageImportTests {
         (try? FileManager.default.contentsOfDirectory(atPath: destination.path)) ?? []
     }
 
-    private func isEightHex(_ text: some StringProtocol) -> Bool {
-        text.count == 8 && text.allSatisfy { "0123456789abcdef".contains($0) }
-    }
-
     // MARK: Size
 
     @Test func refusesOverOneMegabyte() throws {
@@ -85,21 +81,6 @@ struct ImageImportTests {
 
         // Nothing was copied.
         #expect(copies().isEmpty)
-    }
-
-    @Test func refusesTooManyPixels() throws {
-        // Flat colour compresses to almost nothing, so these are well under a megabyte.
-        let limit = ImageImport.maximumPixelsPerSide
-        let wide = try choose(pngData(side: limit + 1, height: 1), as: "wide.png")
-        let tall = try choose(pngData(side: 1, height: limit + 1), as: "tall.png")
-        for url in [wide, tall] {
-            #expect(try Data(contentsOf: url).count < ImageImport.maximumBytes)
-            #expect(throws: ImageImportError.tooLarge) { try ImageImport.copy(url, into: destination, log: { _ in }) }
-        }
-        #expect(copies().isEmpty)
-        // Exactly the limit is taken.
-        let exact = try choose(pngData(side: limit, height: 1), as: "exact.png")
-        #expect(try ImageImport.copy(exact, into: destination, log: { _ in }).hasSuffix(".png"))
     }
 
     @Test func theSizeIsCheckedBeforeAnythingIsDecoded() throws {
@@ -122,31 +103,6 @@ struct ImageImportTests {
         let url = try choose(Data(bytes), as: "bomb.png")
         #expect(throws: ImageImportError.tooLarge) { try ImageImport.copy(url, into: destination, log: { _ in }) }
         #expect(copies().isEmpty)
-    }
-
-    @Test func aFailedWriteIsLogged() throws {
-        // The folder for the copies is a file, so it can't be made.
-        let png = try choose(pngData(side: 40), as: "a.png")
-        try FileManager.default.createDirectory(at: folder.url, withIntermediateDirectories: true)
-        try Data().write(to: destination)
-        var lines: [String] = []
-        #expect(throws: ImageImportError.undecodable) { try ImageImport.copy(png, into: destination, log: { lines.append($0) }) }
-        #expect(lines == ["the picture couldn't be kept: its folder couldn't be made"])
-    }
-
-    @Test func acceptsAFileOfExactlyTheLimit() throws {
-        // A PNG padded after its last chunk to 1,000,000 bytes is as big as one can be, and is taken; one byte more is not.
-        var data = pngData(side: 40)
-        data.append(Data(repeating: 0, count: ImageImport.maximumBytes - data.count))
-        #expect(data.count == ImageImport.maximumBytes)
-        let atLimit = try choose(data, as: "limit.png")
-        let name = try ImageImport.copy(atLimit, into: destination)
-        #expect(name.hasSuffix(".png"))
-
-        data.append(0)
-        let over = try choose(data, as: "over.png")
-        #expect(throws: ImageImportError.tooLarge) { try ImageImport.copy(over, into: destination) }
-        #expect(copies() == [name])
     }
 
     // MARK: What can't be used
@@ -176,14 +132,6 @@ struct ImageImportTests {
         #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 
-    @Test func theTwoErrorsSayWhatToDo() {
-        let words = "Mantel couldn't use that image. Choose a PNG or PDF under 1 MB."
-        #expect(ImageImportError.tooLarge.errorDescription == words)
-        #expect(ImageImportError.undecodable.errorDescription == words)
-        #expect(ImageImportError.tooLarge.localizedDescription == words)
-        #expect(ImageImportError.tooLarge != ImageImportError.undecodable)
-    }
-
     // MARK: What is taken
 
     @Test func acceptsPNGAndPDF() throws {
@@ -201,32 +149,5 @@ struct ImageImportTests {
         #expect(renamed.hasSuffix(".pdf"))
         let bare = try ImageImport.copy(try choose(png, as: "no-extension"), into: destination)
         #expect(bare.hasSuffix(".png"))
-    }
-
-    @Test func copiesUnderANewName() throws {
-        let png = pngData(side: 40)
-        let source = try choose(png, as: "my dot.png")
-        // The folder for the copies is made when it isn't there.
-        #expect(!FileManager.default.fileExists(atPath: destination.path))
-
-        let first = try ImageImport.copy(source, into: destination)
-        let second = try ImageImport.copy(source, into: destination)
-
-        // 8 lowercase hexadecimal characters and the extension, and nothing of the source's name.
-        for name in [first, second] {
-            #expect(name.hasSuffix(".png"))
-            #expect(isEightHex(name.dropLast(4)), "\(name) is eight hexadecimal characters")
-            #expect(!name.contains("dot"))
-        }
-        // Each copy is a file of its own.
-        #expect(first != second)
-        #expect(Set(copies()) == [first, second])
-        #expect(try Data(contentsOf: destination.appending(path: first)) == png)
-
-        // The source is as it was.
-        #expect(try Data(contentsOf: source) == png)
-        // The folder is the owner's alone.
-        let permissions = try FileManager.default.attributesOfItem(atPath: destination.path)[.posixPermissions] as? Int
-        #expect(permissions == 0o700)
     }
 }

@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch terminationSignal.received() {
         case .quit(let line):
             Log.info("quit", line)
+            // Before the alert is ended: with the dialog gone, the relaunch's gate would pass at once, and an install that is still
+            // running would relaunch Mantel after this quit.
+            coordinator?.updates?.quitBegan()
             // An alert or panel that is up holds the run loop in its own mode, where the quit's request isn't served: it is ended, with the
             // answer every alert takes as Cancel, so that the quit goes on with its cleanup.
             if NSApp.modalWindow != nil { NSApp.abortModal() }
@@ -94,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.start()
     }
 
+    /// What is mounted by an update that is still being checked is ejected before the process ends.
+    func applicationWillTerminate(_ notification: Notification) {
+        coordinator?.updates?.prepareForQuit()
+    }
+
     /// Opening Mantel again (a click on its Dock icon, or opening it from Finder) shows Settings, or brings onboarding forward when that
     /// is what is open.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -111,6 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // First of all, before anything is awaited: reads stop waiting for apps (they hold the threads the cleanup and the timer need), and
         // the log's account of the quit begins, with a heartbeat of the main thread and of the pool.
         coordinator.beginQuit(quitTrace, because: "quitting")
+        // An install that is still running must not relaunch Mantel after this quit: the cleanup below takes a second or three, and
+        // the install carries on in that time. Its image is ejected in `applicationWillTerminate`.
+        coordinator.updates?.quitBegan()
         startQuitHeartbeats()
         Task {
             await coordinator.prepareToQuit()

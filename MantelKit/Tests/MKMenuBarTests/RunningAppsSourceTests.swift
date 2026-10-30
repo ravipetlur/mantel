@@ -105,17 +105,6 @@ struct RunningAppsSourceTests {
         #expect(source.all == [finder, daemon])
     }
 
-    @Test func theWorkspaceSourceStartsAndListsTheAppsThatAreRunning() {
-        // Only reads, and watches: nothing is asked of any app.
-        let source = RunningAppsSource()
-        source.start { _ in }
-        let running = NSWorkspace.shared.runningApplications.count
-        #expect(source.all.allSatisfy { $0.bundleID != nil })
-        #expect(source.regular.allSatisfy { !$0.isBackgroundOnly })
-        #expect(source.all.count <= running, "no app is listed that isn't there")
-        #expect(source.regular.count <= running)
-    }
-
     @Test func theListIsReadFromAnotherThreadWhileTheMainThreadIsBusy() {
         // A read that waited for the main thread would never finish: the main thread is held here until the other thread has
         // read the list.

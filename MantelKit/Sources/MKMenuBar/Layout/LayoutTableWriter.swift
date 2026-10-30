@@ -46,7 +46,7 @@ public actor LayoutTableWriter: LayoutTableWriting {
     // MARK: Availability
 
     /// In this order: `broken` when the platform check says so; `needsGrant` without the grant; `broken` when the granted layout file isn't
-    /// where macOS keeps it any more, or has no table; `held` while a platform test's change to the whole table is still in the journal (a kept write
+    /// where macOS keeps it any more, or has no table; `held` while a change to the whole table, left by an earlier version's platform test, is still in the journal (a kept write
     /// under it would be put back with it); otherwise `available`.
     public func availability() async -> LayoutWriterAvailability {
         if let broken { return .broken(broken) }
@@ -67,7 +67,7 @@ public actor LayoutTableWriter: LayoutTableWriting {
             // A read that failed for a moment says nothing of the file: the write that follows says what went wrong.
         }
         if await hasLeftoverWholeKey {
-            return .held(JournalError.leftoverWholeKey(key: wholeKey).errorDescription ?? LayoutWords.heldForAProbe)
+            return .held(JournalError.leftoverWholeKey(key: wholeKey).errorDescription ?? LayoutWords.couldntChange)
         }
         return .available
     }

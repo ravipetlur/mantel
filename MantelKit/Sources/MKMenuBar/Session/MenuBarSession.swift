@@ -56,16 +56,13 @@ public struct MenuBarState: Sendable, Equatable {
 /// What the session needs to restart MenuBarAgent by itself when a change of displays leaves the menu bar stuck (`StuckBarWatch`).
 public struct StuckBarRecovery: Sendable {
     let restarter: any MenuBarAgentRestarting
-    let refusal: @Sendable () async -> String?
     let activity: ResetActivity
 
     /// - Parameters:
     ///   - restarter: what Reset restarts MenuBarAgent with.
-    ///   - refusal: why the menu bar can't be restarted now, if it can't: a platform test is changing it (`ReplayNowPolicy.resetRefusal`).
-    ///   - activity: what the probes read, and what a Reset sets: only one of the two is under way at a time.
-    public init(restarter: any MenuBarAgentRestarting, refusal: @escaping @Sendable () async -> String?, activity: ResetActivity) {
+    ///   - activity: what a Reset sets: only one of a Reset and a recovery is under way at a time.
+    public init(restarter: any MenuBarAgentRestarting, activity: ResetActivity) {
         self.restarter = restarter
-        self.refusal = refusal
         self.activity = activity
     }
 }
@@ -127,7 +124,7 @@ public struct IconRevealTicket: Sendable, Hashable {
 /// - **A bar a change of displays left stuck** (`StuckBarWatch`): two or more apps, or one of Mantel's own items, that had a slot in the
 ///   last read before a change (a slot, or out of the way behind the notch: `StuckBar.appsPlaced`) and have none after it, with room for
 ///   them, on two reads at least 5 seconds apart and 10 seconds or more after the change, have MenuBarAgent restarted, once for that
-///   change and 3 times an hour at most; never while a reset, a platform test, a layout write, quitting, the lock screen or sleep is in
+///   change and 3 times an hour at most; never while a reset, a layout write, quitting, the lock screen or sleep is in
 ///   the way. One app alone with Mantel's dots drawn is never restarted by itself: a read can't tell it from an app that is switched off
 ///   in System Settings, and the person's Reset covers it. It is a reset's restart (`runReset`) without the hiding being taken down or
 ///   the journal replayed: the person's hiding and layout stay. An app that had no slot in the last read before the change, one that is
@@ -978,7 +975,7 @@ public actor MenuBarSession {
         }
     }
 
-    /// The person gave Mantel a file, or put back what a platform test left in the system ("Replay now"): what depends on
+    /// The person gave Mantel a file, or put back what is left in the system ("Replay now"): what depends on
     /// it is asked again. The list of apps macOS has turned off is read again, and the way of hiding is chosen again, which asks each
     /// engine whether it can be used now. A choice that comes out as before changes nothing (`HidingController.choose` switches only
     /// when the engine in charge is another one), so nothing flickers; one that now falls on another engine is a switch like any other.
@@ -1725,7 +1722,7 @@ public actor MenuBarSession {
     ///   of Mantel's is left behind, and which this leaves in place: the layout and the spacing are the person's choices). The reveal
     ///   isn't collapsed either: the gate for the recovery says nothing is revealed, and one that begins in the meantime is the person's.
     ///
-    /// Just before it, in this order: the platform test's refusal; the list of the apps macOS has turned off is read again (an app switched
+    /// Just before it, in this order: the list of the apps macOS has turned off is read again (an app switched
     /// off in System Settings keeps listing its icon, and the list may be older than the switch): what it names is no reason, and when
     /// nothing else is left nothing is restarted; and, right before MenuBarAgent is asked, nothing may have changed since the decision (the
     /// displays, a reset) nor quitting begun.
@@ -1735,13 +1732,13 @@ public actor MenuBarSession {
             stuckWatch.recoveryNotBegun()
             return
         }
-        // A Reset (the app's) or a platform test that changes the menu bar has it: this isn't begun, and two new looks decide again.
+        // A Reset has it: this isn't begun, and two new looks decide again.
         guard recovery.activity.begin() else {
             stuckWatch.recoveryNotBegun()
             return
         }
         defer { recovery.activity.end() }
-        guard await recovery.refusal() == nil, mayRecoverStuckBar, stuckRecovery != nil, stamp == stuckBarStamp else {
+        guard mayRecoverStuckBar, stuckRecovery != nil, stamp == stuckBarStamp else {
             stuckWatch.recoveryNotBegun()
             return
         }

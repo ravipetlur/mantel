@@ -114,44 +114,46 @@ struct HandOffAttemptTests {
 
     // MARK: Not reached
 
-    @Test func aTargetThatExitedWhileTheSocketWasTriedIsNotOpenedAgain() async {
-        // Opening its bundle would reopen this copy, or start a new one.
-        let world = World(replies: [.notRunning], observations: [exited], reopenPID: 10)
-        let facts = await attempt(world)
-        #expect(world.reopens == 0)
-        #expect(facts.target == exited)
-        #expect(HandOff.decide(facts) == .start)
+    /// A hand-off that doesn't reach the target is decided as a start, and each says what it did and what it saw on the way.
+    enum NotReached: CaseIterable, CustomTestStringConvertible {
+        /// Opening its bundle would reopen this copy, or start a new one.
+        case aTargetThatExitedWhileTheSocketWasTried
+        /// Alive when asked to be reopened, gone when looked at again: the facts hold the last look.
+        case aTargetThatExitedAfterBeingOpenedAgain
+        case aReopenThatReachedAnotherProcess
+        case aReopenThatFailed
+        case noKnownTargetMeansNothingToOpenAgain
+
+        var testDescription: String { String(describing: self) }
     }
 
-    @Test func aTargetThatExitedAfterBeingOpenedAgainIsNotReached() async {
-        // Alive when asked to be reopened, gone when looked at again: the facts hold the last look.
-        let world = World(replies: [.refused], observations: [alive, exited], reopenPID: 10)
+    @Test(arguments: NotReached.allCases)
+    func aTargetThatIsNotReachedIsStarted(_ notReached: NotReached) async {
+        let world: World
+        switch notReached {
+        case .aTargetThatExitedWhileTheSocketWasTried: world = World(replies: [.notRunning], observations: [exited], reopenPID: 10)
+        case .aTargetThatExitedAfterBeingOpenedAgain: world = World(replies: [.refused], observations: [alive, exited], reopenPID: 10)
+        case .aReopenThatReachedAnotherProcess: world = World(replies: [.refused], observations: [alive], reopenPID: 99)
+        case .aReopenThatFailed: world = World(replies: [.refused], observations: [alive], reopenPID: nil)
+        case .noKnownTargetMeansNothingToOpenAgain: world = World(replies: [.refused], observations: [nil], reopenPID: 10)
+        }
         let facts = await attempt(world)
-        #expect(world.reopens == 1)
-        #expect(facts.target == exited)
-        #expect(HandOff.decide(facts) == .start)
-    }
-
-    @Test func aReopenThatReachedAnotherProcessIsNotReached() async {
-        let world = World(replies: [.refused], observations: [alive], reopenPID: 99)
-        let facts = await attempt(world)
-        #expect(facts.reopenedPID == 99)
-        #expect(HandOff.decide(facts) == .start)
-    }
-
-    @Test func aReopenThatFailedIsNotReached() async {
-        let world = World(replies: [.refused], observations: [alive], reopenPID: nil)
-        let facts = await attempt(world)
-        #expect(world.reopens == 1)
-        #expect(facts.reopenedPID == nil)
-        #expect(HandOff.decide(facts) == .start)
-    }
-
-    @Test func noKnownTargetMeansNothingToOpenAgain() async {
-        let world = World(replies: [.refused], observations: [nil], reopenPID: 10)
-        let facts = await attempt(world)
-        #expect(world.reopens == 0)
-        #expect(facts.target == nil)
+        switch notReached {
+        case .aTargetThatExitedWhileTheSocketWasTried:
+            #expect(world.reopens == 0)
+            #expect(facts.target == exited)
+        case .aTargetThatExitedAfterBeingOpenedAgain:
+            #expect(world.reopens == 1)
+            #expect(facts.target == exited)
+        case .aReopenThatReachedAnotherProcess:
+            #expect(facts.reopenedPID == 99)
+        case .aReopenThatFailed:
+            #expect(world.reopens == 1)
+            #expect(facts.reopenedPID == nil)
+        case .noKnownTargetMeansNothingToOpenAgain:
+            #expect(world.reopens == 0)
+            #expect(facts.target == nil)
+        }
         #expect(HandOff.decide(facts) == .start)
     }
 }

@@ -33,9 +33,7 @@ final class AppCoordinator {
     let grants: FileGrantStore
     let permissionChecker: any PermissionChecking
 
-    /// The one list of the apps that are running, kept up to date from the workspace: the menu bar reader and the probes read it. It is
-    /// here and not in the menu bar controller because the probes, which can be asked for before the menu bar is made, use it too; the
-    /// controller starts it.
+    /// The one list of the apps that are running, kept up to date from the workspace: the menu bar reader reads it. The controller starts it.
     let runningApps = RunningAppsSource()
     /// Reads and changes the plist files the menu bar's state is kept in, with the journal behind every change.
     private(set) lazy var plist = PlistFileAccess(journal: journal, paths: paths, grants: grants, codecs: PlistBlobCodecs.standard)
@@ -55,51 +53,27 @@ final class AppCoordinator {
     /// The way of hiding icons that works through the "Allow in the Menu Bar" switches. Made when first used, for the same reason as the
     /// journal it keeps its changes in.
     private(set) lazy var approvalsEngine = ApprovalsEngine(access: plist, grants: grants, journal: journal)
-    /// "Enable platform test" in Settings › Diagnostics: the probes that change the menu bar run only while it is on, also when the
-    /// command line asks for one. Not saved: it is off at every launch.
-    private let platformTestSwitch = PlatformTestSwitch()
-    var platformTestEnabled: Bool {
-        get { platformTestSwitch.isOn }
-        set { platformTestSwitch.isOn = newValue }
-    }
     /// The Accessibility the scanner reads with, patient with a busy Mac (`PatientAX`). Held here so that quitting can tell it to stop waiting
     /// at the very start, from the quit itself and before anything that needs a thread of the pool (`beginQuit`).
     private let patientAX = PatientAX(inner: AXClient())
-    /// What reads the menu bar, finds an item in it and presses it. The menu bar controller's session scans with it, and the probes find
-    /// items and press them through the same one: what its scans learned of where each app's items are, while they were all drawn, is what
+    /// What reads the menu bar, finds an item in it and presses it. The menu bar controller's session scans with it: what its scans learned of where each app's items are, while they were all drawn, is what
     /// lets it say which slot an item that was concealed has been drawn in.
     private(set) lazy var scanner = MenuBarScanner(
         ax: patientAX, runningApps: { [runningApps] in runningApps.regular }, layout: { [layoutSource] in layoutSource.current },
         ownBundleID: Bundle.main.bundleIdentifier ?? "com.example.mantel", isTrusted: { AXIsProcessTrusted() })
-    /// The probes. Made when first used (it needs the journal): a copy that only hands off and quits never makes one, and so
-    /// never opens the running copy's journal.
-    var probes: ProbeRunner {
-        if let probeRunner { return probeRunner }
-        let runner = ProbeRunner(
-            paths: paths, reader: MenuBarReader(ax: AXClient(), runningApps: { [runningApps] in runningApps.regular }),
-            plist: plist, grants: grants, journal: journal, defaults: defaultsAccess,
-            layoutProvider: { [layoutSource] in layoutSource.current },
-            platform: .live(runningApps: runningApps, scanner: scanner, ownItemFrames: { [weak self] in await self?.ownItemFrames() ?? [:] }),
-            stateChangingAllowed: { [platformTestSwitch] in platformTestSwitch.isOn },
-            resetUnderWay: { [resetActivity] in resetActivity.isUnderWay })
-        probeRunner = runner
-        return runner
-    }
-    private var probeRunner: ProbeRunner?
     /// How macOS keeps the menu bar's order table, from the platform check's results. Built once; the writer, the applier and the session
     /// all go by this value. (`LayoutRules.unmeasured` is what is assumed before anything was measured.)
     private let layoutRules = LayoutRules.measured
-    /// Set while a reset of the menu bar is under way: the probes that change the menu bar are refused meanwhile, and a reset is refused
-    /// while one of them is changing it (`resetRefusal`).
+    /// Set while a reset of the menu bar is under way.
     private let resetActivity = ResetActivity()
-    /// Set when quitting begins: no probe is started after it.
+    /// Set when quitting begins.
     private var isQuitting = false
     /// How long quitting may take: a second, or three while what Mantel changed in the system is being put back.
     let quitTimer = QuitTimer()
     /// Whether this copy has been through the launch's replay, which is what makes the journal its own: a copy that handed off to
     /// the running one never opens the journal, and never replays it when it quits.
     private var ownsJournal = false
-    /// The displays, readable from anywhere: the probes ask for them off the main actor.
+    /// The displays, readable from anywhere.
     private let layoutSource = DisplayLayoutSource()
     /// What the app delegate saw when it handed off to another Mantel and decided to start all the same, if it did. Nil for a
     /// copy that found nobody to hand off to: it hands off here, if the control socket turns out to be held. A hand-off is
@@ -130,6 +104,11 @@ final class AppCoordinator {
         set { menuBarSlot.set(newValue) }
     }
     private var settingsWindow: SettingsWindowController?
+    /// The updater: the daily check, the offer and its window, and the install. Nil unless the build names an update repository, and
+    /// then there is no menu item, no Settings rows, no timer and no network. Made with the dots, which show its menu item.
+    private(set) var updates: UpdateCenter?
+    /// Holds the update's relaunch off for an open dialog and for an order change being written.
+    private let relaunchGate = RelaunchGate()
     /// The Settings window, once it has been made.
     var settingsNSWindow: NSWindow? { settingsWindow?.window }
     private var onboardingWindow: OnboardingWindowController?
@@ -227,21 +206,22 @@ final class AppCoordinator {
             hotkeyCenter = HotkeyCenter()
             registerHotkeys()
         case .createStatusItem:
+            updates = makeUpdates()
             menuBar = MenuBarController(
                 store: store, approvals: approvalsEngine, runningApps: runningApps, scanner: scanner,
                 layout: { [layoutSource] in layoutSource.current },
                 reveal: generalSettings.reveal, hiding: generalSettings.hiding,
                 dots: generalSettings.dots, secondBar: generalSettings.secondBar, ownImages: paths.ownImages, itemImagesFolder: paths.itemImages,
                 replayJournal: { [weak self] in await self?.replayJournal() },
-                resetRefusal: { [weak self] in await self?.resetRefusal() }, resetActivity: resetActivity,
+                resetActivity: resetActivity,
                 layoutRules: layoutRules, layout: generalSettings.layout, plist: plist, grants: grants, journal: journal,
                 home: FileManager.default.homeDirectoryForCurrentUser,
-                probeChangingMenuBar: { [weak self] in await self?.isProbeChangingMenuBar() ?? false },
                 openSettings: { [weak self] in self?.openSettings(nil) }, openDiagnostics: { [weak self] in self?.openSettings(.diagnostics) },
-                activation: activation,
+                updates: updates.map(dotsUpdates), activation: activation,
                 recordsChecked: { [weak self] app, done in await self?.moveRecordSettings(ofApp: app, done) ?? SettingsMoved() })
             menuBar?.openSettingsPage = { [weak self] page in self?.openSettings(page) }
             menuBar?.iconPreferencesWriter = iconPreferencesWriter
+            relaunchGate.layoutWriteIsUnderWay = { [weak self] in await self?.menuBar?.layoutWriteIsUnderWay() ?? false }
         case .observeDisplays:
             updateDisplays()
             screenObserver = NotificationCenter.default.addObserver(
@@ -252,6 +232,8 @@ final class AppCoordinator {
         case .startMenuBar:
             // Returns at once: the session starts on a task of its own, and the launch (onboarding next) doesn't wait for its reads.
             menuBar?.start()
+            // The first check comes five minutes after launch, once launch has settled.
+            updates?.start()
         case .openOnboardingIfNeeded:
             if !generalSettings.onboardingCompleted {
                 openOnboarding()
@@ -264,10 +246,30 @@ final class AppCoordinator {
         }
     }
 
+    /// The updater, when the build names a repository to check (`UpdateConfiguration`); nil otherwise.
+    private func makeUpdates() -> UpdateCenter? {
+        guard let configuration = UpdateConfiguration.current() else { return nil }
+        let gate = relaunchGate
+        // The install's relaunch waits for a dialog that is open, and for an order change that is being written.
+        let installer = LiveUpdateInstaller(configuration: configuration, waitUntilQuiet: { [gate] in await gate.waitUntilQuiet() })
+        let center = UpdateCenter(
+            configuration: configuration, store: store, automaticChecks: { [weak self] in self?.generalSettings.checkForUpdatesAutomatically ?? true },
+            activation: activation, gate: gate, installer: installer)
+        // A check from Settings answers in its About pane, but only while that pane is showing.
+        center.aboutPaneIsShowing = { [weak self] in self?.settingsWindow?.isShowingAbout ?? false }
+        return center
+    }
+
+    /// What the dots' menu says and does for the update item. A check from the menu that has no dot to answer under opens Settings on About.
+    private func dotsUpdates(_ center: UpdateCenter) -> DotsController.Updates {
+        DotsController.Updates(
+            title: { center.menuTitle },
+            chosen: { [weak self] anchor in center.menuItemChosen(anchor: anchor, showAbout: { self?.openSettings(.about) }) })
+    }
+
     private func makeRouter() -> CommandRouter {
         CommandRouter(
             openSettings: { [weak self] page in self?.openSettings(page) },
-            runProbe: { [weak self] name, options in await self?.runProbe(name, options: ProbeOptions(options)) },
             diagnostics: { [weak self] in
                 guard let self else { return .null }
                 return await DiagnosticsReport.json(for: self)
@@ -275,7 +277,7 @@ final class AppCoordinator {
             menuBar: { [weak self] in self?.menuBar })
     }
 
-    /// Reads the displays again, for everything that needs them (the probes and the menu bar among it).
+    /// Reads the displays again, for everything that needs them (the menu bar among it).
     private func updateDisplays() {
         let layout = DisplayLayout.current()
         layoutSource.set(layout)
@@ -304,17 +306,6 @@ final class AppCoordinator {
         }
     }
 
-    /// Whether a platform test is changing the menu bar now (the order table isn't written meanwhile).
-    private func isProbeChangingMenuBar() async -> Bool {
-        await probeRunner?.isChangingMenuBar ?? false
-    }
-
-    /// Why a reset of the menu bar can't be made now, if it can't: a platform test is changing it, and the reset's replay would put the test's
-    /// records back in the middle of a measurement.
-    private func resetRefusal() async -> String? {
-        ReplayNowPolicy.resetRefusal(probeChangingMenuBar: await probeRunner?.isChangingMenuBar ?? false)
-    }
-
     /// "Replay now" in Diagnostics: the same replay as at launch.
     func replayJournalNow() async -> String {
         await replayJournal()
@@ -333,17 +324,6 @@ final class AppCoordinator {
     /// an app's icons hidden. ("Replay now" would put them back from under it.)
     var engineHoldsJournal: Bool {
         get async { await approvalsEngine.holdsJournalEntries }
-    }
-
-    /// Where Mantel's own items' buttons are, for the probes: none until the menu bar controller has made the dots.
-    private func ownItemFrames() -> [String: CGRect] {
-        menuBar?.ownItemFrames() ?? [:]
-    }
-
-    /// Runs a probe, unless quitting has begun (nil then): from the control socket and from the Diagnostics pane.
-    func runProbe(_ name: ProbeName, options: ProbeOptions) async -> ProbeReport? {
-        guard !isQuitting else { return nil }
-        return await probes.run(name, options: options)
     }
 
     /// Whether the control socket is up.
@@ -429,11 +409,10 @@ final class AppCoordinator {
     /// or three once the journal's replay has begun), whichever comes first; what isn't done by then is done at the next launch.
     ///
     /// In this order:
-    /// 1. Nothing new is started: no probe (the only command that changes the system) is run from now on, and the tap that holds clicks on
+    /// 1. Nothing new is started: the tap that holds clicks on
     ///    the clock is stopped for good (the states the session publishes from now on start nothing again).
     /// 2. What is waiting to be saved is written, before anything that can take long; so is an order change still in its debounce, in a
     ///    fraction of a second (it is dropped, and the log says so, when that isn't enough).
-    /// 3. A probe that runs is cut short, and puts back what it changed.
     /// 4. The hiding method is taken down (`MenuBarController.tearDownForQuit`): the pointer monitors are removed, a takeover of the menu
     ///    bar ends, no more plans are delivered, and the engine in charge shows everything and puts back what it changed, waited for for
     ///    1.5 seconds at most. When the journal holds temporary changes the timer is stretched first, so that the engine's undoing and
@@ -456,7 +435,6 @@ final class AppCoordinator {
         }
         await trace.step("flushing the settings") { await store.flush() }
         await trace.step("flushing the layout") { await menuBar?.flushLayoutForQuit() }
-        await trace.step("shutting down the probes") { await probeRunner?.shutDown() }
         if ownsJournal { await trace.step("stretching the quit for the journal's replay") { await quitTimer.extendForReplay(of: journal) } }
         await trace.step("taking down the engine") { await menuBar?.tearDownForQuit() }
         if ownsJournal, await !journal.untilQuitRecords().isEmpty {
@@ -529,7 +507,7 @@ final class AppCoordinator {
         }
     }
 
-    /// The person gave Mantel a file in Settings › Permissions, or put back what a platform test left ("Replay now"): the menu bar asks again
+    /// The person gave Mantel a file in Settings › Permissions, or put back what an earlier run left ("Replay now"): the menu bar asks again
     /// what it can use, and what is turned off in System Settings.
     func permissionsChanged() {
         menuBar?.permissionsChanged()

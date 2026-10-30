@@ -2,7 +2,7 @@
 
 A menu bar organizer for macOS. I built it for my own Mac: it hides the menu bar icons I don't need and keeps them one click away.
 
-Everything stays on your Mac. No account, no cloud.
+Your icons and settings stay on your Mac. No account, no cloud. The only time Mantel goes online is to check GitHub for a new version once a day (you can turn that off in Settings › About), and to download one when you choose to install it.
 
 ## What it does
 
@@ -11,6 +11,7 @@ Everything stays on your Mac. No account, no cloud.
 - **Arrange the menu bar.** Drag icons in Settings to reorder the real menu bar. Add spacers, groups and a divider.
 - **Find any icon.** A command bar finds an icon by name and clicks it, and any icon can have its own hotkey.
 - **Focus Mode** leaves just the clock and Control Center.
+- **Check for Updates…** in the dot's menu. Nothing installs until you say so.
 
 When Mantel quits, every hidden icon comes back. The order you set stays until you choose Restore original layout.
 
@@ -33,7 +34,7 @@ To sign with your own identity, copy `Config/Local.example.xcconfig` to `Config/
 
 ## Releases
 
-Push a tag like `v1.2.0` and GitHub builds, signs and notarizes the DMG and publishes it as a release. Write what's new in `release-notes/1.2.0.md` first.
+Push a tag like `v1.2.0` and GitHub builds, signs and notarizes the DMG and publishes it as a release. Write what's new in `release-notes/1.2.0.md` first. Installed copies are offered the signed release in the app.
 
 ## License
 

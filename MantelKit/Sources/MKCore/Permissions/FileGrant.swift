@@ -1,6 +1,6 @@
 import Foundation
 
-/// The two protected Apple files that Mantel reads and writes (the platform test now, hiding and arranging later).
+/// The two protected Apple files that Mantel reads and writes (hiding and arranging).
 /// Mantel can't open them on its own: the person picks each one once in an open panel, and `FileGrantStore` keeps a
 /// bookmark of it.
 public enum FileGrantKind: String, Codable, Sendable, CaseIterable {

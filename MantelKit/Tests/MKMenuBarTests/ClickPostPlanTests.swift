@@ -60,9 +60,6 @@ struct ClickPostPlanTests {
             }
             #expect(marked == 2, "a down and an up")
         }
-        for step in ClickPostPlan.key(53, flags: []).steps {
-            if case .key(_, _, _, let eventMark) = step { #expect(eventMark == ClickReplayTap.eventMark) }
-        }
     }
 
     @Test func everyMouseEventIsASingleClick() {
@@ -103,14 +100,5 @@ struct ClickPostPlanTests {
         #expect(first == .leftMouseDown)
         #expect(gap == .milliseconds(30))
         #expect(second == .leftMouseUp)
-    }
-
-    @Test func aKeyIsDownThenUpWithItsFlagsAndNoPointerMoved() {
-        let plan = ClickPostPlan.key(53, flags: .maskCommand)
-
-        #expect(plan.steps == [
-            .key(code: 53, isDown: true, flags: .maskCommand, mark: mark),
-            .key(code: 53, isDown: false, flags: .maskCommand, mark: mark),
-        ])
     }
 }

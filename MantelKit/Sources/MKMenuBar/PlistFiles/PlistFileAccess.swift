@@ -32,10 +32,10 @@ public enum PlistAccessError: Error, Equatable, LocalizedError {
     case codecMissing(String)
     /// A step of the path couldn't be taken.
     case path(KeyPathError)
-    /// A temporary change (a platform test's write, or an undo of one) was asked for at a place Mantel keeps: its own arrangement,
+    /// A temporary change (a write, or an undo of one) was asked for at a place Mantel keeps: its own arrangement,
     /// which only a restore puts back. `path` is the journal's key for the place. Nothing is changed.
     case keptByMantel(path: String)
-    /// A platform test's change to the whole key is still in the journal (it is put back by Replay now), and a change Mantel keeps
+    /// A change to the whole key, left in the journal by an earlier version's platform test, is still there (it is put back by Replay now), and a change Mantel keeps
     /// under it would be undone with it. `key` is the journal's key for the whole key. Nothing is changed.
     case leftoverWholeKey(key: String)
     /// Putting back what Mantel keeps (`restoreKept`) did not end with every place put back and its record taken out: this many are
@@ -89,13 +89,6 @@ struct PlistIO: Sendable {
         })
 
     // MARK: The file itself
-
-    /// The whole file as a dictionary of what a property list holds, so that writing one key back leaves every other key as it
-    /// was, whatever its type. A file that can't be read, for whatever reason, throws `.unreadable`.
-    static func readDictionary(_ url: URL) throws -> [String: Any] {
-        guard let data = try readBytes(url) else { throw PlistAccessError.unreadable("The file isn't there.") }
-        return try dictionary(from: data)
-    }
 
     /// The file's bytes, or nil when the file isn't there: the read failing with `ENOENT`, and nothing else. A file that is
     /// there and can't be read (no permission to it, or to the folder it is in) is `.unreadable`: taken for a file with no keys,
@@ -259,9 +252,9 @@ public enum OriginalCheck: Sendable, Equatable {
 ///   the file hasn't caught up with yet.
 /// - **Symlinks are resolved** before anything is written, with `CanonicalPath` (the journal's keys use the same form). An atomic
 ///   replace onto a link would replace the link with a regular file.
-/// - **Lifetimes.** `write(_ edits:…)` journals its places `.untilQuit` (put back on quit; a platform test's writes) or `.kept` (Mantel's own
+/// - **Lifetimes.** `write(_ edits:…)` journals its places `.untilQuit` (put back on quit) or `.kept` (Mantel's own
 ///   arrangement, put back only by `restoreKept`). A `.kept` write to a place that has an `.untilQuit` record makes it `.kept`, with its
-///   original; one under a platform test's whole-key record is refused (`leftoverWholeKey`); an `.untilQuit` write or `undo` at a
+///   original; one under a whole-key record an earlier version's platform test left is refused (`leftoverWholeKey`); an `.untilQuit` write or `undo` at a
 ///   place Mantel keeps is refused (`keptByMantel`).
 /// - **`.atomicFile` is refused for the two files macOS keeps for the menu bar**: macOS doesn't let apps replace them. It stays
 ///   for any other file, and for putting back what an earlier version recorded.
@@ -300,16 +293,6 @@ public struct PlistFileAccess: Sendable {
         self.codecs = codecs
     }
 
-    /// The top-level keys of the file, with their values. A key whose value isn't a property list type of Mantel's is left
-    /// out. It reads the file itself, so a file that needs a grant has to be read inside `FileGrantStore.withAccess`.
-    public func readTopLevel(_ url: URL) throws -> [String: PlistValue] {
-        var top: [String: PlistValue] = [:]
-        for (key, raw) in try PlistIO.readDictionary(url) {
-            if let value = PlistValue(propertyList: raw) { top[key] = value }
-        }
-        return top
-    }
-
     /// The value at `path` inside the top-level `key`, as the preferences service (`cfprefsd`, the source of truth) holds it
     /// now; nil when it isn't there. A `codec` other than `.none` is how the value of `key` is read for the path to be followed.
     public func value(at path: PlistKeyPath, key: String, in url: URL, codec: PlistBlobCodecID = .none) async throws -> PlistValue? {
@@ -336,7 +319,7 @@ public struct PlistFileAccess: Sendable {
         let identity = CanonicalPath.of(url)
         let target = URL(filePath: identity)
         try await refuseAtomicReplacement(of: target, strategy: strategy)
-        // The whole key includes the places Mantel keeps: they are not a platform test's to put back or to write over.
+        // The whole key includes the places Mantel keeps: they are not a temporary change's to put back or to write over.
         try await refuseIfKept(key: key, inFile: identity)
         let original = try await withFile(target) { [io, backups, ledger = backedUp, now = clock.now()] file in
             let original = try Self.originalValue(of: key, in: file, strategy: strategy, io: io)
@@ -543,7 +526,7 @@ public struct PlistFileAccess: Sendable {
     /// The journal's keys of the places already recorded for `key` (the places of `edits`, and every one when the whole key is
     /// recorded), after refusing what the lifetimes forbid:
     /// - `.untilQuit`: a place that Mantel keeps (its own record is `.kept`, or the whole key's is) is `keptByMantel`.
-    /// - `.kept`: a whole-key record that is a temporary change's (`.untilQuit`) is a platform test's leftover, which would put the
+    /// - `.kept`: a whole-key record that is a temporary change's (`.untilQuit`) is an earlier version's platform test's leftover, which would put the
     ///   place back over Mantel's arrangement: `leftoverWholeKey`.
     private func checkLifetimes(of edits: [PathEdit], key: String, identity: String, strategy: PlistWriteStrategy,
                                 codecID: PlistBlobCodecID, lifetime: JournalLifetime) async throws -> Set<String> {

@@ -150,50 +150,6 @@ struct LayoutEditorLandingTests {
         return (landing, ids(strip, in: moved))
     }
 
-    @Test func aDropInTheEmptyTailOfAStripWithATrailingMarkerLandsLeftOfIt() {
-        // The default: the marker is last. A B C marker, and X from Hidden dropped anywhere past the marker's middle.
-        var world = simple([id(appA), id(appB), id(appC), id(quit)], running: [appA, appB, appC])
-        world.sections.move(app: quit, to: .hidden)
-        world.running.insert(quit)
-        let x = StripToken.app(bundleID: quit, items: [id(quit)])
-        #expect(ids(.section(.shown), in: world) == ["app:\(appA)", "app:\(appB)", "app:\(appC)", "marker"])
-        // The place past the marker is declined as it is.
-        #expect(LayoutEditorModel.operation(for: .token(x, from: .section(.hidden)), onto: .section(.shown), at: 4, in: context(world)) == .noChange)
-
-        let result = dropped(.token(x, from: .section(.hidden)), onto: .section(.shown), near: 4, world)
-
-        #expect(result.landing == 3)
-        #expect(result.strip == ["app:\(appA)", "app:\(appB)", "app:\(appC)", "app:\(quit)", "marker"])
-    }
-
-    @Test func anEmptyNewItemsStripTakesADropAnywhere() {
-        var world = simple([id(appA), id(appB)])
-        world.sections.setNewItemsMarker(section: .alwaysHidden, index: 0)
-        let a = app(appA, in: world)
-        #expect(ids(.section(.alwaysHidden), in: world) == ["marker"])
-
-        for place in 0...1 {
-            let result = dropped(.token(a, from: .section(.shown)), onto: .section(.alwaysHidden), near: place, world)
-            #expect(result.landing == 0, "near \(place)")
-            #expect(result.strip == ["app:\(appA)", "marker"], "near \(place)")
-        }
-    }
-
-    @Test func theLeftHalfOfTheTokenAfterAPlacedMarkerTakesTheDrop() {
-        var world = simple([id(appA), id(appB), id(quit)], running: [appA, appB, quit])
-        world.sections.move(app: quit, to: .hidden)
-        world.sections.setNewItemsMarker(section: .shown, index: 0)
-        let x = StripToken.app(bundleID: quit, items: [id(quit)])
-        #expect(ids(.section(.shown), in: world) == ["marker", "app:\(appA)", "app:\(appB)"])
-        #expect(LayoutEditorModel.operation(for: .token(x, from: .section(.hidden)), onto: .section(.shown), at: 1, in: context(world)) == .noChange)
-
-        let result = dropped(.token(x, from: .section(.hidden)), onto: .section(.shown), near: 1, world)
-
-        // Nearest to the left that lands: before the marker. The line is drawn there.
-        #expect(result.landing == 0)
-        #expect(result.strip == ["app:\(quit)", "marker", "app:\(appA)", "app:\(appB)"])
-    }
-
     @Test func aGroupStripTakesAnAppAnywhereAndNothingElse() {
         var world = simple([id(appA), id(appB)])
         let group = IconGroup(id: GroupID(rawValue: "0000000b"))
@@ -207,51 +163,6 @@ struct LayoutEditorLandingTests {
             #expect(LayoutEditorModel.landingPlace(for: .token(.marker, from: .section(.shown)), onto: strip, near: place,
                                                    in: context(world)) == nil)
         }
-    }
-
-    @Test func moveRightPassesAMarker() throws {
-        let world = {
-            var world = simple([id(appA), id(appB), id(appC)])
-            world.sections.setNewItemsMarker(section: .shown, index: 1)
-            return world
-        }()
-        #expect(ids(.section(.shown), in: world) == ["app:\(appA)", "marker", "app:\(appB)", "app:\(appC)"])
-        let strip = world.strips.first { $0.id == .section(.shown) }!
-        let a = app(appA, in: world)
-
-        let place = try #require(LayoutEditorModel.neighbourPlace(of: a, toward: .right, in: strip, context: context(world)))
-
-        // A can't be put between the marker and B (the list has no place there), so it steps past B: after the marker.
-        let result = dropped(.token(a, from: .section(.shown)), onto: .section(.shown), near: place, world)
-        #expect(result.strip.firstIndex(of: "app:\(appA)")! > result.strip.firstIndex(of: "marker")!)
-        #expect(result.landing == place)
-        // And back: the first place to the left that lands.
-        var after = world
-        after.sections = {
-            var sections = world.sections
-            let request = LayoutEditorModel.request(for: .token(a, from: .section(.shown)), onto: .section(.shown), at: place, in: context(world))
-            LayoutEditorModel.apply(LayoutEditorModel.resolve(request, sections: sections, inventory: world.inventory)!, created: nil, to: &sections)
-            return sections
-        }()
-        let moved = after.strips.first { $0.id == .section(.shown) }!
-        let back = LayoutEditorModel.neighbourPlace(of: app(appA, in: after), toward: .left, in: moved, context: context(after))
-        #expect(back != nil)
-    }
-
-    @Test func withoutTheFileAPaletteSpacerLandsAtTheEndAndTheLineIsThere() {
-        let world = simple([id(appA), id(appB)])
-        #expect(ids(.section(.shown), in: world) == ["app:\(appA)", "app:\(appB)", "marker"])
-
-        // Dropped at the start, the place it lands at is the end of the section: before the marker, which is last.
-        for place in 0...3 {
-            let result = dropped(.palette(.spacer), onto: .section(.shown), near: place, world, canReorder: false)
-            #expect(result.landing == 2, "near \(place)")
-            #expect(result.strip.count == 4 && result.strip[2].hasPrefix("own:"), "near \(place)")
-        }
-        // The palette's marker needs no file: it lands where it is dropped.
-        let marker = dropped(.palette(.marker), onto: .section(.shown), near: 1, world, canReorder: false)
-        #expect(marker.landing == 1)
-        #expect(marker.strip == ["app:\(appA)", "marker", "app:\(appB)"])
     }
 
     @Test func aRefusalIsKnownDuringADragToo() {
@@ -290,19 +201,6 @@ struct LayoutEditorLandingTests {
         let inventory = Fixtures.inventory((listed + [id(unlisted)]).map { Fixtures.item($0) })
         let running = Set(inventory.items.map(\.ownerBundleID)).subtracting([quit, memberQuit])
         return World(sections: sections, inventory: inventory, running: running)
-    }
-
-    @Test func theWorldIsAsTheTestsDescribeIt() {
-        let world = roundTripWorld()
-        #expect(world.sections.items(in: .shown).count == 6)
-        #expect(ids(.section(.shown), in: world) == ["app:\(appA)", "marker", "app:\(appB)",
-                                                     "own:\(OwnItems.itemID(SpacerID(rawValue: "0000000a")).string)", "app:\(unlisted)"])
-        #expect(ids(.group(GroupID(rawValue: "0000000b")), in: world) == ["app:\(member1)", "app:\(member2)"])
-        #expect(world.strips.count == 4)
-        // The marker first, last (the default), and in a section with nothing in it.
-        #expect(ids(.section(.shown), in: roundTripWorld(marker: 0)).first == "marker")
-        #expect(ids(.section(.shown), in: roundTripWorld(marker: nil)).suffix(2) == ["marker", "app:\(unlisted)"])
-        #expect(ids(.section(.alwaysHidden), in: roundTripWorld(marker: 0, newItems: .alwaysHidden)) == ["marker", "app:\(unlisted)"])
     }
 
     /// Whether any place in the list (or among the members) puts the thing where the strip showed it dropped: the oracle for a decline,

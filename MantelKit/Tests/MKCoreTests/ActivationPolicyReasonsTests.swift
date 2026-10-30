@@ -158,9 +158,19 @@ struct ActivationPolicyReasonsTests {
         #expect(ActivationPolicyReasons.takeoverHandsBackFocus(requested: true, personUsedAMantelWindow: askedFor, aWindowIsOpen: asked.hasOpenWindow))
     }
 
-    @Test func aWindowUsedAndStillOpenKeepsTheFocus() {
-        #expect(ActivationPolicyReasons.focusAfterTakeover(requested: true, personUsedAMantelWindow: true, aWindowIsOpen: true,
-                                                           hasAppToHandBackTo: true, mantelIsActive: true) == .keep)
+    /// Where the focus goes when a takeover ends: kept when a window is still open (with Mantel in front and no app to go back to, too) or
+    /// when another app came forward and Mantel isn't active; given up when Mantel was in front at the beginning and no window is open.
+    @Test(arguments: [
+        (requested: true, used: true, windowOpen: true, hasApp: true, active: true, focus: ActivationPolicyReasons.FocusAfterTakeover.keep),
+        (requested: true, used: false, windowOpen: false, hasApp: false, active: true, focus: .deactivate),
+        (requested: false, used: false, windowOpen: false, hasApp: true, active: false, focus: .keep),
+        (requested: true, used: true, windowOpen: false, hasApp: false, active: false, focus: .keep),
+        (requested: true, used: false, windowOpen: true, hasApp: false, active: true, focus: .keep),
+    ])
+    func theFocusAfterATakeoverGoesWhereItBelongs(requested: Bool, used: Bool, windowOpen: Bool, hasApp: Bool, active: Bool,
+                                                  focus: ActivationPolicyReasons.FocusAfterTakeover) {
+        #expect(ActivationPolicyReasons.focusAfterTakeover(requested: requested, personUsedAMantelWindow: used, aWindowIsOpen: windowOpen,
+                                                           hasAppToHandBackTo: hasApp, mantelIsActive: active) == focus)
     }
 
     @Test func aTakeoverEndingWithNoWindowNeverLeavesMantelActive() {
@@ -178,26 +188,6 @@ struct ActivationPolicyReasonsTests {
                 }
             }
         }
-    }
-
-    @Test func aTakeoverThatBeganWithMantelInFrontGivesTheFocusUpWhenItEnds() {
-        // Mantel was in front at the beginning: there is no app to hand the focus back to.
-        #expect(ActivationPolicyReasons.focusAfterTakeover(requested: true, personUsedAMantelWindow: false, aWindowIsOpen: false,
-                                                           hasAppToHandBackTo: false, mantelIsActive: true) == .deactivate)
-    }
-
-    @Test func aTakeoverThatEndedBecauseAnotherAppCameForwardLeavesTheFocusAlone() {
-        // The other app has the focus already: Mantel isn't active, so there is nothing to give up.
-        #expect(ActivationPolicyReasons.focusAfterTakeover(requested: false, personUsedAMantelWindow: false, aWindowIsOpen: false,
-                                                           hasAppToHandBackTo: true, mantelIsActive: false) == .keep)
-        #expect(ActivationPolicyReasons.focusAfterTakeover(requested: true, personUsedAMantelWindow: true, aWindowIsOpen: false,
-                                                           hasAppToHandBackTo: false, mantelIsActive: false) == .keep)
-    }
-
-    @Test func aWindowThatIsOpenWithNoAppToGoBackToKeepsTheFocus() {
-        // Settings open, Mantel was in front at the beginning: Mantel stays an ordinary app, and the focus stays in it.
-        #expect(ActivationPolicyReasons.focusAfterTakeover(requested: true, personUsedAMantelWindow: false, aWindowIsOpen: true,
-                                                           hasAppToHandBackTo: false, mantelIsActive: true) == .keep)
     }
 
     @Test func askingForAWindowDuringATakeoverCountsAsUsingIt() {
@@ -266,13 +256,15 @@ struct ActivationPolicyReasonsTests {
         #expect(reasons.menuKind == .none)
     }
 
-    @Test func closingTheLastWindowOfAnActiveMantelLetsTheNextAppHaveTheFocus() {
-        #expect(ActivationPolicyReasons.closingHandsBackFocus(policyChange: .accessory, mantelIsActive: true))
-        #expect(!ActivationPolicyReasons.closingHandsBackFocus(policyChange: .accessory, mantelIsActive: false))
-    }
-
-    @Test func aCloseThatLeavesMantelAnOrdinaryAppChangesNoOnesFocus() {
-        #expect(!ActivationPolicyReasons.closingHandsBackFocus(policyChange: nil, mantelIsActive: true))
-        #expect(!ActivationPolicyReasons.closingHandsBackFocus(policyChange: .regular, mantelIsActive: true))
+    /// Closing the last window of an active Mantel lets the next app have the focus; a close that leaves Mantel an ordinary app changes no
+    /// one's focus.
+    @Test(arguments: [
+        (change: ActivationPolicyKind?.some(.accessory), active: true, handsBack: true),
+        (change: .some(.accessory), active: false, handsBack: false),
+        (change: nil, active: true, handsBack: false),
+        (change: .some(.regular), active: true, handsBack: false),
+    ])
+    func closingHandsBackTheFocusOnlyWhenMantelBecomesAnAccessoryWhileActive(change: ActivationPolicyKind?, active: Bool, handsBack: Bool) {
+        #expect(ActivationPolicyReasons.closingHandsBackFocus(policyChange: change, mantelIsActive: active) == handsBack)
     }
 }

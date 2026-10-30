@@ -2,6 +2,7 @@ import AppKit
 import MKCore
 import MKLayout
 import MKMenuBar
+import MKUpdate
 
 /// Mantel's two dots in the menu bar. • shows the Hidden icons and •• shows all of them; each is a filled dot while its section is on the
 /// bar and an outlined one while it is put away. Which dots are on the bar is `OwnItemsVisibility`'s decision (`OwnItemsShown`): •• is
@@ -33,6 +34,17 @@ final class DotsController: NSObject, NSMenuDelegate {
         let toggleFocusMode: () -> Void
         let refresh: () -> Void
         let openDiagnostics: () -> Void
+        /// The update item of the menu: nil in a build that can't update itself, which then has no item.
+        let updates: Updates?
+    }
+
+    /// What the menu's update item says and does.
+    struct Updates {
+        /// "Check for Updates…", or "Update to X.Y.Z…" while a release is known; read each time the menu opens.
+        let title: () -> String
+        /// The item was chosen. `anchor` is the button of the dot whose menu it came from, when a popover can hang from it: nil when
+        /// that dot is off the bar or in the menu bar's overflow, or the menu came from its shortcut.
+        let chosen: (NSView?) -> Void
     }
 
     private let actions: Actions
@@ -45,6 +57,10 @@ final class DotsController: NSObject, NSMenuDelegate {
     private let alwaysItem: NSStatusItem
     private let menu = NSMenu()
     private let focusModeItem: NSMenuItem
+    private var updateItem: NSMenuItem?
+    /// The dot whose menu was opened last: where a check asked for from the menu answers. Nil for the menu the shortcut opens, which
+    /// belongs to no dot.
+    private var menuDot: DotKind?
     private var look: DotAppearance?
     private var tooltip: String?
     private var isFocusModeOn = false
@@ -340,6 +356,12 @@ final class DotsController: NSObject, NSMenuDelegate {
         let settings = NSMenuItem(title: DotsCopy.settingsItem, action: #selector(settingsChosen), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+        if let updates = actions.updates {
+            let update = NSMenuItem(title: updates.title(), action: #selector(updatesChosen), keyEquivalent: "")
+            update.target = self
+            updateItem = update
+            menu.addItem(update)
+        }
         let commandBar = NSMenuItem(title: DotsCopy.commandBarItem, action: #selector(commandBarChosen), keyEquivalent: "")
         commandBar.target = self
         menu.addItem(commandBar)
@@ -376,6 +398,7 @@ final class DotsController: NSObject, NSMenuDelegate {
     private func openMenu(on dot: DotKind) {
         dispatchPrecondition(condition: .onQueue(.main))
         let item = statusItem(for: dot)
+        menuDot = dot
         let decision = menuPlacement(dot, NSEvent.mouseLocation, item.button?.window?.frame)
         guard case .popUp(let point, _) = decision else {
             openMenuThroughStatusItem(on: dot)
@@ -423,6 +446,7 @@ final class DotsController: NSObject, NSMenuDelegate {
         RunLoop.main.perform(inModes: [.common]) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.menuDot = nil
                 self.focusModeItem.state = self.isFocusModeOn ? .on : .off
                 self.menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
             }
@@ -445,6 +469,7 @@ final class DotsController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         opening.menuWillOpen()
+        if let title = actions.updates?.title() { updateItem?.title = title }
     }
 
     /// The items' menus are taken away on the next turn of the main queue, not here: the item that was chosen has its action sent as the menu
@@ -456,6 +481,18 @@ final class DotsController: NSObject, NSMenuDelegate {
     }
 
     @objc private func settingsChosen() { actions.openSettings() }
+    @objc private func updatesChosen() { actions.updates?.chosen(popoverAnchor) }
+
+    /// The button of the dot whose menu was opened, when a popover can hang from it: the dot is on the bar and its button's window has
+    /// its middle on a screen (`DotAnchor`).
+    private var popoverAnchor: NSView? {
+        guard let dot = menuDot, isOnBar[dot] == true else { return nil }
+        let item = statusItem(for: dot)
+        guard let button = item.button,
+              DotAnchor.isUsable(itemIsVisible: item.isVisible, buttonFrame: button.window?.frame, screenFrames: NSScreen.screens.map(\.frame))
+        else { return nil }
+        return button
+    }
     @objc private func commandBarChosen() { openCommandBar() }
     @objc private func focusModeChosen() { actions.toggleFocusMode() }
     @objc private func refreshChosen() { actions.refresh() }

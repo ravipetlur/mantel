@@ -57,15 +57,9 @@ public enum CLIParser {
     private static let optionFlag = "--option"
     private static let allFlag = "--all"
     private static let sectionFlag = "--section"
-    private static let allowAnyFlag = "allow-any"
-    /// The options that are switches, with no value after them: a word that follows one is the next option. (The steps of `layout-order`
-    /// are switches too.)
-    private static let switches: Set<String> = [allowAnyFlag, "save-baseline", "compare", "visibility", "relaunch-item", "dots", "dots-keep",
-                                                "dots-restore"]
 
     public static let usage: String = {
         let pages = SettingsPage.allCases.map(\.rawValue).joined(separator: "|")
-        let probes = ProbeName.allCases.map { "  \($0.rawValue)" }.joined(separator: "\n")
         return """
         Usage:
           mantel ping                          Check that Mantel is running.
@@ -90,31 +84,9 @@ public enum CLIParser {
                                                changed it. It asks first; --yes says yes beforehand.
           mantel settings [\(pages)]
                                                Open Mantel's settings, at a page.
-          mantel probe <name> [--key value]... [--allow-any] [--save-baseline] [--compare]
-                                               Run a probe. By default a probe that changes something touches
-                                               only Mantel's test item; --allow-any lets it touch any app.
-                                               The probes that change something need "Enable platform test"
-                                               on in Settings › Diagnostics.
-          mantel probe click-path [--item one|two|extra.<n>] [--kind left|right|option] [--route press|post|showMenu] [--runs <n>]
-                                               Click an icon that is concealed, by a route, and record what comes of it.
-          mantel probe layout-order [--runs <n>] [--item one|extra.<n>] [--visibility] [--relaunch-item --extra-count <n>]
-                      [--dots | --dots-keep | --dots-restore]
-                                               Write the test item's places in macOS's order table, and put them back.
-                                               --dots-keep leaves Mantel's dots where they were put until --dots-restore.
-          mantel probe approvals-flip --flag-path <path> --codec nested|flip [--runs <n>]
-                      [--id-key <key> | --match-path <path>]
-                                               Flip the test item's switch in the approvals list, and put it back.
-                                               A path is steps like k:name, i:2 and m:key=value, joined by /.
-                                               --match-path finds the entry by the way to its bundle ID, with * for
-                                               any element (k:menuItemLocations/*/k:bundle/k:_0). Quote it: the
-                                               shell takes * for a file name. --flag-path is then from that entry
-                                               (k:isAllowed).
           mantel help                          Print this.
 
         Add --json anywhere to print the answer as JSON.
-
-        Probes:
-        \(probes)
 
         Exit codes: 0 done, 1 Mantel said it couldn't, 2 wrong arguments, 3 Mantel isn't running, 4 Mantel refused this tool.
         """
@@ -146,7 +118,6 @@ public enum CLIParser {
         case "version": command = noArguments(.version, verb: verb, rest)
         case "diagnostics": command = noArguments(.diagnostics, verb: verb, rest)
         case "settings": command = parseSettings(rest)
-        case "probe": command = parseProbe(rest)
         case "show": command = parseShow(rest)
         case "focus": command = parseFocus(rest)
         case "refresh": command = noArguments(.refresh, verb: verb, rest)
@@ -254,48 +225,10 @@ public enum CLIParser {
         return .success(.restoreLayout)
     }
 
-    private static func parseProbe(_ rest: [String]) -> Result<MantelCommand, CLIUsageError> {
-        guard let word = rest.first, !word.hasPrefix("-") else {
-            return .failure(error("“probe” needs a name. The probes are: \(probeNames)."))
-        }
-        guard let name = ProbeName(rawValue: word) else {
-            return .failure(error("“\(word)” isn't a probe. The probes are: \(probeNames)."))
-        }
-
-        var options: [String: String] = [:]
-        var index = 1
-        while index < rest.count {
-            let token = rest[index]
-            guard token.hasPrefix("--"), token.count > 2 else {
-                return .failure(error("Unexpected “\(token)”. Options look like “--key value”."))
-            }
-            let key = String(token.dropFirst(2))
-            guard options[key] == nil else {
-                return .failure(error("The option “\(token)” is given twice."))
-            }
-            if switches.contains(key) {
-                options[key] = "true"
-                index += 1
-                continue
-            }
-            // A value may start with a single dash (`--distance -40`); a word that starts with two is the next option.
-            guard index + 1 < rest.count, !rest[index + 1].hasPrefix("--") else {
-                return .failure(error("The option “\(token)” needs a value."))
-            }
-            options[key] = rest[index + 1]
-            index += 2
-        }
-        return .success(.probe(name, options: options))
-    }
-
     // MARK: Messages
 
     private static var pageNames: String {
         SettingsPage.allCases.map(\.rawValue).joined(separator: ", ")
-    }
-
-    private static var probeNames: String {
-        ProbeName.allCases.map(\.rawValue).joined(separator: ", ")
     }
 
     private static func error(_ problem: String) -> CLIUsageError {

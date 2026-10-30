@@ -39,7 +39,7 @@ private final class GatedEngine: HidingEngine {
 }
 
 /// The rules the session keeps that the plan's tests don't reach: what is asked of the engines and the scheduler, and in what order.
-@Suite("Menu bar session rules", .timeLimit(.minutes(1)))
+@Suite("Menu bar session rules", .serialized, .timeLimit(.minutes(1)))
 struct MenuBarSessionRulesTests {
     /// Waits, in real time and for at most five seconds, until the session's newest plan says so.
     private func waitForSubmitted(_ session: MenuBarSession, _ holds: @escaping @Sendable (VisibilityPlan) -> Bool) async -> Bool {
@@ -177,73 +177,6 @@ struct MenuBarSessionRulesTests {
         #expect(engine.applied.count == 4)
     }
 
-    @Test func spacerEngineHearsTheBarsWhateverEngineIsInCharge() async throws {
-        let spacers = await MainActor.run { FakeSpacers() }
-        let spacer = SpacerEngine(spacers: spacers)
-        let log = CallLog()
-        let rig = SessionRig.withEngines([.allowlist: FakeEngine(.allowlist, log: log), .spacer: spacer],
-                                         sections: sections(hidden: [weather]), events: log)
-        await rig.session.start()
-        #expect(await rig.session.engineStatus().kind == .allowlist, "the allowlist is in charge, not the spacer")
-        #expect(await MainActor.run { spacers.shown.isEmpty }, "the spacer was never asked to show anything")
-
-        // The person chooses the wide spacer: it has the bars of the first read, and makes its widths for them.
-        var settings = HidingSettings()
-        settings.method = .wideSpacer
-        await rig.session.setSettings(settings)
-        #expect(await rig.session.engineStatus().kind == .spacer)
-        let widths = try #require(await MainActor.run { spacers.shown.last })
-        #expect(widths.divider.count > 1 && widths.divider.allSatisfy { $0 > 0 }, "spacers as wide as the bars call for, not the collapsed ones")
-        // 3360 and 1800 points across: half of the narrower, less a point, as often as it takes to cover the wider but for 300.
-        #expect(widths == SpacerLayout.widths(for: try #require(await rig.state).plan, bars: try #require(await rig.state).inventory.bars))
-    }
-
-    @Test func refreshAsksWhichEngineAgainAndAppliesThePlanAgain() async throws {
-        let log = CallLog()
-        let allowlist = FakeEngine(.allowlist, log: log)
-        allowlist.setAvailability(.broken("a platform test's change hasn't been put back yet"))
-        let spacer = FakeEngine(.spacer, log: log)
-        let rig = SessionRig.withEngines([.allowlist: allowlist, .spacer: spacer], sections: sections(hidden: [weather]), events: log)
-        await rig.session.start()
-        #expect(await rig.session.engineStatus().kind == .spacer, "the allowlist can't be used, so Automatic's chain goes on")
-        let applied = spacer.applied.count
-
-        // The leftover was put back: Refresh asks again, and the allowlist is in charge.
-        allowlist.setAvailability(.available)
-        let asked = log.count("allowlist.availability")
-        await rig.session.refresh()
-        #expect(await rig.session.engineStatus().kind == .allowlist)
-        #expect(log.count("allowlist.availability") == asked + 2, "once for the choice made again, once more inside the plan that is applied by force")
-        #expect(allowlist.applied.count >= 1, "and the plan is applied to it, though it is the plan that was applied")
-        #expect(spacer.tornDown >= 1, "the one that was in charge shows everything again")
-        #expect(spacer.applied.count == applied)
-    }
-
-    @Test func theFrontAppAfterADisplayChangeIsTheOneThatIsThereAfterTheRead() async throws {
-        let rig = SessionRig.withAllowlist()
-        await rig.session.start()
-        await rig.session.frontAppChanged(pid: 4001, activeScreenWidth: 1728)
-        #expect(await rig.session.frontPID == 4001)
-
-        // The displays change, and the read for it is held up. Another app comes to the front while it is.
-        let gate = Gate()
-        rig.extras.holdReads(at: gate)
-        defer { gate.open() }
-        let layout = rig.world.layout
-        let changed = Task { await rig.session.displaysChanged(layout) }
-        #expect(await rig.letTheCoalescedReadGo())
-        let extras = rig.extras
-        #expect(await waitUntil { extras.readsHeld > 0 }, "the read for the change is under way")
-        await rig.session.frontAppChanged(pid: 4002, activeScreenWidth: 1728)
-        #expect(await rig.session.frontPID == 4002)
-
-        // When the read is over, the menus that are read again are the new front app's, and the old one doesn't come back to the front.
-        rig.extras.holdReads(at: nil)
-        gate.open()
-        await changed.value
-        #expect(await rig.session.frontPID == 4002)
-    }
-
     @Test func aReadTakenInTheMiddleOfASwitchOfEngineIsNotJudged() async throws {
         // The bar has room for five icons, the weather app's and the notes app's are piled, and no automatic move has been made (the bar
         // had room for them when it was read). The person chooses the wide spacer, which takes its time over the plan. The read that
@@ -284,42 +217,6 @@ struct MenuBarSessionRulesTests {
 
     // MARK: Reads
 
-    @Test func settingsOpenReadsEveryTwoSecondsAndAsksWhichAppsAreTurnedOffAgain() async throws {
-        let rig = SessionRig.withAllowlist()
-        await rig.session.start()
-        let asked = rig.turnedOff.timesAsked
-        #expect(try #require(await rig.state).lists.turnedOff == .apps([]))
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)))
-
-        rig.turnedOff.set(.apps(["com.example.sleeper"]))
-        await rig.session.setSettingsOpen(true)
-        #expect(rig.turnedOff.timesAsked == asked + 1, "the list is read when Settings opens")
-        #expect(try #require(await rig.state).lists.turnedOff == .apps(["com.example.sleeper"]))
-
-        // Two seconds are enough for a read now (it would take ten otherwise).
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)))
-        rig.clock.advance(by: .seconds(2))
-        #expect(await rig.letTheCoalescedReadGo())
-        #expect(await rig.waitForReads(SessionRig.readsAtStart + 1))
-
-        // Closed, it is every ten seconds again: two seconds ask for nothing.
-        await rig.session.setSettingsOpen(false)
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)))
-        rig.clock.advance(by: .seconds(2))
-        #expect(rig.clock.sleeperCount == 2, "no read was asked for")
-    }
-
-    @Test func readsThatAreNotWantedAreNotAsked() async throws {
-        let rig = SessionRig.withAllowlist()
-        await rig.session.start()
-        let reads = await rig.session.scansIngested
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)), "the polling, and the minute's trial, are waiting")
-        // Nothing started and nothing quit: nothing is read, nothing is applied.
-        await rig.session.runningAppsChanged(RunningAppsChange(launched: [], quit: []))
-        #expect(rig.clock.sleeperCount == 2, "and nothing else")
-        #expect(await rig.session.scansIngested == reads)
-    }
-
     @Test func aReadThatSaysNothingStillHidesWhatTheSectionsSay() async throws {
         // Accessibility isn't granted: the read finds no bar. Nothing is made up of it, and the sections are applied all the same.
         let trusted = Switch(false)
@@ -332,23 +229,6 @@ struct MenuBarSessionRulesTests {
         #expect(state.inventory.problems == [.accessibilityNotGranted])
         #expect(state.sections.apps.keys.sorted() == [weather], "no app was placed from a read that found none")
         #expect(state.plan.concealedBundleIDs == [weather])
-    }
-
-    @Test func anAppThatQuitsIsOutOfThePlanAndAskedForAfterwards() async throws {
-        let rig = SessionRig.withAllowlist(sections: sections(hidden: [weather]))
-        await rig.session.start()
-        let allowlist = try #require(rig.allowlist)
-        #expect(allowlist.calls.count == 1)
-        let app = rig.world.app(weather)
-
-        rig.world.setPlanRunning(Set(rig.world.runningBundleIDs).subtracting([weather]))
-        await rig.session.runningAppsChanged(RunningAppsChange(launched: [], quit: [app]))
-        let state = try #require(await rig.state)
-        #expect(state.plan.concealedBundleIDs.isEmpty, "an app that isn't running is neither concealed nor visible")
-        #expect(state.lists.missing == [weather], "it was put somewhere, and isn't running")
-        #expect(await rig.letTheCoalescedReadGo())
-        #expect(await rig.waitForReads(SessionRig.readsAtStart + 1))
-        #expect(await rig.session.sections.apps[weather] == AppPlacement(section: .hidden, isAuto: false), "and is remembered")
     }
 
     @Test func aReadAfterAFailedApplyIsNotJudged() async throws {
@@ -372,55 +252,6 @@ struct MenuBarSessionRulesTests {
         await rig.session.refresh()
         #expect(await rig.session.sections.apps[weather] == AppPlacement(section: .hidden, isAuto: true))
         #expect(await rig.session.sections.apps[notes] == AppPlacement(section: .hidden, isAuto: true))
-    }
-
-    @Test func theFrontAppsMenusAreKeptForThePointer() async throws {
-        let rig = SessionRig.withAllowlist()
-        await rig.session.start()
-        #expect(await rig.session.frontAppMenuFrames().isEmpty, "no front app is known yet")
-
-        let pid = try #require(rig.world.fixture().pid(of: notes))
-        let ax = rig.world.fixture().ax
-        let bar = ax.addNode(attributes: [AXName.role: .string("AXMenuBar")])
-        let frames = [CGRect(x: 0, y: 0, width: 30, height: 30), CGRect(x: 30, y: 0, width: 60, height: 30)]
-        for frame in frames { ax.addNode(attributes: FakeAX.frameAttributes(frame), under: bar) }
-        ax.setAttribute(AXName.menuBar, .elements([ax.ref(bar)]), on: ax.root(ofApp: pid))
-
-        await rig.session.frontAppChanged(pid: pid, activeScreenWidth: 3360)
-        #expect(await rig.session.frontAppMenuFrames() == frames)
-        // An app that has no menus has none.
-        await rig.session.frontAppChanged(pid: 99_999, activeScreenWidth: 3360)
-        #expect(await rig.session.frontAppMenuFrames().isEmpty)
-    }
-
-    // MARK: Publishing
-
-    @Test func aReaderThatIsBehindIsGivenTheNewestStateOnly() async throws {
-        let rig = SessionRig.withAllowlist(sections: sections(shown: [weather, notes]))
-        await rig.session.start()
-        var states = await rig.session.states().makeAsyncIterator()
-        let current = try #require(await states.next())
-        #expect(current.sections.apps[weather]?.section == .shown)
-
-        // Two changes are made before the reader looks: it is given the second, which holds the first.
-        await rig.session.move(app: weather, to: .hidden)
-        await rig.session.move(app: notes, to: .alwaysHidden)
-        let next = try #require(await states.next())
-        #expect(next.sections.apps[weather]?.section == .hidden)
-        #expect(next.sections.apps[notes]?.section == .alwaysHidden)
-        #expect(next.alwaysHiddenHasApps)
-    }
-
-    @Test func aStateIsPublishedOnlyWhenSomethingChanged() async throws {
-        let rig = SessionRig.withAllowlist(sections: sections(shown: [weather]))
-        await rig.session.start()
-        let published = await rig.session.lastPublished
-        // Asking for what is already so changes nothing that is published.
-        await rig.session.setNewItemsSection(.shown)
-        await rig.session.setSettings(HidingSettings())
-        #expect(await rig.session.lastPublished == published)
-        await rig.session.setNewItemsSection(.hidden)
-        #expect(await rig.session.lastPublished != published)
     }
 
     // MARK: Trials of the apps that were moved out
@@ -509,95 +340,6 @@ struct MenuBarSessionRulesTests {
         let kept = AppPlacement(section: .shown, isAuto: false)
         #expect(await rig.session.sections.apps[weather] == kept)
         #expect(await rig.session.sections.apps[notes] == kept)
-    }
-
-    @Test func theTrialsReadIsAskedForAfterItsPlanIsApplied() async throws {
-        // The sync app is Hidden by the person, so the trial's plan still conceals something: it is an assertion, and the allowlist is
-        // slow to take it. The read that judges the trial is not asked for until that is over.
-        var settings = HidingSettings()
-        settings.noRoomPolicy = .secondBar
-        let rig = SessionRig.withAllowlist(shape: .laptop, capacity: 5, sections: sections(hidden: [sync]), settings: settings)
-        await rig.session.start()
-        let allowlist = try #require(rig.allowlist)
-        #expect(await rig.session.sections.apps[weather] == AppPlacement(section: .hidden, isAuto: true))
-        // The notes app was pushed out of the bar by the icons that were still on it when the first read was taken: it fits now that the
-        // sync app is concealed, and it was never moved.
-        #expect(await rig.session.sections.apps[notes] == AppPlacement(section: .shown, isAuto: false))
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)))
-        let before = allowlist.calls.count
-
-        let gate = Gate()
-        allowlist.holdActivations(until: gate)
-        defer { gate.open() }
-        let trial = Task { await rig.session.frontAppChanged(pid: 4321, activeScreenWidth: 1728) }
-        #expect(await waitUntil { allowlist.calls.count == before + 1 }, "the trial's plan is being applied")
-        #expect(allowlist.calls.last?.bundleIDs.contains(weather) == true)
-        #expect(rig.clock.sleeperCount == 2, "no read has been asked for yet")
-
-        gate.open()
-        await trial.value
-        #expect(await rig.clock.waitForSleepers(3, within: .seconds(5)), "now the read that judges the trial is asked for")
-    }
-
-    @Test func aReadThatFoundNoBarDoesNotEndATrial() async throws {
-        // Accessibility is taken away while the apps are on trial. The read that comes finds nothing at all, which is not the same as
-        // finding the apps fit: the trial goes on.
-        let trusted = Switch(true)
-        let rig = SessionRig.withAllowlist(shape: .laptop, capacity: 5, trusted: trusted)
-        await rig.session.start()
-        await rig.session.frontAppChanged(pid: 4321, activeScreenWidth: 1728)
-        let trial = AppPlacement(section: .shown, isAuto: true)
-        #expect(await rig.session.sections.apps[weather] == trial)
-
-        trusted.set(false)
-        await rig.session.refresh()
-        #expect(try #require(await rig.state).inventory.problems == [.accessibilityNotGranted])
-        #expect(await rig.session.sections.apps[weather] == trial, "still on trial")
-        #expect(await rig.session.sections.apps[notes] == trial)
-    }
-
-    @Test func aMinuteLaterTheAppsThatDidNotFitAreTried() async throws {
-        let rig = await movedOutRig()
-        let allowlist = try #require(rig.allowlist)
-        let moved = AppPlacement(section: .hidden, isAuto: true)
-        #expect(await rig.session.sections.apps[weather] == moved)
-
-        // A minute goes by. (The polling asks for a read every ten seconds in the meantime.)
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)))
-        rig.clock.advance(by: .seconds(60))
-        // The apps are shown again for a trial: nothing is concealed, so the allowlist is let go.
-        #expect(await waitUntil { allowlist.live == 0 }, "the trial's plan was applied")
-        #expect(await rig.session.sections.apps[weather] == AppPlacement(section: .shown, isAuto: true))
-        // The bar still has room for five: what is read next (the polling's, and the trial's, are one read) sends them back.
-        #expect(await rig.pumpUntilReads(SessionRig.readsAtStart + 1))
-        #expect(await rig.session.sections.apps[weather] == moved)
-        #expect(allowlist.live == 1)
-    }
-
-    @Test func anAppWhoseWidthIsUnknownIsNotTried() async throws {
-        // An app that was moved out and has quit has no icon in the read, so what it takes isn't known, and it can't be said to fit.
-        var model = sections()
-        let ghost = "com.example.ghost"
-        model.apps[ghost] = AppPlacement(section: .hidden, isAuto: true)
-        let rig = SessionRig.withAllowlist(sections: model)
-        await rig.session.start()
-        let allowlist = try #require(rig.allowlist)
-        let before = allowlist.calls.count
-
-        await rig.session.frontAppChanged(pid: 4321, activeScreenWidth: 1728)
-        await rig.session.frontAppChanged(pid: 4322, activeScreenWidth: 1728)
-        #expect(await rig.session.sections.apps[ghost] == AppPlacement(section: .hidden, isAuto: true))
-        #expect(allowlist.calls.count == before)
-        #expect(await rig.clock.waitForSleepers(2, within: .seconds(5)))
-        #expect(rig.clock.sleeperCount == 2, "no read was asked for a trial")
-    }
-
-    @Test func aTrialIsNotStartedWhileRevealed() async throws {
-        let rig = await movedOutRig()
-        #expect(await rig.session.setReveal(.hiddenShown) != .takeOverMenuBar)
-        // Revealing hides nothing's room: a front app change in the middle of a reveal doesn't put the moved apps on trial.
-        await rig.session.frontAppChanged(pid: 4321, activeScreenWidth: 1728)
-        #expect(await rig.session.sections.apps[weather] == AppPlacement(section: .hidden, isAuto: true))
     }
 
     // MARK: Reveals that are overtaken

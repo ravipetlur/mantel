@@ -70,47 +70,33 @@ struct PlistFileAccessTests {
         return try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
     }
 
+    /// The file's top-level keys as values of Mantel's, read straight from the disk.
+    private func topLevel() throws -> [String: PlistValue] {
+        try onDisk().compactMapValues { PlistValue(propertyList: $0) }
+    }
+
     private func resolved(_ url: URL) -> String { CanonicalPath.of(url) }
-
-    // MARK: Reading
-
-    @Test func readTopLevelReturnsTheKeysWithTheirValues() throws {
-        try writePlist(["name": "x", "count": 3, "flag": true, "nested": ["a": [1, 2]]])
-        let access = makeAccess(makeJournal())
-        let top = try access.readTopLevel(plist)
-        #expect(top["name"] == .string("x"))
-        #expect(top["count"] == .integer(3))
-        #expect(top["flag"] == .bool(true))
-        #expect(top["nested"] == .dictionary(["a": .array([.integer(1), .integer(2)])]))
-    }
-
-    @Test func aFileThatIsNotADictionaryIsRefused() throws {
-        let data = try PropertyListSerialization.data(fromPropertyList: [1, 2, 3], format: .xml, options: 0)
-        try data.write(to: plist)
-        #expect(throws: PlistAccessError.notADictionary) { try makeAccess(makeJournal()).readTopLevel(plist) }
-    }
-
-    @Test func aMissingFileCantBeRead() {
-        #expect(throws: PlistAccessError.self) { try makeAccess(makeJournal()).readTopLevel(plist) }
-    }
 
     // MARK: Writing
 
-    @Test func atomicWriteRoundTrips() async throws {
+    @Test(arguments: [PlistWriteStrategy.atomicFile, .cfPreferences])
+    func aWriteRoundTrips(strategy: PlistWriteStrategy) async throws {
         try writePlist(["keep": "me", "alpha": 1])
         let journal = makeJournal()
         let access = makeAccess(journal)
 
-        try await access.write(.integer(5), key: "alpha", in: plist, strategy: .atomicFile)
+        try await access.write(.integer(5), key: "alpha", in: plist, strategy: strategy)
 
-        let top = try access.readTopLevel(plist)
+        let top = try topLevel()
         #expect(top["alpha"] == .integer(5))
         #expect(top["keep"] == .string("me"), "the other keys are as they were")
-        // Written as a binary plist.
-        #expect(try Data(contentsOf: plist).prefix(8) == Data("bplist00".utf8))
+        if strategy == .atomicFile {
+            // Written as a binary plist.
+            #expect(try Data(contentsOf: plist).prefix(8) == Data("bplist00".utf8))
+        }
         // The journal holds the original, under the file's own path, with the strategy.
         let records = await journal.records()
-        #expect(records.map(\.entry) == [.plistKey(filePath: resolved(plist), key: "alpha", original: .integer(1), strategy: .atomicFile)])
+        #expect(records.map(\.entry) == [.plistKey(filePath: resolved(plist), key: "alpha", original: .integer(1), strategy: strategy)])
     }
 
     @Test func anAtomicWriteKeepsTheFilesModeAndExtendedAttributes() async throws {
@@ -125,7 +111,7 @@ struct PlistFileAccessTests {
 
         try await access.write(.integer(5), key: "alpha", in: plist, strategy: .atomicFile)
 
-        #expect(try access.readTopLevel(plist)["alpha"] == .integer(5))
+        #expect(try topLevel()["alpha"] == .integer(5))
         #expect(try FileManager.default.attributesOfItem(atPath: plist.path)[.posixPermissions] as? Int == 0o644)
         var buffer = [UInt8](repeating: 0, count: 16)
         let size = getxattr(plist.path, attribute, &buffer, buffer.count, 0, 0)
@@ -146,26 +132,12 @@ struct PlistFileAccessTests {
         #expect(try FileManager.default.attributesOfItem(atPath: plist.path)[.posixPermissions] as? Int == 0o640)
     }
 
-    @Test func cfPreferencesWriteRoundTrips() async throws {
-        try writePlist(["keep": "me", "alpha": 1])
-        let journal = makeJournal()
-        let access = makeAccess(journal)
-
-        try await access.write(.integer(5), key: "alpha", in: plist, strategy: .cfPreferences)
-
-        let top = try access.readTopLevel(plist)
-        #expect(top["alpha"] == .integer(5))
-        #expect(top["keep"] == .string("me"))
-        let records = await journal.records()
-        #expect(records.map(\.entry) == [.plistKey(filePath: resolved(plist), key: "alpha", original: .integer(1), strategy: .cfPreferences)])
-    }
-
     @Test func aWriteCanSetADictionaryAndABoolean() async throws {
         try writePlist(["alpha": 1])
         let access = makeAccess(makeJournal())
         let value = PlistValue.dictionary(["x": .bool(false), "y": .array([.string("s"), .real(1.5)])])
         try await access.write(value, key: "alpha", in: plist, strategy: .atomicFile)
-        #expect(try access.readTopLevel(plist)["alpha"] == value)
+        #expect(try topLevel()["alpha"] == value)
     }
 
     @Test func writingNilRemovesTheKey() async throws {
@@ -277,7 +249,7 @@ struct PlistFileAccessTests {
         let access = makeAccess(journal)
         try await access.write(.integer(2), key: "alpha", in: plist, strategy: strategy)
         try await access.write(.integer(3), key: "alpha", in: plist, strategy: strategy)
-        #expect(try access.readTopLevel(plist)["alpha"] == .integer(3))
+        #expect(try topLevel()["alpha"] == .integer(3))
         #expect(await journal.records().count == 1)
 
         let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
@@ -511,7 +483,7 @@ struct PlistFileAccessTests {
         let access = makeAccess(journal)
 
         try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
-        #expect(try access.readTopLevel(plist)["table"] == .dictionary(["a": .integer(10), "b": .integer(2)]))
+        #expect(try topLevel()["table"] == .dictionary(["a": .integer(10), "b": .integer(2)]))
         #expect(try await access.value(at: [.key("a")], key: "table", in: plist) == .integer(10))
         #expect(try await access.value(at: [.key("nothing")], key: "table", in: plist) == nil)
 
@@ -1242,33 +1214,24 @@ struct PlistFileAccessTests {
 
     private let eightDays = Duration.seconds(8 * 24 * 60 * 60)
 
-    @Test func aStaleEntryThatSomeoneChangedIsDroppedNotRestored() async throws {
+    /// An entry a week old is put back, unless the person has set it to something else themselves since: their change is not undone, and
+    /// the record is dropped.
+    @Test(arguments: [true, false])
+    func aStaleEntryIsRestoredUnlessSomeoneChangedIt(someoneChangedIt: Bool) async throws {
         try writePlist(["table": ["a": 1]])
         let journal = makeJournal()
         let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
         try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
-        // Weeks later the person has set it to something else themselves.
-        try PlistIO.writeFile(.dictionary(["a": .integer(99)]), key: "table", to: plist)
+        if someoneChangedIt {
+            try PlistIO.writeFile(.dictionary(["a": .integer(99)]), key: "table", to: plist)
+        }
         clock.advance(by: eightDays)
 
         let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
 
         #expect(failures.isEmpty)
-        #expect(try tableOnDisk() == ["a": 99], "their change is not undone")
+        #expect(try tableOnDisk() == ["a": someoneChangedIt ? 99 : 1], "their change is not undone; otherwise it is as before")
         #expect(await journal.records().isEmpty)
-    }
-
-    @Test func aStaleEntryThatStillHoldsIsRestored() async throws {
-        try writePlist(["table": ["a": 1]])
-        let journal = makeJournal()
-        let access = PlistFileAccess(journal: journal, paths: paths, grants: nil, io: ScriptedService(.followsTheFile).io, clock: clock)
-        try await access.write([PathEdit(path: [.key("a")], value: .integer(10))], key: "table", in: plist)
-        clock.advance(by: eightDays)
-
-        let failures = await journal.replay(using: PlistJournalRestorer(access: access, grants: try makeGrants()))
-
-        #expect(failures.isEmpty)
-        #expect(try tableOnDisk() == ["a": 1])
     }
 
     @Test func aStaleEntryOfAWholeKeyIsRestoredAsBefore() async throws {

@@ -72,7 +72,7 @@ public struct AXPatience: Sendable, Equatable {
 }
 
 /// The time one read has, kept for the queries of every task that is part of it (`AXReadScope.run`): the read's deadline, and how much of it
-/// each app has lost to timeouts. A query that is made outside any scope (a probe's) has the ladder and no budget.
+/// each app has lost to timeouts. A query that is made outside any scope has the ladder and no budget.
 public final class AXReadScope: Sendable {
     @TaskLocal public static var current: AXReadScope?
 

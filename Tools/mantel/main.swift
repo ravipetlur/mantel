@@ -41,11 +41,9 @@ case .success(let invocation):
         }
     }
     let client = ControlSocketClient(path: MantelPaths.live().controlSocket)
-    // A probe can hold the menu bar for half a minute or more (its own hold, and its checks before and after), so it is given
-    // longer than the other commands to answer; a reset restarts the menu bar and waits for it to come back.
+    // A reset restarts the menu bar and waits for it to come back, so it is given longer than the other commands to answer.
     let timeout: Duration
     switch invocation.command {
-    case .probe: timeout = .seconds(180)
     case .reset: timeout = .seconds(60)
     default: timeout = .seconds(30)
     }

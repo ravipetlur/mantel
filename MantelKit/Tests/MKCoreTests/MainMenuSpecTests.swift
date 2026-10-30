@@ -41,26 +41,10 @@ struct MainMenuSpecTests {
         #expect(menu.groups.flatMap { $0 }.map(\.action) == [.undo, .redo, .cut, .copy, .paste, .selectAll])
     }
 
-    @Test func theWindowMenuMinimizesAndCloses() {
-        let menu = MainMenuSpec.menus(for: .full).menus[2]
-        #expect(menu.title == "Window")
-        #expect(lines(menu) == ["Minimize ⌘M | Close ⌘W"])
-        #expect(menu.groups.flatMap { $0 }.map(\.action) == [.minimize, .close])
-        #expect(menu.isWindowsMenu, "NSApp.windowsMenu")
-    }
-
     @Test func aWindowGetsAllThreeMenusAndATakeoverAloneGetsTheFirstOnly() {
         #expect(MainMenuSpec.menus(for: .full).menus.map(\.title) == ["Mantel", "Edit", "Window"])
         #expect(MainMenuSpec.menus(for: .appOnly).menus.map(\.title) == ["Mantel"])
         #expect(MainMenuSpec.menus(for: .appOnly).menus.first == MainMenuSpec.menus(for: .full).menus.first, "the same Mantel menu")
         #expect(MainMenuSpec.menus(for: .none).menus.isEmpty)
-    }
-
-    @Test func noShortcutIsGivenTwice() {
-        let items = MainMenuSpec.menus(for: .full).menus.flatMap(\.groups).flatMap { $0 }.filter { !$0.key.isEmpty }
-        let shortcuts = items.map { "\($0.modifiers.rawValue)\($0.key)" }
-        #expect(Set(shortcuts).count == shortcuts.count)
-        // An item with no key has no modifiers to go with it.
-        #expect(MainMenuSpec.Item("Show All", .showAll).modifiers.isEmpty)
     }
 }

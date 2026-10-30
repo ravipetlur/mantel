@@ -106,7 +106,6 @@ final class SessionWorld: Sendable {
     func setCapacity(_ capacity: Int?) { state.withLock { $0.capacity = capacity } }
     /// The system modules whose slots have a frame that is off the bar, whatever is applied (macOS parks an icon it isn't drawing).
     func setParked(_ modules: Set<String>) { state.withLock { $0.parkedModules = modules } }
-    func setStaleApps(_ apps: Set<String>, from x: CGFloat = 484) { state.withLock { $0.staleApps = apps; $0.stalePlaceX = x } }
     /// The apps' own frames are reported this far right of their icons from now on (the slots don't move): stale ones, or one app's in
     /// the place of its neighbour's.
     func setFrameShifts(_ shifts: [String: CGFloat]) { state.withLock { $0.frameShifts = shifts } }
@@ -125,10 +124,6 @@ final class SessionWorld: Sendable {
     /// The apps whose icons get no slot while an assertion is live (`SessionRig.withAllowlist` makes them concealed then).
     func setUnattached(_ apps: Set<String>) { state.withLock { $0.unattached = apps } }
     var unattachedApps: Set<String> { state.withLock { $0.unattached } }
-    /// The apps that list no item although they run: the scanner doesn't ask them.
-    func setWithoutItems(_ apps: Set<String>) { state.withLock { $0.withoutItems = apps } }
-    /// The app runs another process under its bundle ID, which lists no item (a helper): the session and the scanner see both.
-    func addHelper(of bundleID: String, pid: pid_t) { state.withLock { $0.helpers[bundleID] = pid } }
     /// The app quits and starts again: from now on the session sees it as another process.
     func relaunch(_ bundleID: String) { state.withLock { $0.relaunches[bundleID, default: 0] += 1 } }
     func setTestItemRunning(_ running: Bool) { state.withLock { $0.testItemRunning = running } }
@@ -137,14 +132,7 @@ final class SessionWorld: Sendable {
     /// Whether MenuBarAgent doesn't answer the list of its windows, though it runs: a read finds no bar, as one that timed out does.
     func setWindowsHung(_ hung: Bool) { state.withLock { $0.windowsHung = hung } }
     var windowsHung: Bool { state.withLock { $0.windowsHung } }
-    /// Whether MenuBarAgent answers the list of its windows but not what its slots say of themselves: a read has its bars and may be short of
-    /// what is there (`Inventory.agentReadCut`).
-    func setSlotsHung(_ hung: Bool) { state.withLock { $0.slotsHung = hung } }
     var slotsHung: Bool { state.withLock { $0.slotsHung } }
-    /// MenuBarAgent doesn't say where the slot of one icon is, whichever window it is read in (nil for every slot answering): a read has its
-    /// bars and one icon of the app is left without a frame (`Inventory.agentReadCut`).
-    func hangSlotFrame(ofItemTitled title: String, ofApp bundleID: String) { state.withLock { $0.hungSlotFrame = (bundleID, title) } }
-    func releaseSlotFrame() { state.withLock { $0.hungSlotFrame = nil } }
     var hungSlotFrame: (bundleID: String, title: String)? { state.withLock { $0.hungSlotFrame } }
     /// MenuBarAgent is started again (a reset, or the system doing it): the scanner sees another process by its name, and the windows it
     /// draws are the new process's (`ownerPID(of:)`, and `WorldAX.application(pid:)` for the new process ID).

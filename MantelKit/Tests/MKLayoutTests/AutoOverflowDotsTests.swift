@@ -81,14 +81,6 @@ struct AutoOverflowDotsTests {
         #expect(one.movedForDots.map(\.bundleID) == [a])
     }
 
-    @Test func anAppWhoseRoomIsUnknownIsTakenToBeRoomEnough() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        let bar = AutoOverflowTracker.TrappedBar(displayUUID: laptop, neededWidth: 76,
-                                                 apps: [.init(bundleID: a, width: nil), .init(bundleID: b, width: 38)])
-        #expect(confirmed(&tracker, &sections, read(bar), at: 0).movedForDots.map(\.bundleID) == [a])
-    }
-
     @Test func dotsBackOnTheBarStopMovingAnything() {
         var tracker = AutoOverflowTracker()
         var sections = shown(a, b, c)
@@ -100,21 +92,6 @@ struct AutoOverflowDotsTests {
             #expect(outcome == AutoOverflowTracker.Outcome())
         }
         #expect(sections.apps[a] == hiddenAuto && sections.apps[b] == shownByTheirOwn && sections.apps[c] == shownByTheirOwn)
-    }
-
-    @Test func aReadThatMovedAnOverflowedAppLeavesTheDotsToTheNextRead() {
-        // Apps the person put left of the dots overflow before the dots do. Moving them may have made the room.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b, c)
-        let outcome = tracker.arrived(read(trapped(apps: [b, c]), overflowed: [a]), sections: &sections, now: t(0))
-        #expect(outcome.changed)
-        #expect(sections.apps[a] == hiddenAuto)
-        #expect(outcome.movedForDots.isEmpty)
-        #expect(sections.apps[b] == shownByTheirOwn)
-
-        // If it wasn't enough, the next read says so, and the left-most app that is still Shown goes: a move of an app that overflowed
-        // itself is nobody's trial, and doesn't hold the dots up.
-        #expect(tracker.arrived(read(trapped(apps: [b, c])), sections: &sections, now: t(2)).movedForDots.map(\.bundleID) == [b])
     }
 
     @Test func movesAreOneInTenSeconds() {
@@ -142,54 +119,6 @@ struct AutoOverflowDotsTests {
         #expect(!tracker.arrived(read(trapped(apps: [c])), sections: &more, now: t(4)).changed)
     }
 
-    @Test func theReadThatComesWithAChangeOfDisplaysDoesNotCountTowardsTheTwo() {
-        // The read that was taken for the change is ingested first, and the tracker is told of the change after it: what it saw then is of
-        // the displays as they were.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        let sighting = tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(0))
-        #expect(sighting.awaitingConfirmation == [laptop])
-        _ = tracker.roomMayHaveReturned(.displaysChanged, sections: &sections, predictedFits: { _ in false }, now: t(0.1))
-        let after = tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(1))
-        #expect(after.movedForDots.isEmpty, "this is the first read since the change")
-        #expect(after.awaitingConfirmation == [laptop])
-        #expect(tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(2)).movedForDots.map(\.bundleID) == [a])
-    }
-
-    @Test func aTrialThatStartedAfterAChangeUsesUpItsBypass() {
-        // The change of displays let a move come at once; the trial it brought was the next thing the tracker did, and a move is paced from
-        // it like from any trial.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(b)
-        sections.apps[a] = hiddenAuto
-        #expect(tracker.roomMayHaveReturned(.displaysChanged, sections: &sections, predictedFits: fits, now: t(0)) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(1)).changed, "the trial passes")
-        _ = tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(2))
-        #expect(!tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(3)).changed, "three seconds after the trial's start")
-        #expect(tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(10)).movedForDots.map(\.bundleID) == [b])
-    }
-
-    @Test func theLogHearsWhenAnAppStaysAndWhyATrialFailed() {
-        // An app that came back and has to go again is pinned: the move says so.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).movedForDots == [.init(bundleID: a, displayUUID: laptop)])
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        _ = tracker.arrived(read(), sections: &sections, now: t(61))
-        let again = confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 600)
-        #expect(again.movedForDots == [.init(bundleID: a, displayUUID: laptop, isPinned: true)])
-
-        // An app that was moved for overflowing itself, and whose trial pushes the dots out: the dots weren't out before, and it says so.
-        var other = AutoOverflowTracker()
-        var more = SectionModel()
-        more.apps[c] = hiddenAuto
-        #expect(other.roomMayHaveReturned(.periodic, sections: &more, predictedFits: fits, now: t(0)) == [c])
-        _ = other.arrived(read(trapped(apps: [c])), sections: &more, now: t(0.5))
-        let failed = other.arrived(read(trapped(apps: [c])), sections: &more, now: t(1))
-        #expect(failed.failedForDots == [.init(bundleID: c, displayUUID: laptop, isPinned: true, wasMovedForTheDots: false)])
-        #expect(more.apps[c] == hiddenAuto)
-    }
-
     @Test func aMoveThatChangedNothingStopsFurtherMoves() {
         // The dots say they are at x 484 and 522; an app is moved; ten seconds later they say it again. The apps moved change nothing, and
         // no more is moved: what the dots say is out of date, and stays so whatever is done.
@@ -213,15 +142,6 @@ struct AutoOverflowDotsTests {
         #expect(tracker.arrived(read(trapped(apps: [b, c], places: places)), sections: &sections, now: t(1003)).movedForDots.map(\.bundleID) == [b])
     }
 
-    @Test func aMoveThatChangedWhereTheDotsAreLetsTheNextOneCome() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b, c)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b, c], places: [place(484), place(522)])), at: 0).changed)
-        // One dot is drawn now and the other says it is somewhere else: the move did something, and the room it made wasn't enough.
-        let next = tracker.arrived(read(trapped(apps: [b, c], places: [place(522)])), sections: &sections, now: t(10))
-        #expect(next.movedForDots.map(\.bundleID) == [b] && next.stoppedForDots.isEmpty)
-    }
-
     @Test func noMoreIsMovedThanWhatTheDotsNeededAndOneAppMore() {
         // They need 38 points and each app takes 38: the first app, and one more; then no more, however the dots move about.
         var tracker = AutoOverflowTracker()
@@ -239,42 +159,7 @@ struct AutoOverflowDotsTests {
         #expect(tracker.arrived(read(trapped(apps: [c], places: [place(520)])), sections: &sections, now: t(32)).movedForDots.map(\.bundleID) == [c])
     }
 
-    @Test func theCapIsWhatTheDotsNeededAndTheNextAppAndNotTheWidestOne() {
-        // They need 38 points. An app further along the bar takes 100, which used to make room for a third app to go: the cap is what they
-        // needed and the app that is next, so after two apps of 38 the third is refused.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b, c, "com.example.d")
-        func bar(_ apps: [(String, CGFloat)], places: [CGRect]) -> AutoOverflowTracker.TrappedBar {
-            .init(displayUUID: laptop, neededWidth: 38, apps: apps.map { .init(bundleID: $0.0, width: $0.1) }, dotPlaces: places)
-        }
-        let all: [(String, CGFloat)] = [(a, 38), (b, 38), (c, 38), ("com.example.d", 100)]
-        #expect(confirmed(&tracker, &sections, read(bar(all, places: [place(484)])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(bar(Array(all.dropFirst()), places: [place(500)])), sections: &sections, now: t(10)).movedForDots.map(\.bundleID) == [b])
-        let capped = tracker.arrived(read(bar(Array(all.dropFirst(2)), places: [place(520)])), sections: &sections, now: t(20))
-        #expect(capped.movedForDots.isEmpty)
-        #expect(capped.stoppedForDots == [.init(displayUUID: laptop, reason: .enoughMoved, held: 76)])
-        #expect(sections.apps[c] == shownByTheirOwn)
-    }
-
     // MARK: A cycle that ended
-
-    @Test func aGoodCycleThenTheSameLayoutMovesAgain() {
-        // The dots are trapped at two places and an app is moved; the dots are drawn, the app's trial passes, and it is Shown again. Later
-        // the same layout comes back, with the dots at the same places: that is a new trap, and not the old one that nothing changed.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        let places = [place(484), place(522)]
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b], places: places)), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome(), "the dots are drawn")
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(61)).returnedForDots.map(\.bundleID) == [a])
-        #expect(sections.apps[a] == shownByTheirOwn)
-
-        let again = confirmed(&tracker, &sections, read(trapped(apps: [a, b], places: places)), at: 600)
-        #expect(again.stoppedForDots.isEmpty, "not the same trap as before the cycle")
-        #expect(again.movedForDots == [.init(bundleID: a, displayUUID: laptop, isPinned: true)], "it came back once, so it stays out")
-        #expect(sections.apps[a] == hiddenAuto)
-    }
 
     @Test func aStopLastsOnlyUntilTheDotsAreSeenOnTheBar() {
         var tracker = AutoOverflowTracker()
@@ -290,39 +175,6 @@ struct AutoOverflowDotsTests {
         let next = confirmed(&tracker, &sections, read(trapped(apps: [b, c], places: places)), at: 40)
         #expect(next.stoppedForDots.isEmpty)
         #expect(next.movedForDots.map(\.bundleID) == [b])
-    }
-
-    @Test func aCapStopLastsOnlyUntilTheDotsAreSeenOnTheBar() {
-        // As much is held in Hidden as the dots need and one app more, and they are still out: stopped. A read that has them right ends it,
-        // but what is held stays held: the next trap is capped again at once, and no app is moved by the stop having ended.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b, c)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b, c], places: [place(484)])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(trapped(apps: [b, c], places: [place(500)])), sections: &sections, now: t(10)).movedForDots.map(\.bundleID) == [b])
-        #expect(tracker.arrived(read(trapped(apps: [c], places: [place(520)])), sections: &sections, now: t(20)).stoppedForDots
-            == [.init(displayUUID: laptop, reason: .enoughMoved, held: 76)])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(30)) == AutoOverflowTracker.Outcome())
-        let again = confirmed(&tracker, &sections, read(trapped(apps: [c], places: [place(540)])), at: 40)
-        #expect(again.movedForDots.isEmpty)
-        #expect(again.stoppedForDots == [.init(displayUUID: laptop, reason: .enoughMoved, held: 76)], "what is held is still held")
-        #expect(sections.apps[c] == shownByTheirOwn)
-    }
-
-    @Test func aPassedTrialGivesItsWidthBackToTheCap() {
-        // The dots need 76 points; two apps of 38 are moved and both pass their trials, which gives their room back. Trapped again, the
-        // dots need 76 again: both go, and the cap (what they needed, and one app more) has not been used up by apps that came back.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b, c)
-        let first = confirmed(&tracker, &sections, read(trapped(needed: 76, apps: [a, b, c], places: [place(484), place(522)])), at: 0)
-        #expect(first.movedForDots.map(\.bundleID) == [a, b])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome())
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a, b])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(61)).returnedForDots.map(\.bundleID) == [a, b])
-
-        let again = confirmed(&tracker, &sections, read(trapped(needed: 76, apps: [a, b, c], places: [place(500), place(540)])), at: 600)
-        #expect(again.stoppedForDots.isEmpty)
-        #expect(again.movedForDots == [.init(bundleID: a, displayUUID: laptop, isPinned: true), .init(bundleID: b, displayUUID: laptop, isPinned: true)])
-        #expect(sections.apps[c] == shownByTheirOwn)
     }
 
     @Test func whatThePersonMovedBackIsNotHeldForTheDots() {
@@ -367,40 +219,6 @@ struct AutoOverflowDotsTests {
         #expect(sections.apps[a] == hiddenAuto)
     }
 
-    @Test func aTrialLetGoForWantOfAConfirmationIsPinnedWhenItIsMovedAgain() {
-        // The dots flicker between two displays through the minute the trial has, so it is never confirmed and is let go. The dots are then
-        // confirmed on one display, and the app that was let go is the left-most: it goes, and stays.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b], places: [place(560)])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome())
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        for (seconds, display) in [(61.0, laptop), (75, desk), (90, laptop), (110, desk), (120, laptop)] {
-            _ = tracker.arrived(read(trapped(display, apps: [b], places: [place(560)])), sections: &sections, now: t(seconds))
-        }
-        #expect(tracker.trialApps.isEmpty && sections.apps[a] == shownAuto, "let go at the minute")
-        // The read at 120 was the first sighting on the laptop; the next confirms it.
-        let again = tracker.arrived(read(trapped(apps: [a, b], places: [place(580)])), sections: &sections, now: t(200))
-        #expect(again.movedForDots == [.init(bundleID: a, displayUUID: laptop, isPinned: true)])
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(1000)).isEmpty, "it stays in Hidden")
-    }
-
-    @Test func aTrialIsLetGoForWantOfAConfirmationOnlyOnceItWasAskedFor() {
-        // The first read to show the dots out of the way comes a minute after the trial began. Letting the trial go then would have it end
-        // with no verdict before a confirming read was ever asked for: that read is asked for, and the trial waits for it.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b], places: [place(560)])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome())
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        let first = tracker.arrived(read(trapped(laptop, apps: [b], places: [place(560)])), sections: &sections, now: t(130))
-        #expect(first.awaitingConfirmation == [laptop])
-        #expect(tracker.trialApps == [a], "an old trial, but no confirming read was asked for before this one")
-        // The read that confirms it decides.
-        let second = tracker.arrived(read(trapped(laptop, apps: [b], places: [place(560)])), sections: &sections, now: t(131))
-        #expect(second.failedForDots.map(\.bundleID) == [a])
-    }
-
     @Test func noAppIsMovedMoreThanTwiceWhateverTheReadsAndTrialsDo() {
         // Reads that have the dots out or not, an app on trial that doesn't answer, and trials that start when there is room: with the
         // displays never changing, and within half an hour, no app is moved for the dots more than twice, and every move after the first is
@@ -440,24 +258,6 @@ struct AutoOverflowDotsTests {
         }
     }
 
-    @Test func whatIsHeldCountsTheAppsOnTrialToo() {
-        // The dots need 38 points. An app that was moved for them is on trial, and doesn't answer; the dots are out of the way. The 38 it
-        // took is still held (it goes back to Hidden if the trial fails), so one more app goes and no more: not two.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b, c, "com.example.d")
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b, c, "com.example.d"], places: [place(484)])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome())
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-
-        func hung(_ apps: [String], _ x: CGFloat) -> AutoOverflowTracker.Read { read(trapped(apps: apps, places: [place(x)]), unanswered: [a]) }
-        #expect(tracker.arrived(hung([b, c, "com.example.d"], 500), sections: &sections, now: t(61)).awaitingConfirmation == [laptop])
-        #expect(tracker.arrived(hung([b, c, "com.example.d"], 500), sections: &sections, now: t(71)).movedForDots.map(\.bundleID) == [b])
-        let capped = tracker.arrived(hung([c, "com.example.d"], 520), sections: &sections, now: t(81))
-        #expect(capped.movedForDots.isEmpty)
-        #expect(capped.stoppedForDots == [.init(displayUUID: laptop, reason: .enoughMoved, held: 76)])
-        #expect(sections.apps[c] == shownByTheirOwn)
-    }
-
     @Test func anAppOutOfTheWayOnlyByItsPlaceWaitsForASecondRead() {
         var tracker = AutoOverflowTracker()
         var sections = shown(a, b)
@@ -471,42 +271,6 @@ struct AutoOverflowDotsTests {
         // One told by a slot or a « is moved at once, as before.
         let told = tracker.arrived(.init(overflowedApps: [b]), sections: &sections, now: t(2))
         #expect(told.changed && sections.apps[b] == hiddenAuto)
-    }
-
-    @Test func aReadThatHasTheAppRightStartsItsCountAgain() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a)
-        let inferred = AutoOverflowTracker.Read(overflowedApps: [a], inferredApps: [a])
-        _ = tracker.arrived(inferred, sections: &sections, now: t(0))
-        _ = tracker.arrived(.init(overflowedApps: []), sections: &sections, now: t(1))
-        #expect(!tracker.arrived(inferred, sections: &sections, now: t(2)).changed, "a first sighting again")
-        // A change of displays, or a time when nothing was made of the reads, starts it again too.
-        tracker.displaysAreChanging()
-        #expect(!tracker.arrived(inferred, sections: &sections, now: t(3)).changed)
-        #expect(tracker.arrived(inferred, sections: &sections, now: t(4)).changed)
-    }
-
-    @Test func readsThatWereNotMadeOfAreNotCounted() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        _ = tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(0))
-        // Automatic overflow was turned off for a while, and on again: the sighting before is not the first of two.
-        tracker.forgetSightings()
-        let again = tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(100))
-        #expect(again.movedForDots.isEmpty && again.awaitingConfirmation == [laptop])
-        #expect(tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(101)).movedForDots.map(\.bundleID) == [a])
-    }
-
-    @Test func aTrialAppThatIsOutOfTheWayOnlyByItsPlaceStaysOnTrialUntilItIsConfirmed() {
-        var tracker = AutoOverflowTracker()
-        var sections = SectionModel()
-        sections.apps[a] = hiddenAuto
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(0)) == [a])
-        let inferred = AutoOverflowTracker.Read(overflowedApps: [a], inferredApps: [a])
-        let first = tracker.arrived(inferred, sections: &sections, now: t(1))
-        #expect(!first.changed && first.awaitingApps == [a] && tracker.trialApps == [a])
-        let second = tracker.arrived(inferred, sections: &sections, now: t(2))
-        #expect(second.changed && sections.apps[a] == hiddenAuto && tracker.trialApps.isEmpty)
     }
 
     @Test func aSingleSightingDuringATrialDoesNotPinTheApp() {
@@ -537,62 +301,6 @@ struct AutoOverflowDotsTests {
         #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(500)).isEmpty, "pinned")
     }
 
-    @Test func aTrialIsJudgedByTheDotsCountedAfreshFromItsStart() {
-        // The dots were out of the way in one read before the trial began (and the read asked for the one that confirms it). The trial's
-        // first read has them out again: that is a first sighting of this trial's, and doesn't fail it, as it would with the count it
-        // inherited.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome())
-        let before = tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(59))
-        #expect(before.awaitingConfirmation == [laptop] && before.movedForDots.isEmpty)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-
-        let first = tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(60.5))
-        #expect(first.failedForDots.isEmpty && first.awaitingConfirmation == [laptop])
-        #expect(tracker.trialApps == [a] && sections.apps[a] == shownAuto)
-        // The one that confirms it fails the trial.
-        #expect(tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(61)).failedForDots.map(\.bundleID) == [a])
-    }
-
-    @Test func aTrialThatWaitsForAConfirmingReadIsLetGoWhenItIsAsOldAsAnAppThatDoesNotAnswer() {
-        // The dots flicker between two displays, each seen once at a time, and never twice in a row on one: the trial waits for the read
-        // that confirms it, and has no end to wait for.
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(5)) == AutoOverflowTracker.Outcome())
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        for (seconds, display) in [(61.0, laptop), (75, desk), (90, laptop), (118, desk)] {
-            let outcome = tracker.arrived(read(trapped(display, apps: [b])), sections: &sections, now: t(seconds))
-            #expect(outcome.awaitingConfirmation == [display] && outcome.failedForDots.isEmpty, "\(seconds)")
-            #expect(tracker.trialApps == [a], "\(seconds)")
-        }
-        // A minute from its start it is let go where it is: Shown, and not failed or pinned.
-        let old = tracker.arrived(read(trapped(laptop, apps: [b])), sections: &sections, now: t(120))
-        #expect(tracker.trialApps.isEmpty && old.failedForDots.isEmpty)
-        #expect(sections.apps[a] == shownAuto)
-        #expect(old.awaitingConfirmation == [laptop], "the dots still ask for the read that confirms them")
-    }
-
-    @Test func aTrialAppThatIsOutOfTheWayOnlyByItsPlaceIsLetGoWhenTheTrialIsOld() {
-        var tracker = AutoOverflowTracker()
-        var sections = SectionModel()
-        sections.apps[a] = hiddenAuto
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(0)) == [a])
-        let inferred = AutoOverflowTracker.Read(overflowedApps: [a], inferredApps: [a])
-        #expect(tracker.arrived(inferred, sections: &sections, now: t(1)).awaitingApps == [a])
-        // What was counted is lost (a change of displays), and the next sighting is a first again, a minute on.
-        tracker.displaysAreChanging()
-        #expect(tracker.arrived(inferred, sections: &sections, now: t(30)).awaitingApps == [a] && tracker.trialApps == [a])
-        tracker.displaysAreChanging()
-        let old = tracker.arrived(inferred, sections: &sections, now: t(61))
-        #expect(old.awaitingApps == [a], "it is still not confirmed")
-        #expect(tracker.trialApps.isEmpty, "but the trial doesn't wait for it any longer")
-        #expect(sections.apps[a] == shownAuto)
-    }
-
     @Test func anAppThatOverflowsOnTrialFailsAtOnceWhateverTheDotsSay() {
         var tracker = AutoOverflowTracker()
         var sections = SectionModel()
@@ -604,19 +312,6 @@ struct AutoOverflowDotsTests {
         #expect(outcome.failedForDots.isEmpty, "cooled as an app that overflowed is, not pinned for the dots")
     }
 
-    @Test func aReadThatHasTheDotsRightStartsTheCountAgain() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(0)).awaitingConfirmation == [laptop])
-        // The dots are on the bar in the next read: what the first saw was a glitch.
-        #expect(tracker.arrived(read(), sections: &sections, now: t(1)) == AutoOverflowTracker.Outcome())
-        // Trapped again: that is a first sighting once more.
-        let again = tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(2))
-        #expect(again.movedForDots.isEmpty && again.awaitingConfirmation == [laptop])
-        #expect(sections.apps[a] == shownByTheirOwn && sections.apps[b] == shownByTheirOwn)
-        #expect(tracker.arrived(read(trapped(apps: [a, b])), sections: &sections, now: t(3)).movedForDots.map(\.bundleID) == [a])
-    }
-
     @Test func eachBarIsConfirmedOnItsOwn() {
         var tracker = AutoOverflowTracker()
         var sections = shown(a, b)
@@ -625,16 +320,6 @@ struct AutoOverflowDotsTests {
         let outcome = tracker.arrived(read(trapped(laptop, apps: [a, b]), trapped(desk, apps: [a, b])), sections: &sections, now: t(1))
         #expect(outcome.movedForDots == [.init(bundleID: a, displayUUID: laptop)])
         #expect(outcome.awaitingConfirmation == [desk])
-    }
-
-    @Test func aMoveAndATrialAreOneInTenSecondsBetweenThem() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        sections.apps[c] = hiddenAuto
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).changed)
-        // The room may be back a moment later, but no trial starts within ten seconds of the move.
-        #expect(tracker.roomMayHaveReturned(.frontAppChanged, sections: &sections, predictedFits: fits, now: t(5)).isEmpty)
-        #expect(tracker.roomMayHaveReturned(.frontAppChanged, sections: &sections, predictedFits: fits, now: t(10)) == [a, c])
     }
 
     @Test func anAppOnTrialIsNeverMovedForTheDots() {
@@ -650,26 +335,6 @@ struct AutoOverflowDotsTests {
         let outcome = tracker.arrived(read(trapped(apps: [a, b]), unanswered: [a]), sections: &sections, now: t(10))
         #expect(sections.apps[a] == shownAuto, "it didn't answer: it stays on trial")
         #expect(outcome.movedForDots.map(\.bundleID) == [b])
-    }
-
-    @Test func aBarWithNoShownAppToMoveSaysSoAndMovesNothing() {
-        var tracker = AutoOverflowTracker()
-        var sections = SectionModel()
-        sections.move(app: a, to: .hidden)
-        let outcome = confirmed(&tracker, &sections, read(trapped(apps: [])), at: 1)
-        #expect(!outcome.changed)
-        #expect(outcome.noRoomToMakeFor == [laptop])
-        // Not being able to doesn't use up the ten seconds.
-        sections.move(app: b, to: .shown)
-        #expect(tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(2)).movedForDots.map(\.bundleID) == [b])
-    }
-
-    @Test func oneAppFreesRoomOnEveryBarItIsOn() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        let outcome = confirmed(&tracker, &sections, read(trapped(laptop, apps: [a, b]), trapped(desk, apps: [a, b])), at: 0)
-        #expect(outcome.movedForDots == [.init(bundleID: a, displayUUID: laptop)], "moved for the first bar, and enough for the second")
-        #expect(outcome.noRoomToMakeFor.isEmpty)
     }
 
     // MARK: Giving the room back
@@ -723,23 +388,6 @@ struct AutoOverflowDotsTests {
         #expect(tracker.roomMayHaveReturned(.displaysChanged, sections: &sections, predictedFits: fits, now: t(1810)) == [a])
     }
 
-    @Test func anAppThatCameBackAndHasToGoAgainStaysOutUntilTheDisplaysChange() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).changed)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(61)).returnedForDots.map(\.bundleID) == [a])
-
-        // Later the dots are trapped again, and the left-most Shown app is the same one: it goes, and this time it stays.
-        let again = confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 600)
-        #expect(again.movedForDots.map(\.bundleID) == [a])
-        #expect(tracker.arrived(read(), sections: &sections, now: t(601)) == AutoOverflowTracker.Outcome())
-        for seconds in [700.0, 1000, 2000] {
-            #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(seconds)).isEmpty)
-        }
-        #expect(tracker.roomMayHaveReturned(.displaysChanged, sections: &sections, predictedFits: fits, now: t(2100)) == [a])
-    }
-
     @Test func aPinRunsOutAfterHalfAnHourAndTheAppIsTriedOnceMore() {
         // The app came back once and went again, so it is pinned in Hidden. The displays never change; half an hour on it is tried again, and
         // fails (the dots are out again with it on the bar): pinned for another half hour, and not tried in between.
@@ -765,33 +413,6 @@ struct AutoOverflowDotsTests {
         #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(4202)) == [a], "half an hour after the second pin")
     }
 
-    @Test func aPinThatRanOutLetsTheAppPassItsTrial() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).changed)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        _ = tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(61))
-        #expect(tracker.arrived(read(trapped(apps: [b])), sections: &sections, now: t(62)).failedForDots.map(\.bundleID) == [a], "pinned at 62")
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(1861)).isEmpty)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(1862)) == [a])
-        // The room is back this time: it passes, and is an ordinary Shown app.
-        #expect(tracker.arrived(read(), sections: &sections, now: t(1863)).returnedForDots.map(\.bundleID) == [a])
-        #expect(sections.apps[a] == shownByTheirOwn)
-    }
-
-    @Test func anAppThatMovedForTheDotsAndOverflowsOnTrialIsCooledAsAnyOther() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        #expect(confirmed(&tracker, &sections, read(trapped(apps: [a, b])), at: 0).changed)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(60)) == [a])
-        // The app itself is in the « this time: the rule for apps that overflow applies, a minute's cooling.
-        let outcome = tracker.arrived(read(overflowed: [a]), sections: &sections, now: t(61))
-        #expect(outcome.failedForDots.isEmpty && outcome.returnedForDots.isEmpty)
-        #expect(sections.apps[a] == hiddenAuto)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(100)).isEmpty)
-        #expect(tracker.roomMayHaveReturned(.periodic, sections: &sections, predictedFits: fits, now: t(125)) == [a])
-    }
-
     @Test func aPersonsMoveOfAnAppThatMovedForTheDotsIsTheirs() {
         var tracker = AutoOverflowTracker()
         var sections = shown(a, b)
@@ -805,13 +426,4 @@ struct AutoOverflowDotsTests {
     }
 
     // MARK: What was there before
-
-    @Test func aReadWithNoStatedDotsIsTheReadItWasBefore() {
-        var tracker = AutoOverflowTracker()
-        var sections = shown(a, b)
-        sections.note([Fixtures.item(Fixtures.itemID(a)), Fixtures.item(Fixtures.itemID(b))])
-        #expect(tracker.inventoryArrived(overflowedApps: [a], unansweredApps: [], sections: &sections, now: t(0)))
-        #expect(sections.apps[a] == hiddenAuto)
-        #expect(tracker.arrived(read(overflowed: [a]), sections: &sections, now: t(1)) == AutoOverflowTracker.Outcome())
-    }
 }

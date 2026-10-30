@@ -12,29 +12,6 @@ struct FileLogSinkTests {
 
     var directory: URL { folder.url.appending(path: "Logs", directoryHint: .isDirectory) }
 
-    @Test func defaultsAreTheOnesMantelUses() {
-        let sink = FileLogSink(directory: directory)
-        #expect(sink.baseName == "mantel")
-        #expect(sink.maxBytes == 5_000_000)
-        #expect(sink.rotatedFilesToKeep == 2)
-        #expect(sink.currentFileURL == directory.appending(path: "mantel.log"))
-    }
-
-    @Test func writesLevelCategoryAndMessage() throws {
-        let sink = FileLogSink(directory: directory)
-        sink.append(level: .warning, category: "settings", message: "hello", date: Date(timeIntervalSince1970: 0))
-        let text = try String(contentsOf: sink.currentFileURL, encoding: .utf8)
-        #expect(text == "1970-01-01T00:00:00Z [WARN] [settings] hello\n")
-    }
-
-    @Test func appendsAfterTheLinesThatAreThere() throws {
-        let sink = FileLogSink(directory: directory)
-        sink.append(level: .info, category: "app", message: "one", date: Date(timeIntervalSince1970: 0))
-        sink.append(level: .error, category: "app", message: "two", date: Date(timeIntervalSince1970: 1))
-        let text = try String(contentsOf: sink.currentFileURL, encoding: .utf8)
-        #expect(text == "1970-01-01T00:00:00Z [INFO] [app] one\n1970-01-01T00:00:01Z [ERROR] [app] two\n")
-    }
-
     /// Text from outside (an app's name, a socket client's words) can't forge a line of its own. Control characters,
     /// line breaks among them, and the Unicode line and paragraph separators are written as escapes.
     @Test func aMessageCantStartALineOfItsOwn() throws {

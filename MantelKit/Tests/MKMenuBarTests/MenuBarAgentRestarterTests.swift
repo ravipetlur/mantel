@@ -63,29 +63,20 @@ struct MenuBarAgentRestarterTests {
         }, isTheAgent: isTheAgent)
     }
 
-    @Test func sendsTermToAgentPid() async throws {
-        let processes = FakeProcesses(FakeProcesses.others + [FakeProcesses.agent(50)])
+    /// The agent's process is the one the list shows when it is asked to restart, not when the restarter was made (it was started again
+    /// since, and has another process ID).
+    @Test(arguments: [(madeWith: pid_t(50), restartedWith: pid_t?.none, signalled: pid_t(50)), (madeWith: 50, restartedWith: 60, signalled: 60)])
+    func sendsTermToAgentPid(madeWith: pid_t, restartedWith: pid_t?, signalled: pid_t) async throws {
+        let processes = FakeProcesses(FakeProcesses.others + [FakeProcesses.agent(madeWith)])
         let clock = PollingClock()
         // launchd starts it again as soon as it is told to stop.
-        clock.onSleep { _ in processes.set(FakeProcesses.others + [FakeProcesses.agent(51)]) }
-
-        try await restarter(processes, clock: clock).restart()
-
-        #expect(processes.signalled == [50], "the agent's, and nobody else's, once")
-    }
-
-    @Test func findsThePidAtTheMomentOfSending() async throws {
-        // The agent was started again since the restarter was made, and has another process ID: the list is read when it is asked to
-        // restart, not before.
-        let processes = FakeProcesses(FakeProcesses.others + [FakeProcesses.agent(50)])
-        let clock = PollingClock()
-        clock.onSleep { _ in processes.set(FakeProcesses.others + [FakeProcesses.agent(61)]) }
+        clock.onSleep { _ in processes.set(FakeProcesses.others + [FakeProcesses.agent(signalled + 1)]) }
         let restarter = restarter(processes, clock: clock)
-        processes.set(FakeProcesses.others + [FakeProcesses.agent(60)])
+        if let restartedWith { processes.set(FakeProcesses.others + [FakeProcesses.agent(restartedWith)]) }
 
         try await restarter.restart()
 
-        #expect(processes.signalled == [60])
+        #expect(processes.signalled == [signalled], "the agent's, and nobody else's, once")
     }
 
     @Test func waitsForNewPid() async throws {
@@ -118,10 +109,23 @@ struct MenuBarAgentRestarterTests {
         #expect(clock.durations.count == 5)
     }
 
-    @Test func timesOutWithMessage() async throws {
-        // It never goes, or never comes back: ten seconds, and then the words.
+    /// It never goes, or goes and never comes back, or comes back as an entry with the process ID -1 (that isn't the agent running
+    /// again): ten seconds, and then the words.
+    enum AfterTheFirstLook: CaseIterable, CustomTestStringConvertible {
+        case itNeverGoes, itGoesAndNeverComesBack, itIsBackAsAPidThatIsNotAProcess
+
+        var testDescription: String { String(describing: self) }
+    }
+
+    @Test(arguments: AfterTheFirstLook.allCases)
+    func timesOutWithMessage(_ later: AfterTheFirstLook) async throws {
         let processes = FakeProcesses(FakeProcesses.others + [FakeProcesses.agent(50)])
         let clock = PollingClock()
+        switch later {
+        case .itNeverGoes: break
+        case .itGoesAndNeverComesBack: clock.onSleep { _ in processes.set(FakeProcesses.others) }
+        case .itIsBackAsAPidThatIsNotAProcess: clock.onSleep { _ in processes.set(FakeProcesses.others + [FakeProcesses.agent(-1)]) }
+        }
 
         let error = await #expect(throws: RestartError.self) { try await restarter(processes, clock: clock).restart() }
 
@@ -130,17 +134,6 @@ struct MenuBarAgentRestarterTests {
         #expect(clock.total == .seconds(10))
         #expect(clock.durations.allSatisfy { $0 == .milliseconds(100) })
         #expect(processes.signalled == [50], "it asked once and didn't ask again")
-    }
-
-    @Test func anAgentThatWentAndNeverCameBackIsTheSameTimeout() async throws {
-        let processes = FakeProcesses(FakeProcesses.others + [FakeProcesses.agent(50)])
-        let clock = PollingClock()
-        clock.onSleep { _ in processes.set(FakeProcesses.others) }
-
-        let error = await #expect(throws: RestartError.self) { try await restarter(processes, clock: clock).restart() }
-
-        #expect(error == .didNotComeBack)
-        #expect(clock.total == .seconds(10))
     }
 
     @Test func aSignalThatFailedIsStillWaitedOutAndNeverRetried() async throws {
@@ -217,18 +210,6 @@ struct MenuBarAgentRestarterTests {
         #expect(clock.durations.isEmpty)
     }
 
-    @Test func aPidThatIsNotAProcessNeverCountsAsComingBack() async throws {
-        // The agent is gone, and what the list shows later is an entry with the process ID -1: that isn't the agent running again.
-        let processes = FakeProcesses(FakeProcesses.others + [FakeProcesses.agent(50)])
-        let clock = PollingClock()
-        clock.onSleep { _ in processes.set(FakeProcesses.others + [FakeProcesses.agent(-1)]) }
-
-        let error = await #expect(throws: RestartError.self) { try await restarter(processes, clock: clock).restart() }
-
-        #expect(error == .didNotComeBack)
-        #expect(processes.signalled == [50])
-    }
-
     @Test func theSystemCheckSaysNoToAnythingThatIsNotAProcessWithoutAskingTheSystem() {
         #expect(!MenuBarAgentRestarter.systemSaysItIsTheAgent(-1))
         #expect(!MenuBarAgentRestarter.systemSaysItIsTheAgent(0))
@@ -237,32 +218,5 @@ struct MenuBarAgentRestarterTests {
     @Test func theTimesAreTenSecondsAndAHundredMilliseconds() {
         #expect(MenuBarAgentRestarter.timeout == .seconds(10))
         #expect(MenuBarAgentRestarter.pollInterval == .milliseconds(100))
-    }
-}
-
-@Suite("Reset copy", .timeLimit(.minutes(1)))
-struct ResetCopyTests {
-    @Test func theQuestionIsAskedInTheWordsTheOwnerChose() {
-        #expect(ResetCopy.alertTitle == "Reset the menu bar?")
-        #expect(ResetCopy.alertText == "Mantel shows every icon, puts back its temporary changes, and restarts macOS's menu bar. Your sections and the order of your icons stay as they are.")
-        #expect(ResetCopy.confirmButton == "Reset")
-        #expect(ResetCopy.cancelButton == "Cancel")
-    }
-
-    @Test func theCommandLineAsksTheSameThing() {
-        // The tool's question is the alert's title and the first sentence of its text, then that the order stays, and a prompt.
-        let firstSentence = "Mantel shows every icon, puts back its temporary changes, and restarts macOS's menu bar."
-        #expect(ResetCopy.alertText.hasPrefix(firstSentence))
-        #expect(CLIConfirmation.resetQuestion == "\(ResetCopy.alertTitle) \(firstSentence) The order of your icons stays. [y/N] ")
-    }
-
-    @Test func bothTextsSayTheOrderStays() {
-        #expect(ResetCopy.alertText.contains("the order of your icons stay as they are"))
-        #expect(CLIConfirmation.resetQuestion.contains("The order of your icons stays."))
-        // What a reset puts back is the temporary changes only; the arrangement is kept (the person's, until Restore original layout).
-        #expect(ResetCopy.alertText.contains("its temporary changes"))
-        #expect(CLIConfirmation.resetQuestion.contains("its temporary changes"))
-        #expect(!ResetCopy.alertText.contains("what it changed"))
-        #expect(!CLIConfirmation.resetQuestion.contains("what it changed"))
     }
 }

@@ -124,47 +124,33 @@ struct RevealApplyPolicyTests {
         #expect(!policy.shouldApply(.collapsed, machineIsIn: .hiddenShown))
     }
 
-    @Test func aCorrectionIsStaleOnceAChangeHasPassedItsSecondLookSince() {
-        var policy = RevealApplyPolicy()
-        let stamp = policy.passedSecondLook()
-        #expect(!policy.isStale(stamp: stamp))
-        policy.passedSecondLook()
-        #expect(policy.isStale(stamp: stamp))
+    /// A correction (the stamp of the change it belongs to) is stale, and the collapse after an icon click is skipped, once anything has
+    /// come since the stamp: a newer change that passed its second look, or a reset. The newest change's own correction is not stale.
+    enum SinceTheStamp: CaseIterable, CustomTestStringConvertible {
+        case nothing
+        /// The stamp is the second change's, and an earlier one passed before it.
+        case theStampIsTheNewestOfTwoChanges
+        /// The click made room for seconds; meanwhile the person asked for an inline reveal (or Focus Mode).
+        case aNewerRevealHasPassed
+        case aReset
+
+        var testDescription: String { String(describing: self) }
     }
 
-    @Test func theNewestChangesCorrectionIsNotStale() {
+    @Test(arguments: SinceTheStamp.allCases)
+    func aCorrectionIsStaleOnceAChangeOrAResetHasComeSinceItsStamp(_ since: SinceTheStamp) {
         var policy = RevealApplyPolicy()
-        policy.passedSecondLook()
+        if since == .theStampIsTheNewestOfTwoChanges { policy.passedSecondLook() }
         let stamp = policy.passedSecondLook()
-        #expect(!policy.isStale(stamp: stamp))
-    }
-
-    @Test func aResetMakesACorrectionStale() {
-        var policy = RevealApplyPolicy()
-        let stamp = policy.passedSecondLook()
-        policy.forget()
-        #expect(policy.isStale(stamp: stamp))
-    }
-
-    @Test func theCollapseAfterAnIconClickHappensWhenNothingHasChangedSinceTheCellWasClicked() {
-        var policy = RevealApplyPolicy()
-        let stamp = policy.passedSecondLook()
-        #expect(policy.collapsesAfterIconClick(stamp: stamp))
-    }
-
-    @Test func theCollapseAfterAnIconClickIsSkippedOnceANewerRevealHasPassed() {
-        var policy = RevealApplyPolicy()
-        let stamp = policy.passedSecondLook()
-        // The click made room for seconds; meanwhile the person asked for an inline reveal (or Focus Mode).
-        policy.passedSecondLook()
-        #expect(!policy.collapsesAfterIconClick(stamp: stamp))
-    }
-
-    @Test func theCollapseAfterAnIconClickIsSkippedAfterAReset() {
-        var policy = RevealApplyPolicy()
-        let stamp = policy.passedSecondLook()
-        policy.forget()
-        #expect(!policy.collapsesAfterIconClick(stamp: stamp))
+        #expect(!policy.isStale(stamp: stamp), "at first")
+        switch since {
+        case .nothing, .theStampIsTheNewestOfTwoChanges: break
+        case .aNewerRevealHasPassed: policy.passedSecondLook()
+        case .aReset: policy.forget()
+        }
+        let stale = since == .aNewerRevealHasPassed || since == .aReset
+        #expect(policy.isStale(stamp: stamp) == stale)
+        #expect(policy.collapsesAfterIconClick(stamp: stamp) == !stale)
     }
 
     @Test func aChangeThatIsSkippedLeavesCorrectionsAlone() {

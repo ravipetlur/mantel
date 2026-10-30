@@ -658,7 +658,7 @@ struct ApprovalsEngineTests {
         let desk = try await ApprovalsDesk.make()
         func decision() async -> ReplayNowDecision {
             let empty = await desk.journal.records().isEmpty
-            return ReplayNowPolicy.decide(journalEmpty: empty, probeChangingMenuBar: false, engineHoldsJournal: await desk.engine.holdsJournalEntries)
+            return ReplayNowPolicy.decide(journalEmpty: empty, engineHoldsJournal: await desk.engine.holdsJournalEntries)
         }
         #expect(await decision() == .refused("Nothing is waiting to be put back."))
 
@@ -719,7 +719,6 @@ struct ApprovalsEngineTests {
         <plist version="1.0"><array><dict><key>menuItemLocations</key><array><dict><key>bundle</key><dict><key>_0</key><string>com.example.one</string></dict></dict></array><key>isAllowed</key><true/></dict><dict><key>isAllowed</key><true/><key>menuItemLocations</key><array><dict><key>bundle</key><dict><key>_0</key><string>com.example.two</string></dict></dict></array></dict></array></plist>
         """.utf8)
         let codec = ApprovalsCodec()
-        #expect(try NestedPlistCodec.reencoded(xml) != xml)
         let off = try codec.setting(.bool(false), at: ApprovalsCodec.flagPath(for: "com.example.one"), in: xml)
         func decoded(_ data: Data) throws -> [NSDictionary] {
             try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [NSDictionary])

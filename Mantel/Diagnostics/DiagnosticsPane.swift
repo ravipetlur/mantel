@@ -5,17 +5,13 @@ import MKLayout
 import MKMenuBar
 import SwiftUI
 
-/// What the Diagnostics pane shows and does. Nothing in it is saved: the platform test switch is the coordinator's, which is off at
-/// every launch, and the probes that change the menu bar run only while it is on.
+/// What the Diagnostics pane shows and does. Nothing in it is saved.
 @MainActor
 @Observable
 final class DiagnosticsModel {
     private let coordinator: AppCoordinator
 
     private(set) var rows: [DiagnosticsRow] = []
-    private(set) var reports: [ProbeName: ProbeReport] = [:]
-    /// The probe that is running now.
-    private(set) var running: ProbeName?
     /// What the last button said happened: "Copied", or how the replay ended.
     private(set) var message: String?
     private(set) var isReplaying = false
@@ -23,16 +19,10 @@ final class DiagnosticsModel {
     private(set) var menuBarBusy = false
     private var isConfirmingReset = false
     private(set) var menuBarMessage: String?
-    /// Whether the probes that change the menu bar can be run: the coordinator's switch, which the toggle sets. Off at every launch,
-    /// and not kept.
-    var platformTestEnabled: Bool {
-        didSet { coordinator.platformTestEnabled = platformTestEnabled }
-    }
 
     init(coordinator: AppCoordinator) {
         self.coordinator = coordinator
         identities = AppIdentities(runningApps: coordinator.runningApps)
-        platformTestEnabled = coordinator.platformTestEnabled
     }
 
     /// What the menu bar session last said, from the model the menu bar controller keeps: nil until it has read the menu bar. The pane
@@ -73,31 +63,13 @@ final class DiagnosticsModel {
         if fresh.map(\.check) != rows.map(\.check) { rows = fresh }
     }
 
-    func refreshReports() async {
-        reports = await coordinator.probes.latestReports()
-    }
-
-    /// Runs a probe. `options` are the ones the person has to give it (the screen-share probe's phase); without any, the test item
-    /// is the only app a probe touches.
-    func run(_ name: ProbeName, options: [String: String] = [:]) async {
-        guard running == nil else { return }
-        running = name
-        message = nil
-        let report = await coordinator.runProbe(name, options: ProbeOptions(options))
-        running = nil
-        if let first = report?.errors.first { message = "\(name.rawValue): \(first)" }
-        await refreshReports()
-        await refresh()
-    }
-
     func replayNow() async {
         guard !isReplaying else { return }
         // Set before anything is awaited: a second click that comes while the decision is being made finds it set, and does
         // nothing, so two replays never run.
         isReplaying = true
-        // Putting back what a platform test or a hiding method is using would undo it from under them: the reason is the message.
+        // Putting back what a hiding method is using would undo it from under it: the reason is the message.
         let decision = await ReplayNowPolicy.decide(journalEmpty: coordinator.journalIsEmpty,
-                                                    probeChangingMenuBar: coordinator.probes.isChangingMenuBar,
                                                     engineHoldsJournal: coordinator.engineHoldsJournal)
         if case .refused(let reason) = decision {
             message = reason
@@ -153,9 +125,8 @@ final class DiagnosticsModel {
     }
 
     func copy() async {
-        await refreshReports()
         await refresh()
-        let text = DiagnosticsReport.text(rows: reportRows, state: menuBarState, probes: reports)
+        let text = DiagnosticsReport.text(rows: reportRows, state: menuBarState)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         message = "Copied."
@@ -171,7 +142,7 @@ final class DiagnosticsModel {
     }
 }
 
-/// The checks, "Copy diagnostics", and the platform test: a button for each probe.
+/// The checks, the engine status, and "Copy diagnostics".
 struct DiagnosticsPane: View {
     @State private var model: DiagnosticsModel
 
@@ -223,16 +194,9 @@ struct DiagnosticsPane: View {
                         .lineLimit(2, reservesSpace: true)
                 }
             }
-            Section("Platform test") {
-                SettingsToggle("Enable platform test (changes your menu bar briefly)", isOn: $model.platformTestEnabled)
-                ForEach(ProbeName.allCases, id: \.self) { name in
-                    ProbeRow(name: name, report: model.reports[name], model: model)
-                }
-            }
         }
         .formStyle(.grouped)
         .task {
-            await model.refreshReports()
             // Picks up what changes while the pane is open: a permission switched in System Settings, a journal entry restored.
             while !Task.isCancelled {
                 await model.refresh()
@@ -308,50 +272,6 @@ private struct CheckRow: View {
         case .warning: .orange
         case .problem: .red
         case .unknown: .secondary
-        }
-    }
-}
-
-private struct ProbeRow: View {
-    let name: ProbeName
-    let report: ProbeReport?
-    let model: DiagnosticsModel
-
-    private var changesMenuBar: Bool { ProbeRunner.changesState(name) }
-    /// A probe that changes the menu bar waits for the switch; the others can always be run.
-    private var isAvailable: Bool { model.running == nil && (!changesMenuBar || model.platformTestEnabled) }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(name.rawValue).font(.body.monospaced())
-                if let report {
-                    Text(ProbeSummary.line(for: report)).font(.caption).foregroundStyle(.secondary)
-                    if let error = report.errors.first {
-                        Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
-                    }
-                } else {
-                    Text("Not run yet").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            if model.running == name {
-                ProgressView().controlSize(.small)
-            } else if changesMenuBar {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                    .help("Changes your menu bar briefly").accessibilityLabel("Changes your menu bar briefly")
-            }
-            if name == .screenShare {
-                // The probe compares what is in the menu bar before sharing the screen with what is there during it, so it is
-                // run once for each.
-                Button("Run before sharing") { Task { await model.run(name, options: ["phase": "before"]) } }
-                    .disabled(!isAvailable)
-                Button("Run while sharing") { Task { await model.run(name, options: ["phase": "during"]) } }
-                    .disabled(!isAvailable)
-            } else {
-                Button("Run") { Task { await model.run(name) } }
-                    .disabled(!isAvailable)
-            }
         }
     }
 }

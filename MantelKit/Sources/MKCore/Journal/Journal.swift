@@ -17,9 +17,9 @@ public enum JournalError: Error, Equatable, LocalizedError {
     /// restore removes the record as soon as it is done. `key` is the journal's key for the place. The caller must not make its change;
     /// it can try again when the restore has finished.
     case restoreInProgress(key: String)
-    /// A platform test's change to a whole key (a temporary record of the whole key) is still in the journal, and Mantel's own change
-    /// to a place inside it (a `.kept` record) would be put back with it. `key` is the journal's key for the whole key. The
-    /// test's change is put back first (Replay now).
+    /// A temporary record of a whole key, left in the journal by a platform test of an earlier version, is still there, and Mantel's own
+    /// change to a place inside it (a `.kept` record) would be put back with it. `key` is the journal's key for the whole key. The
+    /// leftover is put back first (Replay now).
     case leftoverWholeKey(key: String)
 
     public var errorDescription: String? {
@@ -103,7 +103,7 @@ extension JournalRestoring {
 ///   its age). `replay` restores `.untilQuit` records unless told otherwise. A `.kept` write to a place that has an `.untilQuit`
 ///   record makes that record `.kept` and keeps its original; an `.untilQuit` write to a place Mantel keeps is refused
 ///   (`JournalError.keptByMantel`). A whole key and the places inside it follow the same rule: a `.kept` place under a temporary
-///   whole-key record (a platform test's leftover) is refused (`leftoverWholeKey`), and so is a temporary whole-key record over a key
+///   whole-key record (one an earlier version's platform test left) is refused (`leftoverWholeKey`), and so is a temporary whole-key record over a key
 ///   that holds kept places (`keptByMantel`), because putting the whole key back would put them back too.
 ///
 /// The file is `{ "records": [ … ] }`.
@@ -326,7 +326,7 @@ public actor Journal {
     /// result.
     ///
     /// Only the keys being restored are held: `record` throws `JournalError.restoreInProgress` for those until this is over, and goes
-    /// on for every other key (the approvals engine, a platform test, the next kept write elsewhere). A record whose place is gone
+    /// on for every other key (the approvals engine, the next kept write elsewhere). A record whose place is gone
     /// counts as restored, as in a replay; one that is cancelled goes no further, as in a replay.
     public func restoreKept(where matching: @Sendable (JournalRecord) -> Bool,
                             using restorer: any JournalRestoring) async -> [ReplayFailure] {

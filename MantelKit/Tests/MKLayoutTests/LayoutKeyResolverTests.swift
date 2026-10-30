@@ -219,13 +219,33 @@ struct LayoutKeyResolverTests {
         #expect(resolution.unresolved == [item])
     }
 
-    @Test func anAppWithAnItemHiddenIsUnresolved() {
-        // Three keys, two listed items: the third is hidden (or new), and which key it has can't be told.
+    enum Unresolved: CaseIterable, CustomTestStringConvertible {
+        /// Three keys, two listed items: the third is hidden (or new), and which key it has can't be told.
+        case anItemIsHidden
+        case theAppIsContested
+        case twoKeysAreAtOneDistance
+        /// The tokens have one nameless item, the inventory lists a second: one key can't be for both.
+        case theTokensAndTheInventoryDisagreeOnTheCount
+
+        var testDescription: String { String(describing: self) }
+    }
+
+    @Test(arguments: Unresolved.allCases)
+    func anAppWhoseKeysCantBeToldApartIsUnresolved(_ scenario: Unresolved) {
         let first = F.nameless("a", 0), second = F.nameless("a", 1)
-        let inventory = F.slotted([F.drawn(first, x: 900), F.drawn(second, x: 830)])
-        let resolution = byRank([.item(first), .item(second)], table: [appKey0: 70, appKey1: 140, appKey2: 210], inventory: inventory)
+        let inventory = F.slotted([F.drawn(first, x: 900), F.drawn(second, x: 830)],
+                                  contested: scenario == .theAppIsContested ? ["com.example.a"] : [])
+        let tokens: [LayoutToken] = scenario == .theTokensAndTheInventoryDisagreeOnTheCount ? [.item(first)] : [.item(first), .item(second)]
+        let table: [String: Double]
+        switch scenario {
+        case .anItemIsHidden: table = [appKey0: 70, appKey1: 140, appKey2: 210]
+        case .theAppIsContested: table = [appKey0: 70, appKey1: 140]
+        case .twoKeysAreAtOneDistance: table = [appKey0: 70, appKey1: 70]
+        case .theTokensAndTheInventoryDisagreeOnTheCount: table = [appKey0: 70]
+        }
+        let resolution = byRank(tokens, table: table, inventory: inventory)
         #expect(resolution.keys.isEmpty)
-        #expect(resolution.unresolved == [first, second])
+        #expect(resolution.unresolved == tokens.compactMap { if case .item(let id) = $0 { id } else { nil } })
     }
 
     @Test func severalItemsAreMatchedByRankNotByIndex() {
@@ -273,14 +293,6 @@ struct LayoutKeyResolverTests {
         #expect(byRank([.item(first), .item(second)], table: table, inventory: inventory).keys.count == 2)
     }
 
-    @Test func aContestedAppIsUnresolved() {
-        let first = F.nameless("a", 0), second = F.nameless("a", 1)
-        let inventory = F.slotted([F.drawn(first, x: 900), F.drawn(second, x: 830)], contested: ["com.example.a"])
-        let resolution = byRank([.item(first), .item(second)], table: [appKey0: 70, appKey1: 140], inventory: inventory)
-        #expect(resolution.keys.isEmpty)
-        #expect(resolution.unresolved == [first, second])
-    }
-
     @Test func itemsOnTwoBarsAreUnresolved() {
         let first = F.nameless("a", 0), second = F.nameless("a", 1)
         let other = "display-2"
@@ -301,14 +313,6 @@ struct LayoutKeyResolverTests {
     private func drawnOn(_ id: ItemID, x: CGFloat, and otherX: CGFloat, _ other: String) -> MenuBarItem {
         let frames = [Fixtures.display: CGRect(x: x, y: 0, width: 30, height: 24), other: CGRect(x: otherX, y: 0, width: 30, height: 24)]
         return MenuBarItem(id: id, ownerBundleID: id.bundleID, appName: nil, label: nil, frames: frames, overflowedOn: [], isMantel: false)
-    }
-
-    @Test func twoKeysAtOneDistanceAreUnresolved() {
-        let first = F.nameless("a", 0), second = F.nameless("a", 1)
-        let inventory = F.slotted([F.drawn(first, x: 900), F.drawn(second, x: 830)])
-        let resolution = byRank([.item(first), .item(second)], table: [appKey0: 70, appKey1: 70], inventory: inventory)
-        #expect(resolution.keys.isEmpty)
-        #expect(resolution.unresolved == [first, second])
     }
 
     @Test func aFrameInNoSlotIsNotDrawn() {
@@ -417,15 +421,6 @@ struct LayoutKeyResolverTests {
         let kept = byRank([.item(left), .item(right)], table: table, inventory: inventory)
         let distances = [left, right].compactMap { id in kept.keys[.item(id)].flatMap { table[$0] } }
         #expect(distances == [90, 40])
-    }
-
-    @Test func theCountOfNamelessItemsIsTheUnionOfTheTokensAndTheInventory() {
-        // The tokens have one nameless item, the inventory lists a second: one key can't be for both.
-        let first = F.nameless("a", 0), second = F.nameless("a", 1)
-        let inventory = F.slotted([F.drawn(first, x: 900), F.drawn(second, x: 830)])
-        let resolution = byRank([.item(first)], table: [appKey0: 70], inventory: inventory)
-        #expect(resolution.keys.isEmpty)
-        #expect(resolution.unresolved == [first])
     }
 
     // MARK: Among the modules that stay

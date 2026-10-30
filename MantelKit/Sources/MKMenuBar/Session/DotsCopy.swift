@@ -30,6 +30,11 @@ public enum DotsCopy {
 
     /// The menu the right click opens, in the order it is shown. (Menu items use title case.)
     public static let settingsItem = "Settings…"
+    /// Only in a build that can update itself, next to Settings…. It reads "Update to X.Y.Z…" while a release is known.
+    public static let checkForUpdatesItem = "Check for Updates…"
+    public static func updateItem(to version: String) -> String {
+        "Update to \(version)…"
+    }
     public static let commandBarItem = "Command Bar…"
     public static let focusModeItem = "Focus Mode"
     public static let refreshItem = "Refresh Menu Bar"

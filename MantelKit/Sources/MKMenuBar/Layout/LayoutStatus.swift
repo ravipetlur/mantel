@@ -104,7 +104,6 @@ public struct LayoutStatus: Sendable, Equatable {
 public enum LayoutWords {
     public static let broken = "macOS keeps the menu bar's order somewhere Mantel doesn't know on this version, so reordering is off. ⌘-drag icons instead."
     public static let needsGrant = "Grant access to the layout file in Settings › Layout first."
-    public static let heldForAProbe = "A platform test is changing the menu bar. Mantel writes the order when it finishes."
     public static let heldForTheSpacer = "The wide spacer is hiding icons, so Mantel waits to change the order."
     /// The toast when macOS puts the order back twice.
     public static let notAccepted = "macOS didn't accept the new order"
@@ -114,14 +113,12 @@ public enum LayoutWords {
     static let notAcceptedLogLine = "macOS didn't accept the new order after two tries"
 }
 
-/// Whether a write of the table has to wait, and why: a platform test is changing the menu bar, or the wide spacer is hiding icons (its
-/// own items aren't in the arrangement).
+/// Whether a write of the table has to wait, and why: the wide spacer is hiding icons (its own items aren't in the arrangement).
 public enum LayoutHold {
     /// Every reason there is, as `reason(…)` says it: what a write that was held fails with.
-    public static let reasons = [LayoutWords.heldForAProbe, LayoutWords.heldForTheSpacer]
+    public static let reasons = [LayoutWords.heldForTheSpacer]
 
-    public static func reason(probeChangingMenuBar: Bool, engine: HidingEngineKind?) -> String? {
-        if probeChangingMenuBar { return LayoutWords.heldForAProbe }
+    public static func reason(engine: HidingEngineKind?) -> String? {
         if engine == .spacer { return LayoutWords.heldForTheSpacer }
         return nil
     }

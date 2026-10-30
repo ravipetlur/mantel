@@ -59,6 +59,16 @@ final class ActivationPolicyOwner: NSObject {
         ).show()
     }
 
+    /// Shows one of Mantel's windows in front of the others without taking the keys from the app the person is using: Mantel becomes an
+    /// ordinary app, as for `show`, and the window is ordered front, but Mantel isn't activated and the window isn't made key. For a window
+    /// nobody asked for (an update the daily check found), which must not take what the person is typing in another app. The window is
+    /// still shown the usual way when the person turns to it (a click in it, or Mantel's Dock icon).
+    func showWithoutActivating(_ window: NSWindow, as kind: ActivationPolicyReasons.Window) {
+        windows.add(window)
+        windowOpened(kind)
+        window.orderFrontRegardless()
+    }
+
     /// A window of Mantel's was closed. When it was the last reason to be an ordinary app and the person was using it, the next app gets the
     /// focus, as it would after the window of any app that isn't the last one it has.
     func windowClosed(_ window: ActivationPolicyReasons.Window) {

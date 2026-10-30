@@ -24,7 +24,7 @@ public struct CheckRead: Sendable {
 ///
 /// A write runs on a task of the applier's own, so that whoever asks never waits for it (`MenuBarController`'s event queue among them):
 /// - **`request`** keeps the newest inputs and returns. The task then waits one second for more (newest inputs win), waits while the
-///   layout is held (`held`: a probe is changing the menu bar, or the wide spacer is in force; the inputs are kept, not dropped), reads the
+///   layout is held (`held`: the wide spacer is in force; the inputs are kept, not dropped), reads the
 ///   table, works the arrangement out from the inputs and the table (`systemStart` and the rules are the applier's), finds the keys,
 ///   puts every token it writes inside the gap the apps it doesn't write leave (`OwnItemPlacer`), and writes what differs.
 /// - **Then the bar settles.** From the write until verification ends, `phase` says the layout is pending and settling, so that nothing
@@ -146,7 +146,7 @@ public actor LayoutApplier {
         return makeStatus()
     }
 
-    /// Whether the table can be written (held while a probe or the wide spacer has the menu bar) and whether Mantel has anything in it.
+    /// Whether the table can be written (held while the wide spacer has the menu bar) and whether Mantel has anything in it.
     private func refreshWhatTheWriterSays() async {
         availability = await currentAvailability()
         hasKept = await writer.hasKeptChanges
@@ -218,7 +218,7 @@ public actor LayoutApplier {
                 availability = .broken(text)
                 failure = .broken(text)
             case .held(let text):
-                // A platform test's leftover blocks kept writes until it is put back: nothing is written, and the inputs are not kept.
+                // A leftover of an earlier version's platform test blocks kept writes until it is put back: nothing is written, and the inputs are not kept.
                 availability = .held(text)
             }
         } catch {

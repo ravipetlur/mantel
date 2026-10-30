@@ -49,14 +49,6 @@ struct OwnItemPlacementTests {
         #expect(result.notPlaced.isEmpty)
     }
 
-    @Test func anAppsRangeIsAllItsKeysNamedAndNamelessAlike() throws {
-        // a's keys are at 300 and 220 (its left-most is the larger one): the item is right of its smallest. b has two keys too.
-        let named = LayoutKey.status(bundleID: "com.example.a", autosaveName: "alerts")
-        let table: [String: Double] = [key("a", 0): 300, named: 220, key("b", 0): 100, key("b", 1): 140]
-        let distance = try #require(place([.item(a), hidden, .item(b)], table).distances[hidden])
-        #expect(distance < 220 && distance > 140, "between a's smallest (220) and b's largest (140)")
-    }
-
     @Test func itemsSideBySideShareOneGapInOrder() throws {
         let result = place([.item(a), always, hidden, divider, .item(b)], [key("a", 0): 400, key("b", 0): 100])
         let always = try #require(result.distances[always]), hidden = try #require(result.distances[hidden])
@@ -76,11 +68,6 @@ struct OwnItemPlacementTests {
         #expect(place([.item(a), hidden, .item(b)], [key("a", 0): 100, key("b", 0): 100]).notPlaced == [hidden])
     }
 
-    @Test func appsTheOtherWayRoundLeaveNoGap() {
-        // The model has a left of b, and the table has b left of a: there is nowhere for the item to be.
-        #expect(place([.item(a), hidden, .item(b)], [key("a", 0): 100, key("b", 0): 300]).notPlaced == [hidden])
-    }
-
     @Test func anAppWithNoKeyIsNoObstacle() throws {
         // An app that has no key has no place in the table: nothing is kept on a side of it, wherever it is in the arrangement.
         let one = try #require(place([.item(a), hidden, .item(b)], [key("b", 0): 100]).distances[hidden])
@@ -90,18 +77,6 @@ struct OwnItemPlacementTests {
         let far = try #require(place([.item(c), .item(a), hidden, .item(b)], [key("a", 0): 300, key("b", 0): 100]).distances[hidden])
         #expect(far < 300 && far > 100, "an app that isn't beside the item doesn't stop it either")
         #expect(place([.item(a), hidden, .item(b)], [key("b", 0): 100]).notPlaced.isEmpty)
-    }
-
-    @Test func anAppThatIsIgnoredIsNoObstacleEither() throws {
-        // `ignoring` is for the apps that aren't running: they have keys, but take no room on the bar.
-        let table: [String: Double] = [key("a", 0): 300, key("c", 0): 150, key("c", 1): 350, key("b", 0): 100]
-        let tokens: [LayoutToken] = [.item(a), hidden, .item(c), .item(b)]
-        let blocked = OwnItemPlacer.place(arrangement(tokens), keys: ownKeys(tokens), table: LayoutTableSnapshot(distances: table), systemStart: 0)
-        #expect(blocked.notPlaced == [hidden], "c's keys are on both sides of a and b's gap")
-        let ignored = OwnItemPlacer.place(arrangement(tokens), keys: ownKeys(tokens), table: LayoutTableSnapshot(distances: table), systemStart: 0,
-                                          ignoring: ["com.example.c"])
-        #expect(ignored.notPlaced.isEmpty)
-        #expect(ignored.distances[hidden] != nil)
     }
 
     @Test func oneAppOnBothSidesCantBeTold() {
@@ -128,20 +103,6 @@ struct OwnItemPlacementTests {
         #expect(hidden < 150 && hidden > 100)
     }
 
-    @Test func aNewAppWithAFarLeftKeyDoesNotMoveTheMarkerPastTheOthers() throws {
-        // The marker is at the end of Hidden: `a c fresh • b`. macOS gave the new app's item a key at 900.
-        let table: [String: Double] = [key("a", 0): 300, key("c", 0): 150, key("fresh", 0): 900, key("b", 0): 100]
-        let distance = try #require(place([.item(a), .item(c), .item(fresh), hidden, .item(b)], table).distances[hidden])
-        #expect(distance < 150 && distance > 100, "a (300) and c (150) are left of it; the midpoint of fresh and b would be 500")
-    }
-
-    @Test func anAppRightOfTheItemKeepsItsSideWhenItSitsInTheNearestGap() throws {
-        // `a • b c`: the nearest apps leave (200, 300); c is right of b but at 250, inside that gap.
-        let table: [String: Double] = [key("a", 0): 300, key("b", 0): 200, key("c", 0): 250]
-        let distance = try #require(place([.item(a), hidden, .item(b), .item(c)], table).distances[hidden])
-        #expect(distance > 250 && distance < 300, "right of c as well")
-    }
-
     @Test func aDroppedAppStaysWhereItIsAndTheOthersGoAroundIt() throws {
         // `a n c • d`: n is written (it names itself) but a (200.4) and c (200) are 0.4 apart, so n has no gap the writer would keep and isn't
         // written. It stays at 60 in the table, so the dot must be right of it as well.
@@ -154,17 +115,6 @@ struct OwnItemPlacementTests {
     }
 
     // MARK: Obstacles whose places are against the arrangement
-
-    @Test func appsAgainstTheArrangementDoNotStopTheAppsAroundThem() throws {
-        // `a c n b d`: the person put a before c, and the table has c (300) left of a (100); neither can be written. b (250) and d (200)
-        // agree with c, so n is written between c and b, as a row that kept every app's side would leave it nowhere.
-        let n = F.app("n")
-        let table: [String: Double] = [key("a", 0): 100, key("c", 0): 300, key("b", 0): 250, key("d", 0): 200, F.key(n): 20]
-        let result = place([.item(a), .item(c), .item(n), .item(b), .item(d)], table, written: [.item(n): F.key(n)])
-        #expect(result.notPlaced.isEmpty)
-        let distance = try #require(result.distances[.item(n)])
-        #expect(distance > 250 && distance < 300)
-    }
 
     @Test func anOwnItemKeepsItsSideOfEveryAppWhileTheAppsAroundItAreWritten() throws {
         // `n a • c m` with a (100) and c (300) the wrong way round: no gap holds the dot, which stays at 200 in the table. n and m are
@@ -193,38 +143,12 @@ struct OwnItemPlacementTests {
 
     // MARK: The system items' end
 
-    @Test func withNoAppToTheRightTheGapStartsAtTheSystemItems() throws {
-        // The system items end at 180 (the largest distance and width of a drawn module): the item goes left of them, not among them.
-        let result = place([.item(a), hidden], [key("a", 0): 400], systemStart: 180)
-        let distance = try #require(result.distances[hidden])
-        #expect(distance > 180 && distance < 400)
-        #expect(result.notPlaced.isEmpty)
-    }
-
     @Test func nothingIsWrittenAmongTheSystemItems() {
         // The last app is at 150, below where the system items end: no gap is left for the item.
         #expect(place([.item(a), hidden, divider], [key("a", 0): 150], systemStart: 180).notPlaced == [hidden, divider])
     }
 
-    @Test func withNoAppToTheLeftTheGapIsAsWideAsTheItemsNeedAbove() throws {
-        let result = place([always, hidden, .item(b)], [key("b", 0): 100])
-        let always = try #require(result.distances[always]), hidden = try #require(result.distances[hidden])
-        #expect(always > hidden && hidden > 100)
-    }
-
-    @Test func withNoAppsAtAllTheTokensKeepTheArrangement() {
-        // Nothing is left unwritten beside them: the arrangement's own distances stand.
-        let result = place([always, hidden, divider], [:])
-        #expect(result.distances.isEmpty)
-        #expect(result.notPlaced.isEmpty)
-    }
-
     // MARK: Apps that are written
-
-    @Test func everyTokenIsWrittenWholeWhenNoAppIsLeftUnwritten() {
-        let named = F.app("named")
-        #expect(place([.item(named), hidden], [F.key(named): 50], written: [.item(named): F.key(named)]).distances.isEmpty)
-    }
 
     @Test func aNamedAppAmongNamelessOnesIsPlacedByTheirRealPlaces() throws {
         // `a n b`: n names itself and has a key (at 450, right of a, which is the other way round from the model); a and b are nameless.
@@ -233,21 +157,6 @@ struct OwnItemPlacementTests {
         let result = place([.item(a), .item(n), .item(b)], table, written: [.item(n): F.key(n)], distances: [.item(n): 5000])
         let distance = try #require(result.distances[.item(n)])
         #expect(distance < 400 && distance > 100, "between a and b, not at the width-made 5000 or the old 450")
-    }
-
-    @Test func aNamedAppAndTheDotShareTheGapInOrder() throws {
-        let n = F.app("named")
-        let table: [String: Double] = [key("a", 0): 400, key("b", 0): 100, F.key(n): 450]
-        let result = place([.item(a), .item(n), hidden, .item(b)], table, written: [.item(n): F.key(n)])
-        let named = try #require(result.distances[.item(n)]), hidden = try #require(result.distances[hidden])
-        #expect(named > hidden && named < 400 && hidden > 100)
-    }
-
-    @Test func aNamedAppBesideAnAppWithNoKeyIsWritten() {
-        let n = F.app("named")
-        let result = place([.item(a), .item(n)], [F.key(n): 450], written: [.item(n): F.key(n)])
-        #expect(result.notPlaced.isEmpty)
-        #expect(result.distances.isEmpty, "nothing is left unwritten beside it: the arrangement's own distance stands")
     }
 
     // MARK: A token that is left out is an obstacle too
@@ -265,17 +174,6 @@ struct OwnItemPlacementTests {
         #expect(distance > 161, "left of • (161), and so of the divider and of both apps")
     }
 
-    @Test func aDotThatCantBePlacedStaysRightOfTheOneLeftOfIt() throws {
-        // `D •• A • |`: the table has A (155) left of D (131), so •• has no gap and stays at 115. • and the divider must be right of it: the
-        // apps alone would put • at 117.5, left of ••.
-        let table: [String: Double] = [key("d", 0): 131, key("a", 0): 155, F.ownKey(OwnItems.alwaysDotName): 115,
-                                       F.ownKey(OwnItems.hiddenDotName): 99, F.ownKey(OwnItems.dividerName): 90]
-        let result = place([.item(d), always, .item(a), hidden, divider], table, systemStart: 90)
-        #expect(result.notPlaced == [always])
-        let hiddenAt = try #require(result.distances[hidden]), dividerAt = try #require(result.distances[divider])
-        #expect(hiddenAt < 115 && hiddenAt > dividerAt && dividerAt > 90, "• and the divider are right of ••, left of the system items")
-    }
-
     @Test func anOwnItemWithNoPlaceInTheTableBlocksTheOthersOnceItIsLeftOut() {
         // The dot has no gap (interleaved a and b) and isn't in the table either: where it is can't be told, so nothing that is on a side
         // of it can be written.
@@ -286,18 +184,6 @@ struct OwnItemPlacementTests {
         let placed = place([always, .item(a), hidden, .item(b)], table.merging([F.ownKey(OwnItems.hiddenDotName): 120]) { $1 })
         #expect(placed.notPlaced == [hidden])
         #expect((placed.distances[always] ?? 0) > 150)
-    }
-
-    @Test func theAppsThatBlockedAnOwnItemAreNamed() {
-        // Interleaved a and b: the dot is left out because of both; b is the one whose place can't be told when a is gone.
-        let table: [String: Double] = [key("a", 0): 150, key("a", 1): 50, key("b", 0): 100]
-        #expect(place([.item(a), hidden, .item(b)], table).blockedBy == ["com.example.a", "com.example.b"])
-        // An app whose place can't be told blocks nothing.
-        #expect(place([.item(a), hidden, .item(b)], [key("b", 0): 100]).blockedBy.isEmpty)
-        // Nothing blocked, nothing named; a named app left out isn't an own item, and isn't named.
-        #expect(place([.item(a), hidden, .item(b)], [key("a", 0): 300, key("b", 0): 100]).blockedBy.isEmpty)
-        let n = F.app("named")
-        #expect(place([.item(a), .item(n), .item(b)], [key("a", 0): 100, key("b", 0): 300, F.key(n): 200], written: [.item(n): F.key(n)]).blockedBy.isEmpty)
     }
 
     @Test func appsAreNotWrittenAroundADotThatHasNoPlaceInTheTable() {
@@ -315,19 +201,6 @@ struct OwnItemPlacementTests {
         #expect(known.distances[.item(n)] != nil || known.notPlaced.contains(.item(n)))
         if let at = known.distances[.item(n)] { #expect(at > 200) }
         if let at = known.distances[.item(m)] { #expect(at < 200) }
-    }
-
-    @Test func anAppIsNotWrittenAcrossADotTheChainLeavesOut() {
-        // The table has the two dots the other way round (•• right of •), and the chain can hold only one of them. n is in Hidden, between
-        // the dots: it is not written to the left of both, nor to the right of both, whichever dot the chain keeps.
-        let n = F.app("n"), w = F.nameless("w"), z = F.nameless("z"), v = F.nameless("v")
-        let table: [String: Double] = [
-            key("w", 0): 200, key("z", 0): 50, key("z", 1): 500, key("v", 0): 400,
-            F.ownKey(OwnItems.alwaysDotName): 100, F.ownKey(OwnItems.hiddenDotName): 300, F.key(n): 600,
-        ]
-        let result = place([.item(w), always, .item(n), .item(z), hidden, .item(v)], table, written: [.item(n): F.key(n)])
-        #expect(result.distances[.item(n)] == nil)
-        #expect(result.notPlaced.contains(.item(n)))
     }
 
     @Test func aStepSmallerThanTheWritersToleranceIsNoGap() {

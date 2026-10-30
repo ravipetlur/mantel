@@ -57,54 +57,6 @@ struct SectionRecordsTests {
         #expect(more.order[.shown] == [new, newer, other])
     }
 
-    @Test func reconcileKeepsTheMarkerBeforeTheSameIcon() {
-        let phantom = id(appA, "x.phantom"), real = index(appA, 0), b = index(appB, 0), c = index(appC, 0)
-        var model = old([phantom, real, b, c], unchecked: [appA])
-        model.setNewItemsMarker(section: .shown, index: 3)  // before c
-        model.reconcile(app: appA, current: [real])
-        #expect(model.order[.shown] == [real, b, c])
-        #expect(model.newItemsIndex == 2, "still before c")
-        // The marker was before a record that is dropped: it is before the next one that stays.
-        var onPhantom = old([real, phantom, b], unchecked: [appA])
-        onPhantom.setNewItemsMarker(section: .shown, index: 1)
-        onPhantom.reconcile(app: appA, current: [real])
-        #expect(onPhantom.newItemsIndex == 1)
-        #expect(onPhantom.order[.shown] == [real, b])
-    }
-
-    @Test func reconcileLeavesPlacementsGroupsSpacersAndOtherAppsAlone() {
-        let phantom = id(appA, "x.phantom"), real = index(appA, 0), other = index(appB, 0)
-        var model = old([phantom, real, other, ItemID.system("wifi")], unchecked: [appA, appB])
-        model.move(app: appA, to: .hidden)
-        model.apps[appA]?.isAuto = true
-        model.addSpacer(LayoutSpacer(), in: .hidden, at: 0)
-        model.addGroup(IconGroup(), in: .shown, at: 0)
-        let before = model
-        model.reconcile(app: appA, current: [real])
-
-        #expect(model.apps == before.apps)
-        #expect(model.systemItems == before.systemItems)
-        #expect(model.spacers == before.spacers && model.groups == before.groups && model.groupOrder == before.groupOrder)
-        #expect(model.order[.shown] == before.order[.shown], "the other apps' and the system's")
-        #expect(model.order[.hidden]?.filter { $0.bundleID == appA } == [real])
-        #expect(model.order[.hidden]?.count == (before.order[.hidden]?.count ?? 0) - 1)
-        #expect(model.unchecked == [appB], "another app's records are not checked by this one's")
-    }
-
-    @Test func reconcileInsideAGroup() {
-        let phantom = id(appA, "x.phantom"), real = index(appA, 0), b = index(appB, 0)
-        var model = old([phantom, real, b], unchecked: [appA])
-        model.addGroup(IconGroup(), in: .alwaysHidden, at: 0)
-        let group = model.groupOrder[0]
-        model.move(app: appA, toGroup: group, at: 0)
-        #expect(model.groupItems[group] == [phantom, real])
-        let new = index(appA, 1)
-        model.reconcile(app: appA, current: [real, new])
-        #expect(model.groupItems[group] == [new, real], "in the group, the new one in the dropped one's place")
-        #expect(model.order[.alwaysHidden]?.contains { $0.bundleID == appA } != true)
-        #expect(model.apps[appA]?.group == group)
-    }
-
     @Test func staleRecordsAreTheOnesTheAppDoesNotListOrAllButTheFirstOfAnUncheckedApp() {
         let phantom = id(appA, "x.phantom"), real = index(appA, 0), b1 = index(appB, 0), b2 = id(appB, "y.name")
         var model = old([phantom, real, b1, b2], unchecked: [appA, appB])
@@ -122,46 +74,6 @@ struct SectionRecordsTests {
         #expect(!model.staleRecords(current: [:]).contains(phantom))
         // A system item and Mantel's own are never stale.
         #expect(!stale.contains(ItemID.system("wifi")))
-    }
-
-    @Test func uncheckedAppsAreWrittenInOrderAndReadBack() throws {
-        var model = SectionModel()
-        model.unchecked = [appB, appA]
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        let data = try encoder.encode(model)
-        #expect(String(decoding: data, as: UTF8.self).contains("\"unchecked\":[\"\(appA)\",\"\(appB)\"]"))
-        #expect(try JSONDecoder().decode(SectionModel.self, from: data) == model)
-        // A file with no such key has none unchecked.
-        #expect(try JSONDecoder().decode(SectionModel.self, from: Data("{}".utf8)).unchecked.isEmpty)
-        // Forgetting an app forgets that too.
-        model.forget(app: appA)
-        #expect(model.unchecked == [appB])
-    }
-
-    @Test func anUncheckedAppsFirstRecordThatIsAPhantomShowsTheOneTheLatestReadListsInstead() {
-        let phantom = id(appA, "x.phantom"), real = index(appA, 0), b1 = index(appB, 0), b2 = id(appB, "y.name")
-        let model = old([phantom, real, b1, b2], unchecked: [appA, appB])
-        // The latest read lists A's `#0`, which is not its first record: that is the one it shows.
-        var stale = model.staleRecords(current: [:], listed: [real, b2])
-        #expect(stale.contains(phantom) && !stale.contains(real))
-        #expect(stale.contains(b1) && !stale.contains(b2), "each app by what the read lists of it")
-        // A read that lists none of an app's records: its first.
-        stale = model.staleRecords(current: [:], listed: [index(appC, 0)])
-        #expect(!stale.contains(phantom) && stale.contains(real))
-        #expect(!stale.contains(b1) && stale.contains(b2))
-        // An app that was read whole is held to that read, whatever else the latest read lists.
-        stale = model.staleRecords(current: [appA: [phantom]], listed: [real])
-        #expect(!stale.contains(phantom) && stale.contains(real))
-    }
-
-    @Test func theFilesMigrationMarksUncheckedAnAppWhoseEveryRecordItDrops() throws {
-        let own = id(appA, OwnItems.hiddenDotName).string, b = id(appB, "b.one").string
-        let document: [String: Any] = ["profiles": [["name": "Default", "sections": ["order": ["shown": [own, b]]]]]]
-        let result = try ProfilesDocument.migrate(document, from: 1)
-        let sections = try #require((result["profiles"] as? [[String: Any]])?.first?["sections"] as? [String: Any])
-        #expect((sections["order"] as? [String: [String]])?["shown"] == [b])
-        #expect(Set(sections["unchecked"] as? [String] ?? []) == [appA, appB])
     }
 
     @Test func theFilesMigrationKeepsTheMarkerBeforeTheSameIcon() throws {

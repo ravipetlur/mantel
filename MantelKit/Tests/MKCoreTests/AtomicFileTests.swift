@@ -55,15 +55,22 @@ struct AtomicFileTests {
 
     // MARK: Mantel's own files
 
-    @Test func aFileOfMantelsOwnIsPrivateToTheOwnerWhateverTheOldOneHad() throws {
+    // MARK: Mantel's own files, and a file that isn't Mantel's
+
+    /// A file of Mantel's own is private to the owner whatever the old one had; a file of the system's keeps its mode.
+    @Test(arguments: [
+        (AtomicFile.Ownership.mantel, 0o644, 0o600),
+        (.system, 0o644, 0o644), (.system, 0o640, 0o640), (.system, 0o600, 0o600), (.system, 0o664, 0o664),
+    ])
+    func aFileKeepsItsModeIfItIsTheSystemsAndIsPrivateToTheOwnerIfItIsMantels(ownership: AtomicFile.Ownership, original: Int, expected: Int) throws {
         try Data("old".utf8).write(to: target)
-        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+        try FileManager.default.setAttributes([.posixPermissions: original], ofItemAtPath: target.path)
 
-        try AtomicFile.write(Data("new".utf8), to: target)
+        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, ownership: ownership)
 
-        #expect(try mode(of: target) == 0o600)
+        #expect(try mode(of: target) == expected)
         #expect(try Data(contentsOf: target) == Data("new".utf8))
-        #expect(try names() == ["target.plist"])
+        #expect(try names() == ["target.plist"], "no temporary file is left")
     }
 
     @Test func aNewFileIsPrivateToTheOwnerWhoseverItIs() throws {
@@ -75,18 +82,6 @@ struct AtomicFileTests {
     }
 
     // MARK: A file that isn't Mantel's
-
-    @Test(arguments: [0o644, 0o640, 0o600, 0o664])
-    func aFileOfTheSystemsKeepsItsMode(mode original: Int) throws {
-        try Data("old".utf8).write(to: target)
-        try FileManager.default.setAttributes([.posixPermissions: original], ofItemAtPath: target.path)
-
-        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, ownership: .system)
-
-        #expect(try mode(of: target) == original)
-        #expect(try Data(contentsOf: target) == Data("new".utf8))
-        #expect(try names() == ["target.plist"], "no temporary file is left")
-    }
 
     @Test func aFileOfTheSystemsKeepsItsExtendedAttributes() throws {
         try Data("old".utf8).write(to: target)
@@ -185,22 +180,14 @@ struct AtomicFileTests {
         #expect(try Data(contentsOf: target) == Data("new".utf8))
     }
 
-    @Test func aNewFileIsSyncedTheSameWay() throws {
+    @Test(arguments: [(synchronize: true, synced: ["file", "folder"]), (synchronize: false, synced: [String]())])
+    func aNewFileIsSyncedTheSameWayAndNothingIsSyncedUnlessAskedFor(synchronize: Bool, synced: [String]) throws {
         let events = Events()
         let syncing = FileSyncing(
             syncFile: { _ in events.add("file") },
             syncFolder: { _ in events.add("folder") })
-        try AtomicFile.write(Data("first".utf8), to: target, synchronize: true, syncing: syncing)
-        #expect(events.all == ["file", "folder"])
-    }
-
-    @Test func nothingIsSyncedUnlessAskedFor() throws {
-        let events = Events()
-        let syncing = FileSyncing(
-            syncFile: { _ in events.add("file") },
-            syncFolder: { _ in events.add("folder") })
-        try AtomicFile.write(Data("x".utf8), to: target, syncing: syncing)
-        #expect(events.all.isEmpty)
+        try AtomicFile.write(Data("first".utf8), to: target, synchronize: synchronize, syncing: syncing)
+        #expect(events.all == synced)
     }
 
     @Test func aSyncThatFailsLeavesTheOldFileAndNoTemporaryOne() throws {
@@ -235,14 +222,16 @@ struct AtomicFileTests {
         #expect(try names() == ["target.plist"], "and no temporary file is left")
     }
 
-    @Test func fullSyncFailureFallsBackToFsync() throws {
-        // A drive or a file system that refuses F_FULLFSYNC gets a plain fsync: the write succeeds, and the file is the new one.
+    /// A drive or a file system that refuses F_FULLFSYNC gets a plain fsync: the write succeeds, and the file is the new one. One that
+    /// takes the full sync is not followed by an fsync.
+    @Test(arguments: [(fullSync: Int32(-1), synced: ["full", "fsync"]), (fullSync: Int32(0), synced: ["full"])])
+    func aFullSyncThatFailsFallsBackToFsyncAndOneThatWorksIsNotFollowedByIt(fullSync: Int32, synced: [String]) throws {
         try Data("old".utf8).write(to: target)
         let events = Events()
         let syncing = FileSyncing.systemCalls(
             fullSync: { _ in
                 events.add("full")
-                return -1
+                return fullSync
             },
             fallbackSync: { _ in
                 events.add("fsync")
@@ -251,24 +240,9 @@ struct AtomicFileTests {
 
         try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, syncing: syncing)
 
-        #expect(events.all == ["full", "fsync"], "the full sync was tried first, and the plain one made when it failed")
+        #expect(events.all == synced, "the full sync was tried first, and the plain one made only when it failed")
         #expect(try Data(contentsOf: target) == Data("new".utf8))
         #expect(try names() == ["target.plist"])
-    }
-
-    @Test func aFullSyncThatWorksIsNotFollowedByAnFsync() throws {
-        let events = Events()
-        let syncing = FileSyncing.systemCalls(
-            fullSync: { _ in
-                events.add("full")
-                return 0
-            },
-            fallbackSync: { _ in
-                events.add("fsync")
-                return 0
-            })
-        try AtomicFile.write(Data("new".utf8), to: target, synchronize: true, syncing: syncing)
-        #expect(events.all == ["full"])
     }
 
     @Test func whenNeitherSyncWorksTheWriteFailsAndTheOldFileStays() throws {

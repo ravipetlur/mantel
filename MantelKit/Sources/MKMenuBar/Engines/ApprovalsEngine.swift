@@ -22,7 +22,7 @@ public actor ApprovalsEngine: HidingEngine {
     /// What the person is told when the file hasn't been chosen (as a clause: it ends a sentence of Settings' or a status's).
     static let permissionText = "Choose the “Allow in the Menu Bar” file in Settings › Permissions"
     static let changedText = "macOS changed the “Allow in the Menu Bar” list, so Mantel can't edit it"
-    /// What the person is told while a platform test's change to this very list is still in the journal.
+    /// What the person is told while a change to this very list, left by a platform test of an earlier version, is still in the journal.
     static let leftoverText = "A platform test's change to this list hasn't been put back yet. Use Replay now in Settings › Diagnostics."
     static let turnedOffNeedsFile = "Choose the “Allow in the Menu Bar” file in Permissions to see this list."
     static let turnedOffCantRead = "Mantel can't read this list: macOS changed how it keeps it."
@@ -120,7 +120,7 @@ public actor ApprovalsEngine: HidingEngine {
     }
 
     /// The records of changes to this same list that aren't this engine's: the whole key (`plistKey`), or a place in it with another
-    /// codec (the platform test's). While one is there, a record for a place of this engine would be left out of the journal (the
+    /// codec (one an earlier version's platform test left). While one is there, a record for a place of this engine would be left out of the journal (the
     /// whole key is recorded already), so its change would be made with nothing to put it back.
     private func foreignRecords() async -> [JournalRecord] {
         await journal.records().filter { record in

@@ -10,7 +10,7 @@ import Foundation
 ///   pointing at the file; such a bookmark is made anew. A file that is gone or has moved is no longer the one that was
 ///   granted: the grant is removed and the caller is told, with `.stale`.
 /// - **Security scope.** Whether a security-scoped bookmark of these containers works for an app that isn't sandboxed,
-///   and survives a relaunch, is measured on the real machine in the platform test, which is why the options are given
+///   and survives a relaunch, is measured on the real machine, which is why the options are given
 ///   to `init`. If the system won't make a security-scoped bookmark, a plain one is made (and logged).
 ///
 /// `grants.json` is read once, at first use. As with every settings document, it is saved a moment after the change
@@ -236,8 +236,7 @@ public actor FileGrantStore {
 
     /// The URL a bookmark leads to, with whether the system calls the bookmark stale. If a security scope is preferred it
     /// is tried first; a plain bookmark, which can't be resolved as a scoped one, is resolved without (the failure of the
-    /// scoped resolve is logged, by its domain and code: it is how the platform test learns whether a security-scoped
-    /// bookmark of these files works). Never shows a dialog or mounts a volume.
+    /// scoped resolve is logged, by its domain and code: it tells whether a security-scoped bookmark of these files works). Never shows a dialog or mounts a volume.
     private func resolve(_ bookmark: Data) throws -> (url: URL, isStale: Bool) {
         if bookmarkOptions.contains(.withSecurityScope) {
             do {

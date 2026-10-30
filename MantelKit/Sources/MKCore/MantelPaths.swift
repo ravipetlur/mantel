@@ -23,8 +23,6 @@ public struct MantelPaths: Sendable, Equatable {
     public var settings: URL { root }
     /// Copies kept before a migration or an import, and files set aside as corrupt.
     public var backups: URL { root.appending(path: "Backups", directoryHint: .isDirectory) }
-    /// The reports the probes write.
-    public var probes: URL { root.appending(path: "Probes", directoryHint: .isDirectory) }
     /// The menu bar item images Mantel caches.
     public var itemImages: URL { root.appending(path: "ItemImages", directoryHint: .isDirectory) }
     /// The pictures the person chose for the dots and for groups (`ImageImport` copies them here).
@@ -38,7 +36,7 @@ public struct MantelPaths: Sendable, Equatable {
     /// there already with looser permissions.
     public func createDirectories() throws {
         let fileManager = FileManager.default
-        for folder in [root, logs, backups, probes, itemImages, ownImages] {
+        for folder in [root, logs, backups, itemImages, ownImages] {
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true,
                                             attributes: [.posixPermissions: 0o700])
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)

@@ -46,7 +46,7 @@ extension Array where Element == KeyPathStep {
 }
 
 /// How a path is written as text: one segment for each step, `/k:<key>`, `/i:<position>`, `/m:<key>=<value>`, `/*` and
-/// `/mp:<sub-path>=<value>`. It is the form the journal keys its entries by, and the form a probe is given a place in.
+/// `/mp:<sub-path>=<value>`. It is the form the journal keys its entries by.
 ///
 /// - In `k:`, `m:` and the other forms outside a `mp:` segment, `/`, `=` and `%` inside a name are percent-encoded.
 /// - A `mp:` segment holds the steps of its path in the same forms without the slash, joined by `,`: for example

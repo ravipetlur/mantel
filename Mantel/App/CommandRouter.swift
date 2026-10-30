@@ -36,22 +36,18 @@ protocol MenuBarCommanding: AnyObject {
 @MainActor
 final class CommandRouter {
     private let openSettings: (SettingsPage?) -> Void
-    private let runProbe: (ProbeName, [String: String]) async -> ProbeReport?
     private let diagnostics: () async -> JSONValue
     private let menuBar: () -> (any MenuBarCommanding)?
 
     /// - Parameters:
     ///   - openSettings: shows the Settings window at a page, or at the page it was last on when that is nil.
-    ///   - runProbe: runs a probe with its options and gives its report; nil when Mantel is quitting.
-    ///   - diagnostics: the checks and the last report of every probe, as JSON.
+    ///   - diagnostics: the checks, as JSON.
     ///   - menuBar: what hides and reveals, once the launch has made it; nil before. (Commands arrive over the control socket, which
     ///     listens before the menu bar exists.)
     init(openSettings: @escaping (SettingsPage?) -> Void,
-         runProbe: @escaping (ProbeName, [String: String]) async -> ProbeReport?,
          diagnostics: @escaping () async -> JSONValue,
          menuBar: @escaping () -> (any MenuBarCommanding)?) {
         self.openSettings = openSettings
-        self.runProbe = runProbe
         self.diagnostics = diagnostics
         self.menuBar = menuBar
     }
@@ -72,12 +68,6 @@ final class CommandRouter {
                 report = .object(object)
             }
             return .ok(report)
-        case .probe(let name, let options):
-            // The report is the answer whatever came of the probe: its errors and what it did restore are in it.
-            guard let report = await runProbe(name, options) else {
-                return .failure(code: .unavailable, message: CommandAnswers.quitting)
-            }
-            return .ok(report.json)
         case .reset:
             guard let menuBar = menuBar() else { return Self.starting }
             return await menuBar.reset().result

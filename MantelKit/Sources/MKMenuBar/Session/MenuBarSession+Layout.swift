@@ -352,6 +352,13 @@ extension MenuBarSession {
         return CheckRead(taken.inventory, concealedApps: taken.concealed)
     }
 
+    /// Whether an order change is waiting to be written or its write is being checked on the bar (`LayoutStatus.isPending` and
+    /// `isSettling`). The update's relaunch waits a short while for it, so that a write that has begun isn't cut off.
+    public func layoutWriteIsUnderWay() -> Bool {
+        guard let status = layoutStatus else { return false }
+        return status.isPending || status.isSettling
+    }
+
     /// The order change that is still in its debounce is written at once, for the app is quitting (`LayoutApplier.flushForQuit`), within
     /// `quitLayoutLimit`. Past it, a change that hasn't begun to be written is not written, and the log says it was dropped; one whose write
     /// had begun can't be called back, and the log says it may still complete.
@@ -377,6 +384,7 @@ extension MenuBarSession {
         layoutDeferredCause = nil
         guard let applier = layoutApplier else { return .failure(.needsGrant) }
         let result = await applier.restoreOriginal()
+        if case .success(let placed) = result { Log.info("layout", "the original layout was restored (places put back: \(placed))") }
         layoutMemory = [:]
         tableRead = nil
         dragBefore = nil

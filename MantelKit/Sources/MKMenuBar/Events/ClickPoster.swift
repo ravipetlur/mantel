@@ -17,24 +17,20 @@ public enum ClickPostError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Clicks and presses keys as if the person had. The real one is `LiveClickPoster`; a test gives its own.
+/// Clicks as if the person had. The real one is `LiveClickPoster`; a test gives its own.
 public protocol ClickPosting: Sendable {
     /// A down and an up of `kind` at `point` (CoreGraphics global points), 30 ms apart, marked with `ClickReplayTap.eventMark`; the pointer
     /// is then put back where it was.
     func click(_ kind: ClickKind, at point: CGPoint) throws(ClickPostError)
-    /// A key down and a key up, marked. The probes close a menu with Escape.
-    func key(_ keyCode: UInt16, flags: CGEventFlags) throws(ClickPostError)
 }
 
-/// What posting a click or a key comes to, as a value: the events in the order they are sent, and what is said of each. The live poster
+/// What posting a click comes to, as a value: the events in the order they are sent, and what is said of each. The live poster
 /// sends what a plan says and decides nothing, so what is posted (which events, with which button and flags, in which order, marked how)
 /// is tested without posting anything.
 struct ClickPostPlan: Equatable, Sendable {
     enum Step: Equatable, Sendable {
         /// A mouse event at `location`; `clickState` is the click count the event says it is (1: a single click).
         case mouse(type: CGEventType, button: CGMouseButton, location: CGPoint, flags: CGEventFlags, mark: Int64, clickState: Int64)
-        /// A key event.
-        case key(code: UInt16, isDown: Bool, flags: CGEventFlags, mark: Int64)
         /// Nothing is sent for this long.
         case wait(Duration)
         /// The pointer goes back to where it was: posting a click moves the real pointer.
@@ -65,13 +61,6 @@ struct ClickPostPlan: Equatable, Sendable {
         if let pointerWas { steps.append(.putPointerBack(pointerWas)) }
         return ClickPostPlan(steps: steps)
     }
-
-    /// A key down and a key up.
-    static func key(_ code: UInt16, flags: CGEventFlags) -> ClickPostPlan {
-        let mark = ClickReplayTap.eventMark
-        return ClickPostPlan(steps: [.key(code: code, isDown: true, flags: flags, mark: mark),
-                                     .key(code: code, isDown: false, flags: flags, mark: mark)])
-    }
 }
 
 /// The real poster: it sends what a `ClickPostPlan` says, through the HID event tap, so that the click lands as a person's does.
@@ -92,11 +81,6 @@ public struct LiveClickPoster: ClickPosting {
         try send(ClickPostPlan.click(kind, at: point, pointerWas: pointer))
     }
 
-    public func key(_ keyCode: UInt16, flags: CGEventFlags) throws(ClickPostError) {
-        guard AXIsProcessTrusted() else { throw .notTrusted }
-        try send(ClickPostPlan.key(keyCode, flags: flags))
-    }
-
     private enum Prepared {
         case event(CGEvent)
         case wait(Duration)
@@ -113,11 +97,6 @@ public struct LiveClickPoster: ClickPosting {
                 }
                 event.flags = flags
                 event.setIntegerValueField(.mouseEventClickState, value: clickState)
-                event.setIntegerValueField(.eventSourceUserData, value: mark)
-                prepared.append(.event(event))
-            case .key(let code, let isDown, let flags, let mark):
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(code), keyDown: isDown) else { throw .couldNotPost }
-                event.flags = flags
                 event.setIntegerValueField(.eventSourceUserData, value: mark)
                 prepared.append(.event(event))
             case .wait(let duration):

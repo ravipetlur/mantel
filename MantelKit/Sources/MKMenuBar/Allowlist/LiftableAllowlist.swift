@@ -38,7 +38,7 @@ final class LiftableAllowlist: Sendable {
         state.withLock { $0.lifted }
     }
 
-    /// A new assertion is live. (The probes' way: they put one back after each lift, and let go of the one they had.)
+    /// A new assertion is live: the one that was held is let go of.
     func arm(_ assertion: any AllowlistAssertionHandle) {
         state.withLock { state in
             state.assertion = assertion

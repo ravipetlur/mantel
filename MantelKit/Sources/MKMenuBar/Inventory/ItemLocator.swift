@@ -109,12 +109,12 @@ public struct ItemLocation: Sendable, Equatable {
     public let slotWasInBaseline: Bool
     /// The item's own frame, as its app reports it, agrees with the slot: it is from 16 points narrower to 6 points wider than the slot (on
     /// macOS 27 an icon's frame is 14 points narrower than its slot, which has seven either side; on earlier ones it was two to five wider),
-    /// and the app doesn't put the item in another slot. False when the app reports no frame for it. It is recorded, for the probes, and is
+    /// and the app doesn't put the item in another slot. False when the app reports no frame for it. It is only recorded, and is
     /// no ground for a click (`isPostable`): a neighbour that changes width by a few points as an icon appears leaves a new slot that is not
     /// the icon's and has about its width.
     public let widthAgrees: Bool
     /// The width of the item's own frame, as its app reports it, minus the slot's width: what `widthAgrees` is a judgment of (-16 to 6
-    /// agrees). Nil when the app reports no frame for the item. It is recorded, for the probes, and is no ground for a click.
+    /// agrees). Nil when the app reports no frame for the item. It is only recorded, and is no ground for a click.
     public let frameMinusSlotWidth: CGFloat?
 
     /// How much wider than its slot an item's frame may be and still be its.
@@ -133,8 +133,8 @@ public struct ItemLocation: Sendable, Equatable {
         self.frameMinusSlotWidth = frameMinusSlotWidth
     }
 
-    /// Whether a click may be posted at this slot. **This is the one place the rule lives**: the probes and the click driver ask it, and
-    /// none decides for itself. A posted click lands on whatever icon is there, so it needs two signals that agree, except where one is
+    /// Whether a click may be posted at this slot. **This is the one place the rule lives**: the click driver asks it, and
+    /// nothing else decides for itself. A posted click lands on whatever icon is there, so it needs two signals that agree, except where one is
     /// already known.
     ///
     /// - **Drawn at the snapshot** (`drawnAtSnapshot`: the item was on the bar when the snapshot was taken): its app's frame ties it to its
@@ -177,7 +177,7 @@ public enum ItemPressError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Finds where an item is in the menu bar now. The probes and the click driver locate items through it; the real one is the scanner, and a
+/// Finds where an item is in the menu bar now. The click driver locates items through it; the real one is the scanner, and a
 /// test gives its own.
 public protocol ItemLocating: Sendable {
     /// The slots drawn on `display` (the main display's when nil) now; nil when they can't be read.
@@ -485,7 +485,7 @@ extension MenuBarScanner: ItemLocating, ItemPressing {
     ///
     /// One window of MenuBarAgent's is read, and the items of the item's app and of the apps with an item on this display at the last scan (for the slots
     /// they claim); nothing is kept. The window is the one that had the most identifiers at the last scan. The apps that are concealed are
-    /// those of the last scan that was asked for: an app that a probe has revealed since is still among them, and its fresh frames, in
+    /// those of the last scan that was asked for: an app that has been revealed since is still among them, and its fresh frames, in
     /// slots no other app has, tie all the same.
     public func locate(_ item: ItemID, on display: String?, since baseline: SlotSnapshot?) async -> ItemLocation? {
         guard isTrusted() else { return nil }
@@ -636,9 +636,10 @@ extension MenuBarScanner: ItemLocating, ItemPressing {
         -> (bar: MatchBar, index: Int, isComplete: Bool)? {
         guard let agent = menuBarAgent(in: runningApps()) else { return nil }
         let reader = agentReader, gate = readGate, preferred = window ?? windowMemory[uuid]?.best
-        guard let read = await gate.run({ await reader.readBar(agent: agent, layout: displays, display: uuid, preferring: preferred) }) else {
-            return nil
+        let readOfBar = await gate.run(ifCancelled: nil) {
+            await reader.readBar(agent: agent, layout: displays, display: uuid, preferring: preferred)
         }
+        guard let read = readOfBar else { return nil }
         // The window this read settled on is the one the next read tries first.
         windowMemory[uuid]?.best = read.index
         return (read.bar, read.index, read.isComplete)

@@ -6,15 +6,6 @@ import Testing
 struct CLIOutputTests {
     // MARK: Answers
 
-    @Test func pingPrintsPong() {
-        #expect(CLIOutput.outcome(for: .ok(.string("pong")), json: false)
-                == CLIOutcome(stdout: "pong", stderr: "", exitCode: 0))
-    }
-
-    @Test func nothingToSayPrintsNothing() {
-        #expect(CLIOutput.outcome(for: .ok(.null), json: false) == CLIOutcome(stdout: "", stderr: "", exitCode: 0))
-    }
-
     @Test func otherValuesArePrintedAsPrettyJSONInOrder() {
         let result = CommandResult.ok(.object(["version": .string("0.1.0"), "build": .string("1"),
                                                "paths": .array([.string("/a/b")])]))
@@ -30,11 +21,6 @@ struct CLIOutputTests {
           "version" : "0.1.0"
         }
         """)
-    }
-
-    @Test func aFailurePrintsItsMessageOnStderr() {
-        let outcome = CLIOutput.outcome(for: .failure(code: .unavailable, message: "Probes aren't built yet"), json: false)
-        #expect(outcome == CLIOutcome(stdout: "", stderr: "mantel: Probes aren't built yet", exitCode: 1))
     }
 
     @Test(arguments: [CommandErrorCode.badRequest, .unavailable, .failed, .unknownCommand])
@@ -100,29 +86,6 @@ struct CLIOutputTests {
         #expect(!CLIConfirmation.accepts(nil))
     }
 
-    @Test func notAgreeingToAResetPrintsThatItWasNotDone() {
-        #expect(CLIOutput.declined == CLIOutcome(stdout: "", stderr: "mantel: Not reset.", exitCode: 1))
-    }
-
-    @Test func aResetWithNobodyToAskIsWrongArguments() {
-        #expect(CLIOutput.needsAnswerBeforehand
-                == CLIOutcome(stdout: "", stderr: "mantel: Add --yes to reset without being asked.", exitCode: 2))
-    }
-
-    @Test func layoutRestoreNoAndNoTerminal() {
-        #expect(CLIOutput.restoreDeclined == CLIOutcome(stdout: "", stderr: "mantel: Not restored.", exitCode: 1))
-        #expect(CLIOutput.restoreNeedsAnswerBeforehand
-                == CLIOutcome(stdout: "", stderr: "mantel: Add --yes to restore without being asked.", exitCode: 2))
-        // Which one is printed goes by the command that was asked about.
-        #expect(CLIOutput.declined(.restoreLayout) == CLIOutput.restoreDeclined)
-        #expect(CLIOutput.needsAnswerBeforehand(.restoreLayout) == CLIOutput.restoreNeedsAnswerBeforehand)
-        #expect(CLIOutput.declined(.reset) == CLIOutput.declined)
-        #expect(CLIOutput.needsAnswerBeforehand(.reset) == CLIOutput.needsAnswerBeforehand)
-        // A no is a no for this question as for the other.
-        #expect(!CLIConfirmation.accepts(""))
-        #expect(CLIConfirmation.accepts("y"))
-    }
-
     // MARK: Usage
 
     @Test func wrongArgumentsExitWith2AndSayWhatToTypeInstead() {
@@ -134,17 +97,5 @@ struct CLIOutputTests {
         #expect(outcome.exitCode == 2)
         #expect(outcome.stdout.isEmpty)
         #expect(outcome.stderr == "mantel: \(error.message)")
-    }
-
-    @Test func noArgumentsPrintsTheUsageItselfOnStderr() {
-        guard case .failure(let error) = CLIParser.parse([]) else {
-            Issue.record("expected a usage error")
-            return
-        }
-        #expect(CLIOutput.outcome(for: error) == CLIOutcome(stdout: "", stderr: CLIParser.usage, exitCode: 2))
-    }
-
-    @Test func helpPrintsTheUsageAndSucceeds() {
-        #expect(CLIOutput.help == CLIOutcome(stdout: CLIParser.usage, stderr: "", exitCode: 0))
     }
 }

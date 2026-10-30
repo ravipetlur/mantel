@@ -56,18 +56,15 @@ struct ExpectedFileTests {
     /// Held by the suite, and so for the whole test.
     private let folder = TemporaryFolder(prefix: "mantel-expected")
 
-    @Test func theMenuBarLayoutIsInItsGroupContainer() {
-        let expected = ExpectedFile.expected(.menuBarLayout, home: home)
-        #expect(expected.kind == .menuBarLayout)
-        #expect(expected.candidates == ["/Users/someone/\(menuBarLayoutPath)"])
-        #expect(expected.fileName == "com.apple.MenuBar.plist")
-    }
-
-    @Test func theApprovalsAreInControlCentersGroupContainer() {
-        let expected = ExpectedFile.expected(.controlCenterApprovals, home: home)
-        #expect(expected.kind == .controlCenterApprovals)
-        #expect(expected.candidates == ["/Users/someone/\(approvalsPath)"])
-        #expect(expected.fileName == "group.com.apple.controlcenter.plist")
+    @Test(arguments: [
+        (FileGrantKind.menuBarLayout, "com.apple.MenuBar.plist"), (.controlCenterApprovals, "group.com.apple.controlcenter.plist"),
+    ])
+    func eachFileIsInItsGroupContainer(kind: FileGrantKind, fileName: String) {
+        let path = kind == .menuBarLayout ? menuBarLayoutPath : approvalsPath
+        let expected = ExpectedFile.expected(kind, home: home)
+        #expect(expected.kind == kind)
+        #expect(expected.candidates == ["/Users/someone/\(path)"])
+        #expect(expected.fileName == fileName)
     }
 
     @Test func theHomeFolderIsTheOneGiven() {
@@ -530,11 +527,17 @@ struct FileGrantStoreTests {
 
     // MARK: A file that changes after it was granted
 
-    @Test func deletedFileMakesGrantStale() async throws {
+    /// The bookmark follows a file that moves; the grant is for the file at its place, so it isn't followed.
+    @Test(arguments: [true, false])
+    func aDeletedOrMovedFileMakesGrantStale(deleted: Bool) async throws {
         let file = try plant()
         let stores = makeStores()
         _ = try await stores.grants.grant(.menuBarLayout, chosen: file, home: home)
-        try fileManager.removeItem(at: file)
+        if deleted {
+            try fileManager.removeItem(at: file)
+        } else {
+            try fileManager.moveItem(at: file, to: home.appending(path: "Library/moved.plist"))
+        }
         let ran = Mutex(false)
 
         let failure: FileGrantError?
@@ -546,32 +549,10 @@ struct FileGrantStoreTests {
         }
 
         #expect(failure == .stale(fileName: "com.apple.MenuBar.plist"))
-        #expect(ran.withLock { $0 } == false, "nothing runs on a file that isn't there")
+        #expect(ran.withLock { $0 } == false, "nothing runs on a file that isn't there, or on the file it moved to")
         #expect(await stores.grants.grant(for: .menuBarLayout) == nil, "a stale grant is revoked")
         await stores.settings.flush()
         #expect(await makeStores().grants.grant(for: .menuBarLayout) == nil, "and stays revoked")
-    }
-
-    @Test func movedFileMakesGrantStale() async throws {
-        // The bookmark follows a file that moves; the grant is for the file at its place, so it isn't followed.
-        let file = try plant()
-        let stores = makeStores()
-        _ = try await stores.grants.grant(.menuBarLayout, chosen: file, home: home)
-        let moved = home.appending(path: "Library/moved.plist")
-        try fileManager.moveItem(at: file, to: moved)
-        let ran = Mutex(false)
-
-        let failure: FileGrantError?
-        do {
-            try await stores.grants.withAccess(.menuBarLayout) { _ in ran.withLock { $0 = true } }
-            failure = nil
-        } catch {
-            failure = error as? FileGrantError
-        }
-
-        #expect(failure == .stale(fileName: "com.apple.MenuBar.plist"))
-        #expect(ran.withLock { $0 } == false, "nothing runs on the file it moved to")
-        #expect(await stores.grants.grant(for: .menuBarLayout) == nil)
     }
 
     @Test func aReplacedFileKeepsTheGrantAndRefreshesTheBookmark() async throws {

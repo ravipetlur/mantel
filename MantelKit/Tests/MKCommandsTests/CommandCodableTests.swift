@@ -22,10 +22,6 @@ struct CommandCodableTests {
             all.append(.bar(change, all: true))
         }
         all += [.recapture, .restoreLayout]
-        for name in ProbeName.allCases {
-            all.append(.probe(name, options: [:]))
-            all.append(.probe(name, options: ["bundle-id": "com.example.item", "allow-any": "true"]))
-        }
         return all
     }()
 
@@ -65,7 +61,7 @@ struct CommandCodableTests {
     }
 
     @Test func envelopesRoundTrip() throws {
-        let request = RequestEnvelope(id: UUID(), command: .probe(.inventory, options: ["a": "b"]))
+        let request = RequestEnvelope(id: UUID(), command: .show(.hidden))
         #expect(try JSONDecoder().decode(RequestEnvelope.self, from: LineCodec.encode(request)) == request)
 
         let answered = ReplyEnvelope(id: UUID(), result: .ok(.string("pong")))
@@ -86,8 +82,6 @@ struct CommandCodableTests {
         #expect(try json(MantelCommand.diagnostics) == #"{"command":"diagnostics"}"#)
         #expect(try json(MantelCommand.openSettings(nil)) == #"{"command":"openSettings"}"#)
         #expect(try json(MantelCommand.openSettings(.hotkeys)) == #"{"command":"openSettings","page":"hotkeys"}"#)
-        #expect(try json(MantelCommand.probe(.menuBarHeight, options: ["allow-any": "true"]))
-                == #"{"command":"probe","name":"menu-bar-height","options":{"allow-any":"true"}}"#)
     }
 
     @Test func theMenuBarCommandsAreWrittenWithTheirNameAndTheirArguments() throws {
@@ -124,11 +118,6 @@ struct CommandCodableTests {
                 == #"{"code":"unavailable","message":"Not yet.","status":"failure"}"#)
     }
 
-    @Test func aProbeWithoutOptionsIsStillReadable() throws {
-        let command = try decode(MantelCommand.self, from: #"{"command":"probe","name":"capture"}"#)
-        #expect(command == .probe(.capture, options: [:]))
-    }
-
     @Test func anOkResultWithoutAValueIsNull() throws {
         #expect(try decode(CommandResult.self, from: #"{"status":"ok"}"#) == .ok(.null))
     }
@@ -136,8 +125,7 @@ struct CommandCodableTests {
     @Test(arguments: [
         #"{"command":"explode"}"#,
         #"{"command":"openSettings","page":"bogus"}"#,
-        #"{"command":"probe","name":"bogus"}"#,
-        #"{"command":"probe"}"#,
+        #"{"command":"probe","name":"inventory"}"#,
         #"{"command":"show"}"#,
         #"{"command":"show","target":"some"}"#,
         #"{"command":"show","target":"nothing"}"#,
@@ -158,27 +146,6 @@ struct CommandCodableTests {
         #"{"value":1}"#,
     ]) func aResultNobodyKnowsIsRefused(text: String) {
         #expect(throws: DecodingError.self) { try decode(CommandResult.self, from: text) }
-    }
-
-    // MARK: Probe names
-
-    @Test func probeNamesAreSpelledAsTheCommandLineSpellsThem() {
-        let spellings: [ProbeName: String] = [
-            .allowlistInfo: "allowlist-info", .allowlistActivate: "allowlist-activate", .inventory: "inventory",
-            .approvalsRead: "approvals-read", .approvalsToggle: "approvals-toggle",
-            .layoutRead: "layout-read", .layoutMove: "layout-move",
-            .capture: "capture", .clickReplay: "click-replay", .overflow: "overflow",
-            .screenShare: "screen-share", .menuBarHeight: "menu-bar-height",
-            .grantPersistence: "grant-persistence",
-            .revealLatency: "reveal-latency", .approvalsDecode: "approvals-decode", .approvalsFlip: "approvals-flip",
-            .notchCoordinates: "notch-coordinates",
-            .clickPath: "click-path", .iconCapture: "icon-capture", .layoutMap: "layout-map", .layoutOrder: "layout-order",
-            .spacing: "spacing",
-        ]
-        #expect(spellings.count == ProbeName.allCases.count, "every probe has a spelling here")
-        for (name, spelling) in spellings {
-            #expect(name.rawValue == spelling)
-        }
     }
 
     @Test func newPagesRoundTrip() throws {
@@ -230,8 +197,6 @@ struct CommandCodableTests {
         #expect(MantelCommand.refresh.name == "refresh")
         #expect(MantelCommand.reset.name == "reset")
         #expect(MantelCommand.engine.name == "engine")
-        // The probe's name, never its options, which are the caller's words.
-        #expect(MantelCommand.probe(.layoutMove, options: ["secret": "x"]).name == "probe layout-move")
     }
 
     @Test func theIconCommandsAreWrittenWithTheirNameAndTheirArguments() throws {

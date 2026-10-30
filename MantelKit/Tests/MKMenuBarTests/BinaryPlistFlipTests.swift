@@ -233,7 +233,6 @@ struct BinaryPlistFlipTests {
         let blob = BlobFixtures.deeplySharedPlist(levels: 24)
         #expect(blob.count < 1000)
         #expect(throws: PlistBlobCodecError.tooLarge) { try flip.value(at: [], in: blob) }
-        #expect(throws: PlistBlobCodecError.tooLarge) { try NestedPlistCodec.reencoded(blob) }
         let object = try PropertyListSerialization.propertyList(from: blob, format: nil)
         #expect(PlistValue.converting(object) == .tooLarge)
         // A place in it, a single value, is still read: what is refused is expanding the whole.
@@ -273,12 +272,6 @@ struct BinaryPlistFlipTests {
         #expect(blob.count < 40_000)
         #expect(throws: PlistBlobCodecError.damaged) { try flip.value(at: [], in: blob) }
         #expect(throws: PlistBlobCodecError.damaged) { try flip.setting(.bool(true), at: [.index(0)], in: blob) }
-        // The shape of such a blob is only that it isn't a property list.
-        guard case .object(let report) = BlobShape.describe(blob, marker: marker) else {
-            Issue.record("a report")
-            return
-        }
-        #expect(report["parsesAsPropertyList"] == .bool(false))
     }
 
     @Test func aBlobThatAsksForOneArrayAndNoMoreIsRead() throws {

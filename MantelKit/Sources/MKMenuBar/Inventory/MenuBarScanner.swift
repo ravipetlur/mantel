@@ -47,7 +47,7 @@ struct AXAppExtrasReader: AppExtrasReading {
 /// - **Accessibility is checked on every scan,** not once at launch.
 ///
 /// The reads block, so they run off the actor (`@concurrent`), and the actor only keeps what is remembered between scans. Scans are
-/// asked for through `ScanScheduler`, which lets one run at a time. A call that comes while one is under way (a probe asks for a scan of
+/// asked for through `ScanScheduler`, which lets one run at a time. A call that comes while one is under way (another caller asks for a scan of
 /// its own) is not another scan, and not lost: its reasons are kept. If it asks for more than the scan under way covers (`Coverage`: every
 /// window of MenuBarAgent for apps launching or quitting, every window compared for a change of displays, a refresh or no reason given)
 /// there is one more scan after the one that is running, with all the reasons that came meanwhile, whose result it is given; the scan
@@ -361,13 +361,17 @@ public actor MenuBarScanner {
     /// has had its whole time.
     private func readAgent(_ agent: RunningApp, layout displays: DisplayLayout, plan: AgentReadPlan, scanBegan: Date) async -> AgentRead {
         let reader = agentReader, gate = readGate, clock = clock
-        var read = await gate.run { await reader.read(agent: agent, layout: displays, plan: plan) }
+        // A read cancelled in the queue says what a cut one does: it saw nothing, and may be short of what is there.
+        let cancelled = AgentRead(cut: true)
+        var read = await gate.run(ifCancelled: cancelled) { await reader.read(agent: agent, layout: displays, plan: plan) }
         var attempt = 0
         while read.bars.isEmpty, !read.notTrusted, let wait = EmptyReadRetry.wait(afterAttempt: attempt) {
             guard !isStopping.withLock({ $0 }) else { break }
             do { try await clock.sleep(for: wait) } catch { break }
             guard clock.now().timeIntervalSince(scanBegan) < AXPatience.scanBudget, !isStopping.withLock({ $0 }) else { break }
-            read = await inScope(AXPatience.lookBudget) { await gate.run { await reader.read(agent: agent, layout: displays, plan: plan) } }
+            read = await inScope(AXPatience.lookBudget) {
+                await gate.run(ifCancelled: cancelled) { await reader.read(agent: agent, layout: displays, plan: plan) }
+            }
             attempt += 1
         }
         return read
@@ -393,7 +397,7 @@ public actor MenuBarScanner {
         guard isTrusted() else { return nil }
         guard let agent = menuBarAgent(in: runningApps()) else { return nil }
         let agentReader = agentReader, displays = layout(), gate = readGate
-        return await inScope(AXPatience.lookBudget) { await gate.run { await agentReader.look(agent: agent, layout: displays) } }
+        return await inScope(AXPatience.lookBudget) { await gate.run(ifCancelled: nil) { await agentReader.look(agent: agent, layout: displays) } }
     }
 
     /// Runs one read of Accessibility with its own budget: every query in it, and every task it starts, waits for an app as long as
@@ -470,7 +474,7 @@ public actor MenuBarScanner {
     /// for no longer than a look takes.
     public func appMenuFrames(pid: pid_t) async -> [CGRect] {
         let reader = agentReader, gate = readGate
-        return await inScope(AXPatience.lookBudget) { await gate.run { await reader.menuFrames(pid: pid) } }
+        return await inScope(AXPatience.lookBudget) { await gate.run(ifCancelled: []) { await reader.menuFrames(pid: pid) } }
     }
 
     // MARK: Which apps are asked

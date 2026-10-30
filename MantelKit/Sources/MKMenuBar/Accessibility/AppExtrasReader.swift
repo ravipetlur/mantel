@@ -132,7 +132,7 @@ final class IdentifierMemory: Sendable {
 
 /// Asks an app for its status items: the children of its `AXExtrasMenuBar`, each with its frame, identifier, title and description.
 ///
-/// It is shared by the reader the probes use and by the scanner. The calls block, so callers run it off the main actor. A copy of a reader
+/// It is shared by the menu bar reader and by the scanner. The calls block, so callers run it off the main actor. A copy of a reader
 /// shares what it remembers (`IdentifierMemory`) with the one it was copied from.
 struct AppExtrasReader: Sendable {
     /// How many reads of an app's items may time out in one read before the app counts as having timed out. The reading stops

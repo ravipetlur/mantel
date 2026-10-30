@@ -53,10 +53,29 @@ struct ReadGateTests {
         #expect(counter.most > 4, "two calls with a limit of four each can run eight")
     }
 
-    @Test func theScannersScanAndLocateShareOneGate() async {
-        let scanner = MenuBarScanner(ax: FakeAX(), runningApps: { [] }, layout: { DisplayLayout(displays: []) },
-                                     ownBundleID: "com.example.mantel", isTrusted: { true }, clock: FakeClock())
-        let gate = await scanner.readGate
-        #expect(gate.limit == MenuBarReader.concurrency)
+    @Test func aCancelledWaiterReturnsAtOnceWhileTheOnlySlotIsHeld() async {
+        let gate = ReadGate(limit: 1)
+        let held = Gate()
+        let holder = Task { await gate.run { await held.wait() } }
+        #expect(await waitUntil { gate.running == 1 }, "the first read has the only slot")
+
+        let finished = Mutex(false)
+        let waiter = Task { () -> Int? in
+            let result = await gate.run { 1 }
+            finished.withLock { $0 = true }
+            return result
+        }
+        #expect(await waitUntil { gate.waiting == 1 }, "the second read waits for it")
+
+        waiter.cancel()
+        let returned = await waitUntil { finished.withLock { $0 } }
+        #expect(returned, "the cancelled read is back while the slot is still held, and doesn't wait for ever")
+        #expect(gate.waiting == 0 && gate.running == 1, "it left the queue, and the held slot is still held")
+
+        held.open()
+        _ = await holder.value
+        #expect(await waiter.value == nil, "it gave no answer, and its read never ran")
+        #expect(await gate.run { 2 } == 2, "the slot was not lost: a later read gets it")
+        #expect(gate.running == 0)
     }
 }

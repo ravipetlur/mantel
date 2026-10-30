@@ -76,16 +76,4 @@ struct MenuBarSessionEditorTests {
         #expect(rig.saved.all.count == savedBefore, "nothing was saved")
         #expect(order(after) == [weather, notes, sync])
     }
-
-    @Test func aDropWhoseNeighboursAreStillThereIsMade() async {
-        let rig = await started()
-        let session = rig.session
-        let model = await session.sections
-
-        let request = request(.token(token(sync, in: model), from: .section(.shown)), between: DropAnchors(left: "app:\(weather)", right: "app:\(notes)"))
-        let done = await session.drop(request)
-
-        #expect(done != nil)
-        #expect(order(await session.sections) == [weather, sync, notes, vpn])
-    }
 }

@@ -1,12 +1,10 @@
 PROJECT := Mantel.xcodeproj
 SCHEME := Mantel
-FIXTURE_SCHEME := MantelTestItem
 DERIVED := build/DerivedData
 # One destination, so that xcodebuild doesn't warn about the two it finds for this Mac ("My Mac" and "Any Mac").
 DESTINATION := generic/platform=macOS
 APP_DEBUG := $(DERIVED)/Build/Products/Debug/Mantel.app
 APP_RELEASE := $(DERIVED)/Build/Products/Release/Mantel.app
-FIXTURE_DEBUG := $(DERIVED)/Build/Products/Debug/MantelTestItem.app
 
 # A release's version, its tag without the v (1.2.0, or 1.2.0-beta.1). The DMG is build/Mantel-$(VERSION).dmg, and the
 # app's CFBundleShortVersionString is the version's leading three numbers (1.2.0), the form macOS expects; a version
@@ -17,17 +15,15 @@ VERSION ?= $(or $(shell sed -n -E 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*
 BUILD_NUMBER ?=
 SHORT_VERSION = $(shell printf '%s\n' '$(VERSION)' | sed -n -E 's/^([0-9]+\.[0-9]+\.[0-9]+)([^0-9.].*)?$$/\1/p')
 
-.PHONY: generate build build-release dmg test run install install-fixtures clean
+.PHONY: generate build build-release dmg test run install clean
 
 generate:
 	xcodegen generate --quiet
 
-# The app, and the test item the probes change in its place (Debug only).
 build: generate
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration Debug -destination '$(DESTINATION)' -derivedDataPath $(DERIVED) -quiet build
-	xcodebuild -project $(PROJECT) -scheme $(FIXTURE_SCHEME) -configuration Debug -destination '$(DESTINATION)' -derivedDataPath $(DERIVED) -quiet build
 
-# The Release app alone (no test item), as a release is built. With VERSION and BUILD_NUMBER it is that version.
+# The Release app, as a release is built. With VERSION and BUILD_NUMBER it is that version.
 build-release: generate
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration Release -destination '$(DESTINATION)' -derivedDataPath $(DERIVED) -quiet \
 		$(if $(SHORT_VERSION),MARKETING_VERSION=$(SHORT_VERSION)) $(if $(BUILD_NUMBER),CURRENT_PROJECT_VERSION=$(BUILD_NUMBER)) build
@@ -50,14 +46,6 @@ install: generate
 	rm -rf /Applications/Mantel.app
 	cp -R $(APP_RELEASE) /Applications/Mantel.app
 	open /Applications/Mantel.app
-
-# The test item for the platform test, in /Applications, where the system honours the allowlist. It is not started: open it,
-# or run `mantel probe` with the test item as the app to change.
-install-fixtures: generate
-	xcodebuild -project $(PROJECT) -scheme $(FIXTURE_SCHEME) -configuration Debug -destination '$(DESTINATION)' -derivedDataPath $(DERIVED) -quiet build
-	-pkill -x MantelTestItem; while pgrep -x MantelTestItem >/dev/null; do sleep 0.1; done
-	rm -rf /Applications/MantelTestItem.app
-	cp -R $(FIXTURE_DEBUG) /Applications/MantelTestItem.app
 
 clean:
 	rm -rf build

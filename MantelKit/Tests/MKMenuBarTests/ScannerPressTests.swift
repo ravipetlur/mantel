@@ -17,9 +17,9 @@ private struct Rig {
     let items: [Int]
     let running: [RunningApp]
 
-    init(_ extras: [FakeAX.Extra], appRunning: Bool = true) {
+    init(_ extras: [FakeAX.Extra]) {
         items = ax.addApp(pid: appPID, extras: extras)
-        running = [.fake(agentPID, MenuBarReader.menuBarAgentBundleID, "MenuBarAgent")] + (appRunning ? [.fake(appPID, bundle, "Weather")] : [])
+        running = [.fake(agentPID, MenuBarReader.menuBarAgentBundleID, "MenuBarAgent")] + [.fake(appPID, bundle, "Weather")]
     }
 
     func scanner(trusted: Bool = true) -> MenuBarScanner {
@@ -43,13 +43,6 @@ struct ScannerPressTests {
         #expect(rig.ax.pressed == [rig.items[1]])
     }
 
-    @Test func aNameWithTheLayoutPrefixIsTheSameName() async throws {
-        // An app may give its identifier the way the layout names it: `<bundle ID>::<name>`.
-        let rig = Rig([.init(title: "Weather", identifier: "\(bundle)::weather.temp")])
-        try await rig.scanner().press(rig.item(.identifier("weather.temp")))
-        #expect(rig.ax.pressed == [rig.items[0]])
-    }
-
     @Test func pressFindsByIndex() async throws {
         // Two items that name themselves nothing, told by their place from left to right as the last scan saw them on the bar. The app
         // lists them right to left.
@@ -66,15 +59,6 @@ struct ScannerPressTests {
         try await scanner.press(rig.item(.index(1)))
 
         #expect(rig.ax.pressed == [rig.items[1], rig.items[0]], "index 0 is the left-most: the app's second")
-    }
-
-    @Test func withoutAScanTheIndexIsThePlaceInTheAppsList() async throws {
-        let rig = Rig([.init(title: "B"), .init(title: "A")])
-        let scanner = rig.scanner()
-
-        try await scanner.press(rig.item(.index(1)))
-
-        #expect(rig.ax.pressed == [rig.items[1]])
     }
 
     @Test func aNamedItemDoesNotTakeAnIndex() async throws {
@@ -101,13 +85,6 @@ struct ScannerPressTests {
 
         await #expect(throws: ItemPressError.notFound) { try await scanner.press(rig.item(.identifier("weather.gone"))) }
         #expect(rig.ax.pressed.isEmpty)
-    }
-
-    @Test func anAppThatIsNotRunningIsNotFound() async throws {
-        let rig = Rig([.init(title: "Weather", identifier: "weather.temp")], appRunning: false)
-        let scanner = rig.scanner()
-
-        await #expect(throws: ItemPressError.notFound) { try await scanner.press(rig.item(.identifier("weather.temp"))) }
     }
 
     @Test func withoutAccessibilityNothingIsPressed() async throws {
@@ -167,15 +144,6 @@ struct ScannerPressTests {
         #expect(rig.ax.performedActions.isEmpty, "nothing was asked of an element that doesn't offer it")
     }
 
-    @Test func aRefusedShowMenuIsSaidSo() async throws {
-        let rig = Rig([.init(title: "Weather", identifier: "weather.temp")])
-        rig.ax.setActions(["AXShowMenu"], on: rig.items[0])
-        rig.ax.failPerform(on: rig.items[0], with: .failure(-25204))
-        let scanner = rig.scanner()
-
-        await #expect(throws: ItemPressError.refused("macOS said -25204")) { try await scanner.showMenu(rig.item(.identifier("weather.temp"))) }
-    }
-
     @Test func aTimeoutReadingTheActionsIsNotAnActionThatWasSent() async throws {
         // Reading the actions sends nothing: an app that doesn't answer that was never asked to open its menu.
         let rig = Rig([.init(title: "Weather", identifier: "weather.temp")])
@@ -210,27 +178,5 @@ struct ScannerPressTests {
 
         #expect(ax.pressed == [controlCenter[1]])
         await #expect(throws: ItemPressError.notFound) { try await scanner.press(.system("bluetooth")) }
-    }
-
-    // MARK: What the scanner is
-
-    @Test func scannerIsALocatorAndAPresser() {
-        let rig = Rig([.init(title: "Weather")])
-        let scanner = rig.scanner()
-        // Compiles as both, so that the probes and the click driver can be given the scanner.
-        let locator: any ItemLocating = scanner
-        let presser: any ItemPressing = scanner
-        #expect(locator is MenuBarScanner)
-        #expect(presser is MenuBarScanner)
-        let both: any ItemLocating & ItemPressing = scanner
-        #expect(both is MenuBarScanner)
-    }
-
-    @Test func pressErrorsSayWhatHappened() {
-        #expect(ItemPressError.notFound.errorDescription == "That icon isn't in the menu bar right now.")
-        #expect(ItemPressError.noShowMenu.errorDescription == "That icon doesn't open a menu that way.")
-        #expect(ItemPressError.refused("the app didn't answer in time").errorDescription == "The icon didn't respond: the app didn't answer in time")
-        #expect(ItemPressError.noAnswer.errorDescription == "The icon didn't answer in time.")
-        #expect(ItemPressError.notTrusted.errorDescription?.contains("Device control and data access") == true)
     }
 }

@@ -11,6 +11,10 @@
 // CODE_SIGN_IDENTITY = Apple Development
 // DEVELOPMENT_TEAM = ABCDE12345
 
+// The GitHub repository (owner/repo) the app checks for updates, and installs them from. Leave it unset and your build has no
+// updater. Set, the app only installs an update signed by the same team as itself, so this only works with a DEVELOPMENT_TEAM.
+// MANTEL_UPDATE_REPO = owner/repo
+
 // Signed with a certificate, Debug builds can use Xcode's debug dylib again (Xcode Previews use it). Leave it off for
 // an ad hoc signature: the hardened runtime refuses to load the dylib, and the app crashes at launch.
 // ENABLE_DEBUG_DYLIB = YES

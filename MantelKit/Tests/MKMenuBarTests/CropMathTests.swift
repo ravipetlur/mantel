@@ -13,56 +13,46 @@ private func bar(_ rect: CGRect, notch: CGRect? = nil) -> MenuBarGeometry {
 
 @Suite("Crop math", .timeLimit(.minutes(1)))
 struct CropMathTests {
-    @Test func anItemAtTheStripsLeftEdgeOnA2xScale() {
-        let strip = CGRect(x: 0, y: 0, width: 3360, height: 31)
-        let item = CGRect(x: 0, y: 0, width: 40, height: 31)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: item, scale: 2) == CGRect(x: 0, y: 0, width: 80, height: 62))
+    struct Case: Sendable {
+        let name: String
+        let strip: CGRect
+        let item: CGRect
+        let scale: CGFloat
+        let crop: CGRect?
     }
 
-    @Test func anItemInTheMiddleOfTheStripIsMeasuredFromTheStripsOrigin() {
-        let strip = CGRect(x: 0, y: 0, width: 3360, height: 31)
-        let item = CGRect(x: 3300, y: 2, width: 50, height: 27)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: item, scale: 2) == CGRect(x: 6600, y: 4, width: 100, height: 54))
-    }
+    private static let wide = CGRect(x: 0, y: 0, width: 3360, height: 31)
+    private static let short = CGRect(x: 0, y: 0, width: 100, height: 31)
 
-    @Test func theStripOfTheSideDisplayLeftOfTheMainDisplayHasNegativeCoordinates() {
+    @Test(arguments: [
+        Case(name: "an item at the strip's left edge on a 2x scale", strip: wide, item: CGRect(x: 0, y: 0, width: 40, height: 31), scale: 2,
+             crop: CGRect(x: 0, y: 0, width: 80, height: 62)),
+        Case(name: "an item in the middle is measured from the strip's origin", strip: wide, item: CGRect(x: 3300, y: 2, width: 50, height: 27), scale: 2,
+             crop: CGRect(x: 6600, y: 4, width: 100, height: 54)),
         // The side display's CoreGraphics bounds are (-1800, -491, 1800, 3200); a 24-point strip along its top.
-        let strip = CGRect(x: -1800, y: -491, width: 1800, height: 24)
-        let item = CGRect(x: -60, y: -491, width: 50, height: 24)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: item, scale: 2) == CGRect(x: 3480, y: 0, width: 100, height: 48))
-    }
-
-    @Test func anItemOutsideTheStripHasNoCrop() {
-        let strip = CGRect(x: 0, y: 0, width: 3360, height: 31)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: 0, y: 100, width: 40, height: 31), scale: 2) == nil, "below it")
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: 4000, y: 0, width: 40, height: 31), scale: 2) == nil, "right of it")
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: -100, y: 0, width: 40, height: 31), scale: 2) == nil, "left of it")
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: 3360, y: 0, width: 40, height: 31), scale: 2) == nil, "touching its edge only")
-    }
-
-    @Test func anItemPartlyOutsideIsCutAtTheEdge() {
-        let strip = CGRect(x: 0, y: 0, width: 100, height: 31)
-        let item = CGRect(x: 80, y: -5, width: 40, height: 20)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: item, scale: 2) == CGRect(x: 160, y: 0, width: 40, height: 30))
-    }
-
-    @Test func aFractionalItemIsRoundedOutToWholePixels() {
-        let strip = CGRect(x: 0, y: 0, width: 100, height: 31)
-        let item = CGRect(x: 10.25, y: 1.25, width: 20.5, height: 10.5)
+        Case(name: "the strip of a side display left of the main one has negative coordinates",
+             strip: CGRect(x: -1800, y: -491, width: 1800, height: 24), item: CGRect(x: -60, y: -491, width: 50, height: 24), scale: 2,
+             crop: CGRect(x: 3480, y: 0, width: 100, height: 48)),
+        Case(name: "below the strip", strip: wide, item: CGRect(x: 0, y: 100, width: 40, height: 31), scale: 2, crop: nil),
+        Case(name: "right of the strip", strip: wide, item: CGRect(x: 4000, y: 0, width: 40, height: 31), scale: 2, crop: nil),
+        Case(name: "left of the strip", strip: wide, item: CGRect(x: -100, y: 0, width: 40, height: 31), scale: 2, crop: nil),
+        Case(name: "touching the strip's edge only", strip: wide, item: CGRect(x: 3360, y: 0, width: 40, height: 31), scale: 2, crop: nil),
+        Case(name: "partly outside is cut at the edge", strip: short, item: CGRect(x: 80, y: -5, width: 40, height: 20), scale: 2,
+             crop: CGRect(x: 160, y: 0, width: 40, height: 30)),
         // The near edges, 20.5 and 2.5 pixels, are rounded down to 20 and 2; the far ones, 61.5 and 23.5, up to 62 and 24.
-        #expect(CropMath.pixelRect(bar: bar(strip), item: item, scale: 2) == CGRect(x: 20, y: 2, width: 42, height: 22))
-    }
-
-    @Test func noAreaOrNoScaleHasNoCrop() {
-        let strip = CGRect(x: 0, y: 0, width: 100, height: 31)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: 5, y: 5, width: 0, height: 10), scale: 2) == nil)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: 5, y: 5, width: 10, height: 10), scale: 0) == nil)
-        #expect(CropMath.pixelRect(bar: bar(.zero), item: CGRect(x: 5, y: 5, width: 10, height: 10), scale: 2) == nil)
-    }
-
-    @Test func aScaleOfOneIsPoints() {
-        let strip = CGRect(x: 10, y: 20, width: 100, height: 31)
-        #expect(CropMath.pixelRect(bar: bar(strip), item: CGRect(x: 15, y: 20, width: 30, height: 31), scale: 1) == CGRect(x: 5, y: 0, width: 30, height: 31))
+        Case(name: "a fractional item is rounded out to whole pixels", strip: short, item: CGRect(x: 10.25, y: 1.25, width: 20.5, height: 10.5), scale: 2,
+             crop: CGRect(x: 20, y: 2, width: 42, height: 22)),
+        Case(name: "no area", strip: short, item: CGRect(x: 5, y: 5, width: 0, height: 10), scale: 2, crop: nil),
+        Case(name: "no scale", strip: short, item: CGRect(x: 5, y: 5, width: 10, height: 10), scale: 0, crop: nil),
+        Case(name: "no strip", strip: .zero, item: CGRect(x: 5, y: 5, width: 10, height: 10), scale: 2, crop: nil),
+        Case(name: "a scale of one is points", strip: CGRect(x: 10, y: 20, width: 100, height: 31), item: CGRect(x: 15, y: 20, width: 30, height: 31),
+             scale: 1, crop: CGRect(x: 5, y: 0, width: 30, height: 31)),
+        // With the lid open the laptop's bar is at CoreGraphics (3360, 773): a crop of an item in it, by global frames.
+        Case(name: "an item on the laptop bar is cropped from the bar's place", strip: CGRect(x: 3360, y: 773, width: 1728, height: 33),
+             item: CGRect(x: 4318, y: 774, width: 24, height: 30), scale: 2, crop: CGRect(x: 1916, y: 2, width: 48, height: 60)),
+    ])
+    func pixelRect(_ example: Case) {
+        #expect(CropMath.pixelRect(bar: bar(example.strip), item: example.item, scale: example.scale) == example.crop, "\(example.name)")
     }
 }
 
@@ -119,50 +109,47 @@ struct StripCaptureTests {
 
     // MARK: Where the strip is
 
-    @Test func theMainDisplaysStripIsTheBarsWindowAtTheTopOfItsFrameInCoreGraphics() throws {
-        // The bar is MenuBarAgent's window, 30 points, and not what the display's visible frame leaves (31).
-        let geometry = try StripGeometry.of(bar(CGRect(x: 0, y: 0, width: 3360, height: 30)), display: DisplayFixtures.deskMain, layout: .desk)
-        #expect(geometry.strip == CGRect(x: 0, y: 0, width: 3360, height: 30))
-        #expect(geometry.sourceRect == CGRect(x: 0, y: 0, width: 3360, height: 30))
-        #expect(geometry.pixelSize == CGSize(width: 6720, height: 60))
+    struct Geometry: Sendable {
+        let name: String
+        let bar: CGRect
+        let notch: CGRect?
+        let display: DisplayInfo
+        let layout: DisplayLayout
+        let strip: CGRect
+        /// The capture's source rectangle, in the display's own points, when the case says it.
+        let sourceRect: CGRect?
+        let pixelSize: CGSize?
     }
 
-    @Test func aDisplayLeftOfTheMainOneGivesItsStripInGlobalAndLocalPoints() throws {
+    @Test(arguments: [
+        // The bar is MenuBarAgent's window, 30 points, and not what the display's visible frame leaves (31).
+        Geometry(name: "the main display's strip is the bar's window at the top of its frame", bar: CGRect(x: 0, y: 0, width: 3360, height: 30), notch: nil,
+                 display: DisplayFixtures.deskMain, layout: .desk, strip: CGRect(x: 0, y: 0, width: 3360, height: 30),
+                 sourceRect: CGRect(x: 0, y: 0, width: 3360, height: 30), pixelSize: CGSize(width: 6720, height: 60)),
         // The side display's bar: its top is at CoreGraphics y = -491, and it starts at x = -1800.
-        let geometry = try StripGeometry.of(bar(CGRect(x: -1800, y: -491, width: 1800, height: 30)), display: DisplayFixtures.deskPortrait,
-                                            layout: .desk)
-        #expect(geometry.strip == CGRect(x: -1800, y: -491, width: 1800, height: 30))
-        #expect(geometry.sourceRect == CGRect(x: 0, y: 0, width: 1800, height: 30), "local to the display")
-        #expect(geometry.pixelSize == CGSize(width: 3600, height: 60))
+        Geometry(name: "a display left of the main one gives its strip in global and local points",
+                 bar: CGRect(x: -1800, y: -491, width: 1800, height: 30), notch: nil, display: DisplayFixtures.deskPortrait, layout: .desk,
+                 strip: CGRect(x: -1800, y: -491, width: 1800, height: 30), sourceRect: CGRect(x: 0, y: 0, width: 1800, height: 30),
+                 pixelSize: CGSize(width: 3600, height: 60)),
+        Geometry(name: "the notched laptop's strip is its full width and thirty-three points high",
+                 bar: CGRect(x: 0, y: 0, width: 1728, height: 33), notch: CGRect(x: 771.5, y: 0, width: 185, height: 32),
+                 display: DisplayFixtures.laptopAlone, layout: .laptop, strip: CGRect(x: 0, y: 0, width: 1728, height: 33), sourceRect: nil,
+                 pixelSize: CGSize(width: 3456, height: 66)),
+        // With the lid open the laptop's bar is at CoreGraphics (3360, 773); the capture's source rectangle is in the display's own points.
+        Geometry(name: "the laptop beside the desk captures from its own top left corner", bar: CGRect(x: 3360, y: 773, width: 1728, height: 33), notch: nil,
+                 display: DisplayFixtures.laptopRightOfDesk, layout: .deskWithLaptopOpen, strip: CGRect(x: 3360, y: 773, width: 1728, height: 33),
+                 sourceRect: CGRect(x: 0, y: 0, width: 1728, height: 33), pixelSize: nil),
+    ])
+    func theStripOfADisplay(_ example: Geometry) throws {
+        let geometry = try StripGeometry.of(bar(example.bar, notch: example.notch), display: example.display, layout: example.layout)
+        #expect(geometry.strip == example.strip, "\(example.name)")
+        if let sourceRect = example.sourceRect { #expect(geometry.sourceRect == sourceRect, "\(example.name)") }
+        if let pixelSize = example.pixelSize { #expect(geometry.pixelSize == pixelSize, "\(example.name)") }
     }
 
     @Test func aBarWithNoRectangleHasNoStrip() {
         #expect(throws: StripCaptureError.noMenuBar) {
             try StripGeometry.of(bar(.zero), display: DisplayFixtures.deskPortrait, layout: .desk)
         }
-    }
-
-    @Test func theNotchedLaptopsStripIsItsFullWidthAndThirtyThreePointsHigh() throws {
-        let notch = CGRect(x: 771.5, y: 0, width: 185, height: 32)
-        let geometry = try StripGeometry.of(bar(CGRect(x: 0, y: 0, width: 1728, height: 33), notch: notch), display: DisplayFixtures.laptopAlone,
-                                            layout: .laptop)
-        #expect(geometry.strip == CGRect(x: 0, y: 0, width: 1728, height: 33))
-        #expect(geometry.pixelSize == CGSize(width: 3456, height: 66))
-    }
-
-    @Test func theLaptopBesideTheDeskCapturesFromItsOwnTopLeftCorner() throws {
-        // With the lid open the laptop's bar is at CoreGraphics (3360, 773); the capture's source rectangle is in the display's own points.
-        let layout = DisplayLayout.deskWithLaptopOpen
-        let geometry = try StripGeometry.of(bar(CGRect(x: 3360, y: 773, width: 1728, height: 33)), display: DisplayFixtures.laptopRightOfDesk,
-                                            layout: layout)
-        #expect(geometry.strip == CGRect(x: 3360, y: 773, width: 1728, height: 33))
-        #expect(geometry.sourceRect == CGRect(x: 0, y: 0, width: 1728, height: 33))
-    }
-
-    @Test func anItemOnTheLaptopBarIsCroppedFromTheBarsPlace() {
-        // A crop of an item in the laptop's bar, by global frames.
-        let laptopBar = bar(CGRect(x: 3360, y: 773, width: 1728, height: 33))
-        #expect(CropMath.pixelRect(bar: laptopBar, item: CGRect(x: 4318, y: 774, width: 24, height: 30), scale: 2)
-            == CGRect(x: 1916, y: 2, width: 48, height: 60))
     }
 }

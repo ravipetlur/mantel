@@ -9,6 +9,10 @@ CODE_SIGN_STYLE = Manual
 CODE_SIGN_IDENTITY = -
 DEVELOPMENT_TEAM =
 
+// The GitHub repository (owner/repo) the app checks for updates. Empty, it doesn't: the build has no updater. The release
+// workflow sets it for the builds it signs.
+MANTEL_UPDATE_REPO =
+
 // Under the hardened runtime, library validation refuses a library signed without a team, so a Debug build signed ad
 // hoc couldn't load Xcode's debug dylib (Mantel.debug.dylib) and would crash at launch: the code goes into the
 // executable instead. Signed with a certificate, Local.xcconfig can turn it back on (Xcode Previews use it).

@@ -3,7 +3,7 @@ import Foundation
 import MKCore
 import Synchronization
 
-/// The one list of the apps that are running, for the menu bar reader, the probes and whatever reacts to a launch or a quit.
+/// The one list of the apps that are running, for the menu bar reader and whatever reacts to a launch or a quit.
 ///
 /// - **Updated from `NSWorkspace.runningApplications`**, which is observed with KVO. (The workspace's launch and quit
 ///   notifications are not sent for every agent app's quit; the property changes for all of them.) KVO calls back on the main

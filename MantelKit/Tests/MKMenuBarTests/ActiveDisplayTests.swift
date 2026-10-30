@@ -11,7 +11,7 @@ import Testing
 struct ActiveDisplayTests {
     private func read(_ fixture: InventoryFixtures.Fixture, concealed: Bool = false, notVoting: Set<String> = []) async -> Inventory {
         let reader = MenuBarReader(ax: fixture.ax, runningApps: { fixture.running }, clock: FakeClock())
-        let snapshot = await reader.snapshot(layout: fixture.layout, includeRawTree: false)
+        let snapshot = await reader.snapshot(layout: fixture.layout)
         var memory = IndexMemory()
         var input = snapshot.matchInput(ownBundleID: InventoryFixtures.ownBundleID)
         if concealed {

@@ -8,7 +8,7 @@ import Testing
 
 /// What the session does when the person gives Mantel a file, or puts back what a platform test left: what depends on it is asked again,
 /// and the state says so. (Every engine here is a fake, or a real one over a file in a folder of the test's own.)
-@Suite("Session: permissions that change", .timeLimit(.minutes(1)))
+@Suite("Session: permissions that change", .serialized, .timeLimit(.minutes(1)))
 struct MenuBarSessionPermissionsTests {
     private let needsTheFile = "Choose the “Allow in the Menu Bar” file in Settings › Permissions"
 

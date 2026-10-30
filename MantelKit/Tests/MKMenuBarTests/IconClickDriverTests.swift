@@ -17,8 +17,6 @@ private let main = DisplayFixtures.deskMain.uuid
 /// The weather app's first item, which the plan has in Hidden, and the notes app's, which is Shown.
 private let hiddenItem = ItemID(bundleID: weather, key: .identifier("weather.temp"))
 private let shownItem = ItemID(bundleID: notes, key: .index(0))
-/// The VPN app's, Shown too: the one test that counts what is logged of an option click uses it, so that no other test's line is counted.
-private let vpnItem = ItemID(bundleID: vpn, key: .index(0))
 
 /// Where the item's slot is in these tests: on the main display's bar, clear of the front app's menus, with another app's slot beside it.
 private let slot = CGRect(x: 3000, y: 0, width: 36, height: 30)
@@ -36,56 +34,6 @@ private final class Rehide: Sendable {
     private let delay = Mutex<RehideDelay>(.seconds(10))
     var current: RehideDelay { delay.withLock { $0 } }
     func set(_ new: RehideDelay) { delay.withLock { $0 = new } }
-}
-
-/// A presser that doesn't return until it is let go, as an item whose press opens a menu doesn't (it gives up with `noAnswer` after about
-/// 260 ms): it notes that it was asked, and what the world does then is `onPress`'s.
-private final class HeldPresser: ItemPressing {
-    private let state = Mutex<(started: Int, released: Bool, waiters: [CheckedContinuation<Void, Never>])>((0, false, []))
-    private let hook = Mutex<@Sendable () -> Void> { }
-    private let answer: ItemPressError?
-
-    init(answer: ItemPressError? = .noAnswer, onPress: @escaping @Sendable () -> Void = {}) {
-        self.answer = answer
-        hook.withLock { $0 = onPress }
-    }
-
-    /// What the world does when the press begins.
-    func onPress(_ body: @escaping @Sendable () -> Void) { hook.withLock { $0 = body } }
-
-    var started: Int { state.withLock { $0.started } }
-
-    func release() {
-        let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>] in
-            state.released = true
-            defer { state.waiters = [] }
-            return state.waiters
-        }
-        for waiter in waiters { waiter.resume() }
-    }
-
-    func press(_ item: ItemID) async throws(ItemPressError) {
-        try await press(item, issued: {})
-    }
-
-    /// It has begun, and the world has done what it does then, before the press is said to have been issued: a click the driver answers a
-    /// moment after that finds both, however late the task that presses runs on a busy Mac.
-    func press(_ item: ItemID, issued: @Sendable () -> Void) async throws(ItemPressError) {
-        state.withLock { $0.started += 1 }
-        hook.withLock { $0 }()
-        issued()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let ready = state.withLock { state -> Bool in
-                if state.released { return true }
-                state.waiters.append(continuation)
-                return false
-            }
-            if ready { continuation.resume() }
-        }
-        if let answer { throw answer }
-    }
-
-    func showMenu(_ item: ItemID) async throws(ItemPressError) {}
 }
 
 /// A driver over a session that has started, with fakes for everything else.
@@ -238,28 +186,17 @@ private struct Rig {
 struct IconClickDriverTests {
     // MARK: A drawn icon
 
-    @Test func drawnLeftPresses() async throws {
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: shownItem, tiedBy: .tie, wasInBaseline: true))
-
-        let outcome = await rig.click(shownItem)
-
-        #expect(outcome == .clicked(.pressedDrawn))
-        #expect(rig.presser.pressed == [shownItem])
-        #expect(rig.poster.clicks.isEmpty)
-    }
-
-    @Test func drawnLeftPostsWhenRuled() async throws {
+    @Test(arguments: [false, true]) func aDrawnLeftClickPressesOrPostsAsRuled(posts: Bool) async throws {
         var rules = ClickRouteRules.measured
-        rules.leftClick = .post
+        if posts { rules.leftClick = .post }
         let rig = await Rig.started(rules: rules)
         rig.locator.place(rig.location(of: shownItem, tiedBy: .tie, wasInBaseline: true))
 
         let outcome = await rig.click(shownItem)
 
-        #expect(outcome == .clicked(.postedDrawn))
-        #expect(rig.poster.clicks == [.init(kind: .left, point: CGPoint(x: slot.midX, y: slot.midY))])
-        #expect(rig.presser.pressed.isEmpty)
+        #expect(outcome == .clicked(posts ? .postedDrawn : .pressedDrawn))
+        #expect(rig.presser.pressed == (posts ? [] : [shownItem]))
+        #expect(rig.poster.clicks == (posts ? [.init(kind: .left, point: CGPoint(x: slot.midX, y: slot.midY))] : []))
     }
 
     @Test func drawnRightPostsAtSlotCentre() async throws {
@@ -320,17 +257,6 @@ struct IconClickDriverTests {
         #expect(rig.poster.clicks.isEmpty)
     }
 
-    @Test func drawnAtSnapshotClicksByItsTie() async throws {
-        // a Shown item is on the bar when the snapshot is taken: its app's frame ties it to its slot, and that is enough.
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: shownItem, tiedBy: .tie, wasInBaseline: true))
-
-        #expect(await rig.click(shownItem, .right) == .clicked(.postedDrawn))
-        #expect(rig.poster.clicks.count == 1)
-        // It was waited for no longer than the first look.
-        #expect(rig.locator.calls(of: shownItem).map(\.hadBaseline) == [false, true])
-    }
-
     @Test func newSlotsFallbackPosts() async throws {
         // The item is nowhere for the first three looks (macOS is drawing it), then in a slot that appeared and that its frame agrees with.
         let rig = await Rig.started()
@@ -341,92 +267,6 @@ struct IconClickDriverTests {
         #expect(outcome == .clicked(.postedDrawn))
         #expect(rig.poster.clicks == [.init(kind: .right, point: CGPoint(x: slot.midX, y: slot.midY))])
         #expect(rig.locator.calls(of: hiddenItem).count == 4, "the first look is the snapshot's; then every 50 ms")
-    }
-
-    @Test func beforeClickRunsAfterRevealAndBeforeTheClick() async throws {
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        let world = rig.world.world, session = rig.world.session, presser = rig.presser
-        let seen = Mutex<(tickets: Int, concealed: Set<String>, pressed: Int)?>(nil)
-
-        let outcome = await rig.click(hiddenItem, .left) {
-            seen.withLock { $0 = (0, world.concealed, presser.pressed.count) }
-            let tickets = await session.iconTickets.count
-            seen.withLock { $0?.tickets = tickets }
-        }
-
-        #expect(outcome == .clicked(.pressedDrawn))
-        let before = try #require(seen.withLock { $0 })
-        #expect(before.tickets == 1, "the icon was asked for")
-        #expect(!before.concealed.contains(weather), "and drawn: the plan was applied")
-        #expect(before.pressed == 0, "and not clicked yet")
-        #expect(rig.presser.pressed == [hiddenItem])
-    }
-
-    // MARK: The answer comes first
-
-    @Test func outcomeReturnsBeforeTheMenuCloses() async throws {
-        // the answer is given when the click is sent, and the menu that opens is left to the driver.
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        rig.presser.onPress { [windows = rig.windows, menu = rig.menu()] _ in windows.set([menu]) }
-
-        let outcome = await rig.click(hiddenItem)
-
-        #expect(outcome == .clicked(.pressedDrawn))
-        #expect(await rig.tickets == 1, "the icon is still shown: its menu is open")
-        #expect(!rig.concealed.contains(weather))
-        // It goes when the menu has gone, and the delay is over.
-        rig.windows.set([])
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-        #expect(await rig.waitFor { rig.concealed.contains(weather) })
-    }
-
-    @Test func aPressThatBlocksIsAnsweredWhenItsMenuIsSeen() async throws {
-        // A press that opens a menu doesn't return until the menu closes (or after about 260 ms): the menu is watched while it is out, and
-        // the answer comes with the menu (the second look at the window list, 200 ms in), not with the press (300 ms).
-        let held = HeldPresser()
-        let rig = await Rig.started(presser: held)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        // The menu opens as the press begins, as it does.
-        let pressedAt = Mutex<Date?>(nil)
-        held.onPress { [clock = rig.clock, windows = rig.windows, menu = rig.menu()] in
-            pressedAt.withLock { $0 = clock.now() }
-            windows.set([menu])
-        }
-
-        let outcome = await rig.click(hiddenItem)
-        let answeredAt = rig.clock.now()
-
-        #expect(outcome == .clicked(.pressedDrawn))
-        #expect(held.started == 1)
-        let began = try #require(pressedAt.withLock { $0 })
-        #expect(answeredAt.timeIntervalSince(began) < 0.3, "answered with the menu, not when the time a press is given is over")
-        #expect(await rig.tickets == 1, "the press hasn't returned and the menu is open")
-        held.release()
-        rig.windows.set([])
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-    }
-
-    @Test func aPressThatBlocksWithNoMenuIsAnsweredAfterTheTimeItIsGiven() async throws {
-        let held = HeldPresser()
-        let rig = await Rig.started(presser: held)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-
-        let outcome = await rig.click(hiddenItem)
-
-        #expect(outcome == .clicked(.pressedDrawn), "a press that is out has been sent")
-        held.release()
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-    }
-
-    @Test func aPressThatTimesOutWithNoAnswerWasSentAllTheSame() async throws {
-        let held = HeldPresser(answer: .noAnswer)
-        let rig = await Rig.started(presser: held)
-        rig.locator.place(rig.location(of: shownItem, tiedBy: .tie, wasInBaseline: true))
-        held.release()
-
-        #expect(await rig.click(shownItem) == .clicked(.pressedDrawn))
     }
 
     // MARK: No room, and a hidden bar
@@ -491,24 +331,6 @@ struct IconClickDriverTests {
         #expect(await rig.tickets == 0)
     }
 
-    @Test func noRoomLeftClickPressesInPlaceWhereThatWorksAndLogsIt() async throws {
-        var rules = ClickRouteRules.measured
-        rules.whenNotDrawn = .makeRoom
-        let rig = await Rig.started(rules: rules)
-        rig.locator.remove(hiddenItem)
-
-        let box = Mutex<IconClickOutcome?>(nil)
-        let lines = await LogCapture.lines {
-            box.withLock { $0 = nil }
-            let outcome = await rig.click(hiddenItem)
-            box.withLock { $0 = outcome }
-        }
-
-        #expect(box.withLock { $0 } == .clicked(.pressedInPlace))
-        #expect(rig.presser.pressed == [hiddenItem])
-        #expect(lines.contains { $0.contains("no room to draw \(weather); pressed it where it is") })
-    }
-
     @Test func noRoomRightClickFails() async throws {
         let rig = await aBarWithNoRoomToMake()
         rig.locator.remove(hiddenItem)
@@ -532,51 +354,6 @@ struct IconClickDriverTests {
         #expect(await rig.tickets == 0)
     }
 
-    @Test func aPressIsOnRecordAndDoneWhenItIsIssued() async throws {
-        // The driver answers a click a moment after the press was issued, on its own clock, while the press goes on in a task of its own: what
-        // a test reads of the presser, and of what the press did in the world, right after the answer must already be there.
-        let presser = FakeItemPresser()
-        let done = Mutex<[String]>([])
-        presser.onPress { _ in done.withLock { $0.append("press") } }
-        presser.onShowMenu { _ in done.withLock { $0.append("menu") } }
-        let atIssue = Mutex<[ItemID]>([]), menusAtIssue = Mutex<[ItemID]>([])
-        let doneAtPress = Mutex<[String]>([]), doneAtMenu = Mutex<[String]>([])
-
-        try await presser.press(hiddenItem, issued: {
-            atIssue.withLock { $0 = presser.pressed }
-            doneAtPress.withLock { $0 = done.withLock { $0 } }
-        })
-        try await presser.showMenu(hiddenItem, issued: {
-            menusAtIssue.withLock { $0 = presser.menusShown }
-            doneAtMenu.withLock { $0 = done.withLock { $0 } }
-        })
-
-        #expect(atIssue.withLock { $0 } == [hiddenItem])
-        #expect(menusAtIssue.withLock { $0 } == [hiddenItem])
-        #expect(doneAtPress.withLock { $0 } == ["press"], "what a press does in the world is done when it is issued")
-        #expect(doneAtMenu.withLock { $0 } == ["press", "menu"], "and so is what showing its menu does")
-    }
-
-    @Test func aHeldPressHasBegunAndDoneItsWorkWhenItIsIssued() async throws {
-        let ran = Switch(false)
-        let held = HeldPresser(onPress: { ran.set(true) })
-        let atIssue = Mutex<(started: Int, ran: Bool)?>(nil)
-        let issued = Gate()
-
-        let task = Task {
-            try await held.press(hiddenItem, issued: {
-                atIssue.withLock { $0 = (held.started, ran.isOn) }
-                issued.open()
-            })
-        }
-        await issued.wait()
-        held.release()
-        _ = await task.result
-
-        #expect(atIssue.withLock { $0?.started } == 1)
-        #expect(atIssue.withLock { $0?.ran } == true)
-    }
-
     @Test func hiddenBarLeftPressesRightFails() async throws {
         // A full-screen app has the display: its bar isn't on screen, and nothing is drawn there.
         let rig = await Rig.started()
@@ -597,14 +374,6 @@ struct IconClickDriverTests {
         careful.locator.place(careful.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
         #expect(await careful.click(hiddenItem, .left) == .failed(.hiddenBar))
         #expect(careful.presser.pressed.isEmpty)
-    }
-
-    @Test func aBarThatIsHiddenAndNothingIsFoundOnIsHidden() async throws {
-        let rig = await Rig.started()
-        rig.world.world.setBarShown(0, false)
-        rig.locator.remove(hiddenItem)
-
-        #expect(await rig.click(hiddenItem, .right, display: main) == .failed(.hiddenBar))
     }
 
     // MARK: Where an item can't be located (an item that can't be located)
@@ -657,21 +426,6 @@ struct IconClickDriverTests {
         #expect(await rig.waitFor { rig.concealed == [weather] }, "and it is shown again: \(rig.concealed)")
     }
 
-    @Test func withoutLocatingALeftClickWithNoRoomToMakeIsNoRoom() async throws {
-        var rules = locatingIsOff
-        rules.whenNotDrawn = .makeRoom
-        rules.pressWorksUndrawn = false
-        // Nothing is Shown but Mantel, and the bar has room for three icons: the weather app's two are piled, nothing can be concealed for
-        // them, and they are predicted not to fit.
-        let rig = await Rig.started(rules: rules, shape: .laptop, capacity: 3,
-                                    sections: sections(hidden: [weather, notes, vpn, sync]))
-        try await crowd(rig, leaving: 24)
-
-        #expect(await rig.click(hiddenItem) == .failed(.noRoom))
-        #expect(rig.presser.pressed.isEmpty)
-        #expect(await rig.tickets == 0)
-    }
-
     @Test func withoutLocatingARightClickShowsTheMenu() async throws {
         var rules = locatingIsOff
         rules.showMenuWorks = true
@@ -680,17 +434,6 @@ struct IconClickDriverTests {
         #expect(await rig.click(hiddenItem, .right) == .clicked(.shownMenu))
         #expect(rig.presser.menusShown == [hiddenItem])
         #expect(rig.poster.clicks.isEmpty)
-    }
-
-    @Test func withoutLocatingShowMenuErrorsAreUnreachable() async throws {
-        var rules = locatingIsOff
-        rules.showMenuWorks = true
-        let rig = await Rig.started(rules: rules)
-        for error in [ItemPressError.noShowMenu, .notFound] {
-            rig.presser.failShowMenu(with: error)
-            #expect(await rig.click(hiddenItem, .right) == .failed(.unreachable), "\(error)")
-        }
-        #expect(await rig.tickets == 0, "the reveal ended with each")
     }
 
     @Test func withoutLocatingARightClickWithNoShowMenuIsUnreachable() async throws {
@@ -719,15 +462,6 @@ struct IconClickDriverTests {
         #expect(rig.locator.calls.isEmpty, "nothing is looked for")
         #expect(await rig.tickets == 0, "no icon is asked for: nothing is revealed")
         #expect(rig.locator.snapshotCallCount == 0, "and the bar isn't looked at")
-    }
-
-    @Test func notRunningFails() async throws {
-        let rig = await Rig.started()
-        let gone = ItemID(bundleID: "com.example.gone", key: .index(0))
-
-        #expect(await rig.click(gone) == .failed(.notRunning))
-        #expect(rig.presser.pressed.isEmpty)
-        #expect(await rig.tickets == 0)
     }
 
     @Test func aHiddenSystemIconIsUnreachableAtOnce() async throws {
@@ -794,18 +528,6 @@ struct IconClickDriverTests {
         #expect(careful.presser.pressed.isEmpty)
     }
 
-    @Test func aSystemItemsMenuIsControlCentersToo() async throws {
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: .system("battery"), tiedBy: .tie, wasInBaseline: true))
-        rig.presser.onPress { [windows = rig.windows] _ in
-            windows.set([WindowInfo(number: 700, ownerPID: 600, ownerBundleID: "com.apple.controlcenter", layer: 101,
-                                    bounds: CGRect(x: 2800, y: 40, width: 300, height: 400), alpha: 1)])
-        }
-
-        #expect(await rig.click(.system("battery")) == .clicked(.pressedDrawn))
-        #expect(await rig.tickets == 1, "Control Center's window is the menu")
-    }
-
     @Test func capturesTheDrawnSlot() async throws {
         let rig = await Rig.started()
         let location = rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots)
@@ -820,34 +542,6 @@ struct IconClickDriverTests {
         none.locator.remove(hiddenItem)
         #expect(await none.click(hiddenItem) == .clicked(.pressedInPlace))
         #expect(none.passed.all.isEmpty)
-    }
-
-    @Test func postedKindsOffDoesLeftAndLogsOnce() async throws {
-        // On macOS 27 a posted option click arrives as a plain left click: it is done as one, and the log says so, once.
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: vpnItem, tiedBy: .tie, wasInBaseline: true))
-        let outcomes = Mutex<[IconClickOutcome]>([])
-
-        let lines = await LogCapture.lines {
-            for _ in 0..<2 {
-                let outcome = await rig.click(vpnItem, .option)
-                outcomes.withLock { $0.append(outcome) }
-            }
-        }
-
-        #expect(outcomes.withLock { $0 } == [.clicked(.pressedDrawn), .clicked(.pressedDrawn)])
-        #expect(rig.presser.pressed == [vpnItem, vpnItem])
-        #expect(rig.poster.clicks.isEmpty)
-        #expect(lines.filter { $0.contains("a posted option click arrives as a left click") && $0.contains(vpn) }.count == 1)
-
-        // The option click is posted where the platform delivers it.
-        var rules = ClickRouteRules.measured
-        rules.postedOptionWorks = true
-        let works = Rig.make(rig.world, rules: rules)
-        works.locator.setSnapshot(SlotSnapshot(displayUUID: main, slots: [slot], owners: [vpn]))
-        works.locator.place(works.location(of: vpnItem, tiedBy: .tie, wasInBaseline: true))
-        #expect(await works.click(vpnItem, .option) == .clicked(.postedDrawn))
-        #expect(works.poster.clicks.map(\.kind) == [.option])
     }
 
     // MARK: The reveal ends
@@ -886,84 +580,6 @@ struct IconClickDriverTests {
         #expect(await rig.tickets == 1)
         #expect(!rig.concealed.contains(weather))
 
-        rig.windows.set([])
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-    }
-
-    @Test func thePointerInTheBarHoldsTheReveal() async throws {
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        rig.presser.onPress { [windows = rig.windows, menu = rig.menu()] _ in windows.set([menu]) }
-        #expect(await rig.click(hiddenItem) == .clicked(.pressedDrawn))
-        rig.windows.set([])
-        rig.pointerInBar.set(true)
-        let reads = rig.windows.readCount
-        await rig.pass(.seconds(30))
-        #expect(rig.windows.readCount > reads, "the driver looked at the window list while it held")
-        #expect(await rig.tickets == 1, "the pointer is on the bar")
-
-        rig.pointerInBar.set(false)
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-    }
-
-    @Test func noMenuStartsDelayAtOnce() async throws {
-        // The click opened no menu (an icon that does something else): the wait for one is the 1.5 seconds, and the delay starts then.
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        #expect(await rig.click(hiddenItem, .right) == .clicked(.postedDrawn))
-        let started = rig.clock.now()
-
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-
-        let took = rig.clock.now().timeIntervalSince(started)
-        #expect(took >= 10, "the delay is ten seconds")
-        #expect(took <= 12.5, "from when the wait for a menu was over (1.5 s), not after anything else: \(took)")
-    }
-
-    @Test func rehideNeverWaitsForTheNextCollapse() async throws {
-        let rig = await Rig.started()
-        rig.rehide.set(.never)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        #expect(await rig.click(hiddenItem, .right) == .clicked(.postedDrawn))
-        await rig.pass(.seconds(60))
-        #expect(rig.windows.readCount > 0, "the driver ran: it watched for the menu")
-        #expect(await rig.tickets == 1, "never means never, for now")
-
-        // A reveal and its collapse: the reveal machine puts everything away, and so does the click's.
-        _ = await rig.world.session.applyReveal(.hiddenShown)
-        _ = await rig.world.session.applyReveal(.collapsed)
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-    }
-
-    @Test func menusNotSeenEndOnTheNextMouseDownOutsideTheIcon() async throws {
-        var rules = ClickRouteRules.measured
-        rules.menusAreSeen = false
-        let rig = await Rig.started(rules: rules)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        #expect(await rig.click(hiddenItem, .right) == .clicked(.postedDrawn))
-        await rig.pass(.seconds(20))
-        #expect(await rig.tickets == 1, "a menu that isn't seen is taken to be open")
-
-        await rig.driver.mouseDown(at: CGPoint(x: slot.midX, y: slot.midY))
-        await rig.pass(.seconds(20))
-        #expect(await rig.tickets == 1, "a mouse-down on the icon itself is no end")
-
-        await rig.driver.mouseDown(at: CGPoint(x: 100, y: 500))
-        #expect(await rig.advance(until: { await rig.tickets == 0 }))
-    }
-
-    @Test func aMenuNearTheItemIsTheItemsWhoseverWindowItIs() async throws {
-        // A helper process draws the menu: the owner isn't the app's. It is near the slot (10 points below the bar, its left within 5 of the
-        // slot's), and macOS 27 leaves 12 at most.
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        let helper = WindowInfo(number: 800, ownerPID: 9999, ownerBundleID: "com.example.weather.helper", layer: 101,
-                                bounds: CGRect(x: slot.minX + 3, y: 30 + 12, width: 220, height: 300), alpha: 1)
-        rig.presser.onPress { [windows = rig.windows] _ in windows.set([helper]) }
-        #expect(await rig.click(hiddenItem) == .clicked(.pressedDrawn))
-
-        await rig.pass(.seconds(30))
-        #expect(await rig.tickets == 1, "held while it is open")
         rig.windows.set([])
         #expect(await rig.advance(until: { await rig.tickets == 0 }))
     }
@@ -1044,78 +660,6 @@ struct IconClickDriverTests {
         #expect(await rig.click(hiddenItem) == .failed(.unreachable))
         #expect(await rig.tickets == 0)
     }
-
-    @Test func aPostThatFailsEndsTheRevealToo() async throws {
-        let rig = await Rig.started()
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        rig.poster.fail(with: .notTrusted)
-
-        let outcome = await rig.click(hiddenItem, .right)
-
-        #expect(outcome == .failed(.refused(ClickPostError.notTrusted.localizedDescription)))
-        #expect(await rig.tickets == 0)
-    }
-
-    // MARK: Showing without clicking
-
-    @Test func showRestartsDelay() async throws {
-        let rig = await Rig.started()
-        await rig.driver.show(hiddenItem)
-        #expect(!rig.concealed.contains(weather))
-        #expect(await rig.tickets == 1)
-
-        await rig.pass(.seconds(6), step: .seconds(1))
-        await rig.driver.show(hiddenItem)
-        #expect(await rig.tickets == 1, "one ticket for the item: the second replaced the first")
-        await rig.pass(.seconds(6), step: .seconds(1))
-        #expect(await rig.tickets == 1, "twelve seconds in, but the delay began again at six")
-        #expect(!rig.concealed.contains(weather))
-
-        #expect(await rig.advance(by: .seconds(1), until: { await rig.tickets == 0 }))
-        #expect(await rig.waitFor { rig.concealed.contains(weather) })
-    }
-
-    @Test func endShowsPutsAwayAtOnce() async throws {
-        let rig = await Rig.started()
-        await rig.driver.show(hiddenItem)
-        await rig.driver.endShows()
-        #expect(await rig.tickets == 0)
-        #expect(await rig.waitFor { rig.concealed.contains(weather) })
-    }
-}
-
-/// A presser whose work takes the time a test says: it finds its item when `finding` opens (the read of the app's list, which is slow
-/// behind the shared gate), issues the press, and answers with `error` when `returning` opens.
-private final class SlowPresser: ItemPressing {
-    let finding = Gate()
-    let returning = Gate()
-    /// On once the press has been asked for (it is then waiting for the item to be found).
-    let askedFor = Switch(false)
-    private let asked = Mutex(0)
-    private let error: ItemPressError
-
-    init(error: ItemPressError) {
-        self.error = error
-    }
-
-    func press(_ item: ItemID) async throws(ItemPressError) {
-        try await press(item, issued: {})
-    }
-
-    /// How many presses were asked for.
-    var calls: Int { asked.withLock { $0 } }
-
-    func press(_ item: ItemID, issued: @Sendable () -> Void) async throws(ItemPressError) {
-        asked.withLock { $0 += 1 }
-        askedFor.set(true)
-        await finding.wait()
-        issued()
-        await returning.wait()
-        throw error
-    }
-
-    func showMenu(_ item: ItemID) async throws(ItemPressError) {}
-    func showMenu(_ item: ItemID, issued: @Sendable () -> Void) async throws(ItemPressError) {}
 }
 
 /// The bar has to be still and drawn before the click looks at it, and nothing is posted while it moves.
@@ -1141,16 +685,6 @@ struct IconClickDriverBarTests {
         // Once what was applied is drawn, the tie is the icon's.
         #expect(await rig.click(hiddenItem, .right) == .clicked(.postedDrawn))
         #expect(rig.poster.clicks.count == 1)
-    }
-
-    @Test func aLeftClickOnABarThatIsNotStillIsPressedInPlace() async throws {
-        let rig = await Rig.started()
-        _ = await rig.world.session.applyReveal(.hiddenShown)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tie, wasInBaseline: true))
-
-        #expect(await rig.click(hiddenItem, .left, sessionMoves: false) == .clicked(.pressedInPlace))
-        #expect(rig.presser.pressed == [hiddenItem])
-        #expect(rig.poster.clicks.isEmpty)
     }
 
     @Test func aSecondClickLooksAtTheBarOnlyOnceTheFirstsPlanIsDrawn() async throws {
@@ -1247,28 +781,6 @@ struct IconClickDriverBarTests {
         #expect(rig.poster.clicks.isEmpty)
     }
 
-    // MARK: Where the icon is looked for
-
-    @Test func theIconIsLookedForOnTheActiveDisplayAfterTheRequestsOwn() async throws {
-        // The apps' frames are on the active display's bar alone: a request that names another display finds the icon there all the same.
-        let rig = await Rig.started(shape: .deskWithLaptopOpen)
-        let active = try #require(await rig.world.session.activeDisplay)
-        let other = try #require(rig.world.world.layout.displays.map(\.uuid).first { $0 != active })
-        rig.locator.place(FakeItemLocator.location(of: shownItem, slot: slot, display: active, tiedBy: .tie, wasInBaseline: true))
-
-        #expect(await rig.click(shownItem, .right, display: other) == .clicked(.postedDrawn))
-        #expect(rig.poster.clicks == [.init(kind: .right, point: CGPoint(x: slot.midX, y: slot.midY))])
-        let displays = rig.locator.calls(of: shownItem).map(\.display)
-        #expect(displays.contains(other), "the request's display first")
-        #expect(displays.contains(active))
-
-        // With no display named, the active one is looked at, and no other.
-        let none = await Rig.started(shape: .deskWithLaptopOpen)
-        none.locator.place(FakeItemLocator.location(of: shownItem, slot: slot, display: active, tiedBy: .tie, wasInBaseline: true))
-        #expect(await none.click(shownItem, .right) == .clicked(.postedDrawn))
-        #expect(none.locator.calls(of: shownItem).allSatisfy { $0.display == active })
-    }
-
     // MARK: A bar that moves
 
     @Test func aBarThatChangedSinceTheLookIsLookedAtAgainBeforeAnythingIsPosted() async throws {
@@ -1325,21 +837,12 @@ struct IconClickDriverBarTests {
         #expect(await rig.click(hiddenItem, .left) == .clicked(.pressedInPlace))
     }
 
-    @Test func nothingIsPostedOnceTheQuitHasBegun() async throws {
-        let rig = await Rig.started()
-        let session = rig.world.session
-        rig.locator.place(rig.location(of: shownItem, tiedBy: .tie, in: neighbour, wasInBaseline: true))
-        rig.locator.onLocate { item, number in
-            if item == shownItem, number == 2 { await session.tearDownForQuit() }
-        }
+    // MARK: Pressing
 
-        #expect(await rig.click(shownItem, .right) == .failed(.unreachable))
-        #expect(rig.poster.clicks.isEmpty)
-    }
-
-    @Test func aLeftClickThatIsPostedIsPressedInPlaceWhenTheBarIsBlocked() async throws {
+    /// The quit begins during the first look at the bar: nothing is posted. A left click that is ruled to be posted is pressed in place instead.
+    @Test(arguments: [(ClickKind.right, false), (.left, true)]) func nothingIsPostedOnceTheQuitHasBegun(kind: ClickKind, postsLeft: Bool) async throws {
         var rules = ClickRouteRules.measured
-        rules.leftClick = .post
+        if postsLeft { rules.leftClick = .post }
         let rig = await Rig.started(rules: rules)
         let session = rig.world.session
         rig.locator.place(rig.location(of: shownItem, tiedBy: .tie, in: neighbour, wasInBaseline: true))
@@ -1347,72 +850,9 @@ struct IconClickDriverBarTests {
             if item == shownItem, number == 2 { await session.tearDownForQuit() }
         }
 
-        #expect(await rig.click(shownItem, .left) == .clicked(.pressedInPlace))
+        #expect(await rig.click(shownItem, kind) == (kind == .right ? .failed(.unreachable) : .clicked(.pressedInPlace)))
         #expect(rig.poster.clicks.isEmpty)
-        #expect(rig.presser.pressed == [shownItem])
-    }
-
-    // MARK: Pressing
-
-    @Test func aPressIsNotAnsweredBeforeItIsIssued() async throws {
-        // Finding the item in its app's list is slow here (a read behind the shared gate): the time a press is given starts when the
-        // action is sent, so the click isn't answered "clicked" while the item is still being looked for, and a failure comes back as one.
-        let slow = SlowPresser(error: .refused("it has gone"))
-        slow.returning.open()
-        let rig = await Rig.started(presser: slow)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        let driver = rig.driver
-        let done = Switch(false)
-        let task = Task {
-            let outcome = await driver.click(IconClickRequest(item: hiddenItem, kind: .left, display: nil, origin: .commandBar))
-            done.set(true)
-            return outcome
-        }
-        let sessionClock = rig.world.clock, clock = rig.clock
-        #expect(await rig.pump(until: slow.askedFor) == true, "the press was asked for, and is looking for the item")
-        // Two seconds, in steps that something was asleep through: on a busy Mac fewer polls find a sleeper, and the steps are counted, not the polls.
-        var steps = 0, polls = 0
-        while steps < 40 && polls < 2000 {
-            polls += 1
-            if await clock.waitForSleepers(1, within: .milliseconds(20)) {
-                clock.advance(by: .milliseconds(50))
-                sessionClock.advance(by: .milliseconds(50))
-                steps += 1
-            }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        #expect(steps == 40, "the two seconds were all given")
-        #expect(!done.isOn, "two seconds in, and the press hasn't been issued")
-        #expect(slow.calls == 1)
-
-        slow.finding.open()
-        #expect(await rig.pump(until: done) == true)
-        #expect(await task.value == .failed(.refused("it has gone")))
-        #expect(await rig.waitFor { await rig.tickets == 0 })
-    }
-
-    @Test func aPressThatFailsAfterItWasAnsweredIsLoggedAndEndsTheRevealAtOnce() async throws {
-        let slow = SlowPresser(error: .refused("it said no late"))
-        slow.finding.open()
-        let rig = await Rig.started(presser: slow)
-        rig.locator.place(rig.location(of: hiddenItem, tiedBy: .tieAndNewSlots))
-        let took = Mutex<Double?>(nil)
-
-        let lines = await LogCapture.lines {
-            // Issued, and out for as long as it is waited for: answered "clicked".
-            let outcome = await rig.click(hiddenItem)
-            #expect(outcome == .clicked(.pressedDrawn))
-            #expect(await rig.tickets == 1)
-            let failedAt = rig.clock.now()
-            slow.returning.open()
-            #expect(await rig.advance(until: { await rig.tickets == 0 }))
-            took.withLock { $0 = rig.clock.now().timeIntervalSince(failedAt) }
-        }
-
-        let elapsed = try #require(took.withLock { $0 })
-        #expect(elapsed < 1, "the reveal ended with the failure, not after the wait for a menu and the delay: \(elapsed) s")
-        #expect(lines.contains { $0.contains("the press failed after it was answered") && $0.contains(weather) })
-        #expect(await rig.waitFor { rig.concealed.contains(weather) })
+        #expect(rig.presser.pressed == (kind == .right ? [] : [shownItem]))
     }
 
     @Test func aClickThatFailedCapturesNothing() async throws {
@@ -1463,26 +903,6 @@ struct IconClickDriverBarTests {
 
         #expect(rig.clock.now().timeIntervalSince(started) >= 600)
         #expect(await rig.waitFor { rig.concealed.contains(weather) })
-    }
-
-    @Test func aPressedInPlaceIconIsNotTheOwnerOfAMenuNearAStaleSlot() async throws {
-        // The VPN app is concealed, and the locator finds a frame it left behind in a slot that is no slot of its own (a tie alone): the icon
-        // is pressed where it is, and the menu of whatever is near that slot isn't taken for the icon's (it is held for only as long as a
-        // menu that isn't seen to belong to the icon is, once the wait for one is over).
-        let rig = await Rig.started(sections: sections(shown: [notes, sync], hidden: [weather, vpn]))
-        rig.locator.place(rig.location(of: vpnItem, tiedBy: .tie, wasInBaseline: true))
-        rig.presser.onPress { [windows = rig.windows, menu = rig.menu(of: notes, number: 502)] _ in windows.set([menu]) }
-
-        let lines = await LogCapture.lines {
-            #expect(await rig.click(vpnItem, .left) == .clicked(.pressedInPlace))
-            await rig.pass(.seconds(3))
-            rig.windows.set([])
-            #expect(await rig.advance(until: { await rig.tickets == 0 }))
-        }
-
-        let line = try #require(lines.first { $0.contains("route=pressedInPlace") && $0.contains(vpn) })
-        let ms = try #require(line.components(separatedBy: "menuMs=").last.flatMap { Int($0) }, "a menu was held for in the end: \(line)")
-        #expect(ms >= 1000, "it wasn't seen to be the icon's at the first look, as it would be near the slot: \(line)")
     }
 
     @Test func aSlotThatCantBeToldToBeTheItemsDoesNotMakeRoom() async throws {

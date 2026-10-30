@@ -19,6 +19,8 @@ public struct GeneralSettings: SettingsDocument {
     public var secondBar: SecondBarSettings
     /// How the dots are drawn and when they are there.
     public var dots: DotSettings
+    /// Whether Mantel checks for a new version once a day. Only a build made to update itself has the setting to show.
+    public var checkForUpdatesAutomatically: Bool
 
     public init() {
         self.init(onboardingCompleted: false, settingsPage: nil)
@@ -26,7 +28,8 @@ public struct GeneralSettings: SettingsDocument {
 
     public init(onboardingCompleted: Bool, settingsPage: String?, reveal: RevealSettings = RevealSettings(),
                 hiding: HidingSettings = HidingSettings(), layout: LayoutSettings = LayoutSettings(),
-                secondBar: SecondBarSettings = SecondBarSettings(), dots: DotSettings = DotSettings()) {
+                secondBar: SecondBarSettings = SecondBarSettings(), dots: DotSettings = DotSettings(),
+                checkForUpdatesAutomatically: Bool = true) {
         self.onboardingCompleted = onboardingCompleted
         self.settingsPage = settingsPage
         self.reveal = reveal
@@ -34,11 +37,12 @@ public struct GeneralSettings: SettingsDocument {
         self.layout = layout
         self.secondBar = secondBar
         self.dots = dots
+        self.checkForUpdatesAutomatically = checkForUpdatesAutomatically
     }
 
     // A key missing from the file takes its default, so a file written before a key was added is still read.
     private enum CodingKeys: String, CodingKey {
-        case onboardingCompleted, settingsPage, reveal, hiding, layout, secondBar, dots
+        case onboardingCompleted, settingsPage, reveal, hiding, layout, secondBar, dots, checkForUpdatesAutomatically
     }
 
     public init(from decoder: any Decoder) throws {
@@ -49,7 +53,9 @@ public struct GeneralSettings: SettingsDocument {
                   hiding: try container.decodeIfPresent(HidingSettings.self, forKey: .hiding) ?? HidingSettings(),
                   layout: try container.decodeIfPresent(LayoutSettings.self, forKey: .layout) ?? LayoutSettings(),
                   secondBar: try container.decodeIfPresent(SecondBarSettings.self, forKey: .secondBar) ?? SecondBarSettings(),
-                  dots: try container.decodeIfPresent(DotSettings.self, forKey: .dots) ?? DotSettings())
+                  dots: try container.decodeIfPresent(DotSettings.self, forKey: .dots) ?? DotSettings(),
+                  // On when missing, and when it isn't a true or false.
+                  checkForUpdatesAutomatically: container.decodeLeniently(Bool.self, forKey: .checkForUpdatesAutomatically) ?? true)
     }
 }
 
@@ -58,7 +64,7 @@ extension KeyedDecodingContainer {
     /// version added, say). A value that can't be read is said once in the log, by its key and never by what the file held, and is read as
     /// missing: the caller's default is used, and the rest of the file is read as it is. A file written by a later version therefore still
     /// opens, where one value that throws would set the whole file aside.
-    func decodeLeniently<Value: Decodable>(_ type: Value.Type, forKey key: Key, category: String = "settings") -> Value? {
+    package func decodeLeniently<Value: Decodable>(_ type: Value.Type, forKey key: Key, category: String = "settings") -> Value? {
         do {
             return try decodeIfPresent(type, forKey: key)
         } catch {

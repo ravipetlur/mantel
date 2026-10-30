@@ -29,7 +29,6 @@ struct MantelPathsTests {
         #expect(paths.logs.path == "/Example/Logs/Mantel")
         #expect(paths.settings.path == "/Example/Support/Mantel")
         #expect(paths.backups.path == "/Example/Support/Mantel/Backups")
-        #expect(paths.probes.path == "/Example/Support/Mantel/Probes")
         #expect(paths.itemImages.path == "/Example/Support/Mantel/ItemImages")
         #expect(paths.ownImages.path == "/Example/Support/Mantel/OwnImages")
         #expect(paths.journalFile.path == "/Example/Support/Mantel/journal.json")
@@ -40,7 +39,7 @@ struct MantelPathsTests {
         let folder = TemporaryFolder()
         let paths = makePaths(in: folder)
         try paths.createDirectories()
-        for url in [paths.root, paths.logs, paths.backups, paths.probes, paths.itemImages, paths.ownImages] {
+        for url in [paths.root, paths.logs, paths.backups, paths.itemImages, paths.ownImages] {
             #expect(isFolder(url), "\(url.path) is a folder")
             #expect(try permissions(of: url) == 0o700, "\(url.path) is private")
         }

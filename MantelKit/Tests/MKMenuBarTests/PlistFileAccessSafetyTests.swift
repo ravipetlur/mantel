@@ -143,51 +143,68 @@ struct PlistFileAccessSafetyTests {
 
     // MARK: A doubtful original
 
-    @Test func aServiceThatDisagreesWithTheFileRefusesAndNothingIsJournaledOrWritten() async throws {
-        let before = try writePlist(["alpha": 1, "keep": "me"])
+    /// Each way the original may be wrong: what the file holds, what the service says, and the refusal that follows.
+    enum DoubtfulOriginal: CaseIterable, CustomTestStringConvertible {
+        case aServiceThatDisagreesWithTheFile
+        /// The case that made the restore delete the person's key: the service gave nothing for a key the file holds, and "no value" was
+        /// kept as the original.
+        case aServiceThatSeesNothingWhereTheFileHasAValue
+        case aServiceThatHasAValueWhereTheFileHasNone
+        case aValueTheServiceCantRepresent
+        /// An integer that doesn't fit in 64 bits is a property list value, but not one that can be put back.
+        case aValueInTheFileThatCantBeRepresentedThroughTheService
+        case aValueInTheFileThatCantBeRepresentedInTheFile
+
+        var testDescription: String { String(describing: self) }
+
+        var file: [String: Any] {
+            switch self {
+            case .aServiceThatDisagreesWithTheFile: ["alpha": 1, "keep": "me"]
+            case .aServiceThatHasAValueWhereTheFileHasNone: ["keep": "me"]
+            case .aValueInTheFileThatCantBeRepresentedThroughTheService, .aValueInTheFileThatCantBeRepresentedInTheFile:
+                ["alpha": NSNumber(value: UInt64.max)]
+            default: ["alpha": 1]
+            }
+        }
+
+        var service: ScriptedService.Answer {
+            switch self {
+            case .aServiceThatDisagreesWithTheFile: .says(.integer(2))
+            case .aServiceThatSeesNothingWhereTheFileHasAValue: .says(nil)
+            case .aServiceThatHasAValueWhereTheFileHasNone: .says(.integer(1))
+            case .aValueTheServiceCantRepresent: .unrepresentable
+            case .aValueInTheFileThatCantBeRepresentedThroughTheService, .aValueInTheFileThatCantBeRepresentedInTheFile: .says(.integer(1))
+            }
+        }
+
+        var strategy: PlistWriteStrategy {
+            self == .aValueInTheFileThatCantBeRepresentedInTheFile ? .atomicFile : .cfPreferences
+        }
+
+        var refusal: PlistAccessError {
+            switch self {
+            case .aServiceThatDisagreesWithTheFile, .aServiceThatHasAValueWhereTheFileHasNone: .disagree(key: "alpha")
+            case .aServiceThatSeesNothingWhereTheFileHasAValue: .serviceSeesNothing(key: "alpha")
+            default: .notRepresentable(key: "alpha")
+            }
+        }
+    }
+
+    @Test(arguments: DoubtfulOriginal.allCases)
+    func aDoubtfulOriginalRefusesAndNothingIsJournaledOrWritten(_ doubtful: DoubtfulOriginal) async throws {
+        let before = try writePlist(doubtful.file)
         let journal = makeJournal()
-        let service = ScriptedService(.says(.integer(2)))
+        let service = ScriptedService(doubtful.service)
         let access = makeAccess(journal, service: service)
 
-        await #expect(throws: PlistAccessError.disagree(key: "alpha")) {
-            try await access.write(.integer(9), key: "alpha", in: plist, strategy: .cfPreferences)
+        await #expect(throws: doubtful.refusal) {
+            try await access.write(.integer(9), key: "alpha", in: plist, strategy: doubtful.strategy)
         }
 
         #expect(await journal.records().isEmpty, "nothing was journaled")
         #expect(service.writeCount == 0, "nothing was written")
         #expect(try Data(contentsOf: plist) == before, "the file is as it was, byte for byte")
         #expect(backupFiles().isEmpty, "a write that is refused doesn't make a backup either")
-    }
-
-    @Test func aServiceThatSeesNothingWhereTheFileHasAValueRefuses() async throws {
-        // The case that made the restore delete the person's key: the service gave nothing for a key the file holds, and "no
-        // value" was kept as the original.
-        let before = try writePlist(["alpha": 1])
-        let journal = makeJournal()
-        let service = ScriptedService(.says(nil))
-        let access = makeAccess(journal, service: service)
-
-        await #expect(throws: PlistAccessError.serviceSeesNothing(key: "alpha")) {
-            try await access.write(.integer(9), key: "alpha", in: plist, strategy: .cfPreferences)
-        }
-
-        #expect(await journal.records().isEmpty)
-        #expect(service.writeCount == 0)
-        #expect(try Data(contentsOf: plist) == before)
-    }
-
-    @Test func aServiceThatHasAValueWhereTheFileHasNoneRefuses() async throws {
-        let before = try writePlist(["keep": "me"])
-        let journal = makeJournal()
-        let service = ScriptedService(.says(.integer(1)))
-        let access = makeAccess(journal, service: service)
-
-        await #expect(throws: PlistAccessError.disagree(key: "alpha")) {
-            try await access.write(.integer(9), key: "alpha", in: plist, strategy: .cfPreferences)
-        }
-
-        #expect(await journal.records().isEmpty)
-        #expect(try Data(contentsOf: plist) == before)
     }
 
     @Test func aKeyAbsentFromBothIsWrittenAndRestoredToAbsent() async throws {
@@ -198,38 +215,6 @@ struct PlistFileAccessSafetyTests {
         #expect(await journal.records().map(\.entry) == [
             .plistKey(filePath: CanonicalPath.of(plist), key: "alpha", original: nil, strategy: .cfPreferences),
         ])
-    }
-
-    @Test func aValueTheServiceCantRepresentRefuses() async throws {
-        let before = try writePlist(["alpha": 1])
-        let journal = makeJournal()
-        let service = ScriptedService(.unrepresentable)
-        let access = makeAccess(journal, service: service)
-
-        await #expect(throws: PlistAccessError.notRepresentable(key: "alpha")) {
-            try await access.write(.integer(9), key: "alpha", in: plist, strategy: .cfPreferences)
-        }
-
-        #expect(await journal.records().isEmpty)
-        #expect(service.writeCount == 0)
-        #expect(try Data(contentsOf: plist) == before)
-    }
-
-    @Test(arguments: [PlistWriteStrategy.cfPreferences, .atomicFile])
-    func aValueInTheFileThatCantBeRepresentedRefuses(strategy: PlistWriteStrategy) async throws {
-        // An integer that doesn't fit in 64 bits is a property list value, but not one that can be put back.
-        let before = try writePlist(["alpha": NSNumber(value: UInt64.max)])
-        let journal = makeJournal()
-        let service = ScriptedService(.says(.integer(1)))
-        let access = makeAccess(journal, service: service)
-
-        await #expect(throws: PlistAccessError.notRepresentable(key: "alpha")) {
-            try await access.write(.integer(9), key: "alpha", in: plist, strategy: strategy)
-        }
-
-        #expect(await journal.records().isEmpty)
-        #expect(service.writeCount == 0)
-        #expect(try Data(contentsOf: plist) == before)
     }
 
     @Test func theAtomicFileStrategyKeepsTheFilesOwnValueAndNeverAsksTheService() async throws {

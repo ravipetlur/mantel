@@ -9,9 +9,6 @@ struct ModalSitesTests {
     /// A modal loop started by hand, however it is spelled: `x.runModal()`, `NSApp.runModal(for:)`, a modal session, `x . runModal ( )`, or
     /// a bare `runModal()`.
     private let modalStart = try! Regex(#"(?:^|[^A-Za-z0-9_])(runModal|beginModalSession)\s*\("#)
-    /// The helper's own call, in its file, and the way a site asks for it, however the alert is named and split over lines.
-    private let helperCall = try! Regex(#"ModalLoop\s*\.\s*run\s*\("#)
-
     private var appSources: URL {
         URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appending(path: "Mantel")
@@ -54,25 +51,5 @@ struct ModalSitesTests {
         let quit = try #require(delegate.code.range(of: "AppQuit.request()", range: abort.upperBound..<delegate.code.endIndex),
                                 "and asks for the quit after it")
         #expect(abort.upperBound <= quit.lowerBound)
-    }
-
-    @Test func theAlertsShownFromTasksAndQueuedWorkGoThroughTheHelper() throws {
-        let files = try swiftFiles()
-        // The grant alert, the Reset confirmation, the move to Applications (two answers asked for, and the failure's alert), and the
-        // failure of a file's grant.
-        // The pictures' choosers: the open panel, and the alert that says a picture couldn't be used.
-        for (name, expected) in [("GrantAlert.swift", 1), ("DiagnosticsPane.swift", 1), ("AppMover.swift", 3), ("FileGrantPanel.swift", 1),
-                                 ("CosmeticsPane.swift", 2), ("SelectedIconSection.swift", 2)] {
-            let file = try #require(files.first { $0.name == name }, "\(name) was found")
-            #expect(count(helperCall, in: file.code) == expected, "\(name) shows its alerts through the helper \(expected) time(s)")
-        }
-    }
-
-    @Test func theHelperHandsTheLoopToTheRunLoop() throws {
-        let files = try swiftFiles()
-        let helper = try #require(files.first { $0.name == "ModalLoop.swift" })
-        #expect(helper.code.contains("ModalHandoff"), "the loop is started by the package's hand-off")
-        #expect(helper.code.contains("RunLoop.main.perform"), "and served by the run loop, not a queue")
-        #expect(!helper.code.contains("DispatchQueue"), "not by a queued block")
     }
 }

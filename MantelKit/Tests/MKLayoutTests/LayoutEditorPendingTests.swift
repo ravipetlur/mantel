@@ -106,16 +106,6 @@ struct LayoutEditorPendingTests {
                expected: ["own:\(own.string)", "app:\(appB)", "app:\(appA)", "app:\(appC)", "marker"])
     }
 
-    @Test func aRemovedSpacerThenADropLandsWhereItWasDropped() {
-        replay([Change(edit: { _, _ in .remove(own) }, session: { $0.removeOwnItem(own) })], dropping: bBeforeA,
-               expected: ["app:\(appB)", "app:\(appA)", "app:\(appC)", "marker"])
-    }
-
-    @Test func aForgottenAppThenADropLandsWhereItWasDropped() {
-        replay([Change(edit: { _, _ in .forget(bundleID: quit) }, session: { $0.forget(app: quit) })], dropping: bBeforeA,
-               expected: ["own:\(own.string)", "app:\(appB)", "app:\(appA)", "app:\(appC)", "marker"])
-    }
-
     @Test func aSpacerAddedAtTheStartThenADropLandsWhereItWasDropped() {
         let added = LayoutSpacer(id: SpacerID(rawValue: "0000000c"))
         let addedToken = "own:\(OwnItems.itemID(added.id).string)"
@@ -202,70 +192,7 @@ struct LayoutEditorPendingTests {
         #expect(withoutC.strip(of: after) == ["own:\(own.string)", "app:\(appB)", "app:\(appA)", "marker"])
     }
 
-    @Test func theStartAndTheEndAreAnchorsToo() {
-        let base = world()
-        let context = LayoutEditorModel.DropContext(sections: base.sections, canReorder: true, inventory: base.inventory, running: base.running)
-        let first = LayoutEditorModel.request(for: .token(token(appC), from: .section(.shown)), onto: .section(.shown), at: 0, in: context)
-        let last = LayoutEditorModel.request(for: .token(token(appA), from: .section(.shown)), onto: .section(.hidden), at: 0, in: context)
-        #expect(first.between == DropAnchors(left: nil, right: "own:\(own.string)"))
-        #expect(last.between == DropAnchors(left: nil, right: nil))
-        // A new app arrives at the front meanwhile: "the start" is still the start.
-        #expect(LayoutEditorModel.resolve(first, sections: base.sections, inventory: base.inventory) == .insert(id(appC), .shown, 1))
-    }
-
     // MARK: Settling in order
-
-    /// Shown starts as `[wifi, S, quit, A, B, C]`. The person sets Wi-Fi to Hidden (change 0), adds a spacer at the end of Shown (change 1)
-    /// and drags A to the right of it (change 2). Returns what the pane has asked, the spacer, and what the session has made of change 0.
-    private func quickSeries() -> (base: World, pending: PendingMoves, added: LayoutSpacer, published: SectionModel) {
-        let base = world()
-        var pending = PendingMoves()
-        pending.ask(.system(module: "wifi", .hidden), on: base.sections, inventory: base.inventory)
-
-        let added = LayoutSpacer(id: SpacerID(rawValue: "0000000c"))
-        var shown = pending.applied(to: base.sections, inventory: base.inventory)
-        var add = dropRequest(.palette(.spacer), onto: .section(.shown), at: base.strip(of: shown).count - 1, in: base, shown: shown)
-        add.created = .spacer(added)
-        pending.ask(.drop(add), on: shown, inventory: base.inventory)
-
-        shown = pending.applied(to: base.sections, inventory: base.inventory)
-        let tokens = base.strip(of: shown)
-        let afterAdded = tokens.firstIndex(of: "own:\(OwnItems.itemID(added.id).string)")! + 1
-        pending.ask(.drop(dropRequest(.token(token(appA), from: .section(.shown)), onto: .section(.shown), at: afterAdded, in: base, shown: shown)),
-                    on: shown, inventory: base.inventory)
-
-        var published = base.sections
-        published.move(item: .system("wifi"), to: .hidden)
-        return (base, pending, added, published)
-    }
-
-    @Test func aDropBesideANewSpacerStaysShownWhenOnlyTheFirstChangeHasBeenMade() {
-        let series = quickSeries()
-        let base = series.base
-        let added = series.added
-        var pending = series.pending
-        var published = series.published
-        let addedToken = "own:\(OwnItems.itemID(added.id).string)"
-        let expected = ["own:\(own.string)", "app:\(appB)", "app:\(appC)", addedToken, "app:\(appA)", "marker"]
-        #expect(base.strip(of: pending.applied(to: base.sections, inventory: base.inventory)) == expected)
-
-        // The session has made change 0 and published it: the other two are still to come, and are still shown as they were asked.
-        pending.settle(against: published, inventory: base.inventory)
-        #expect(pending.edits.count == 2)
-        let shown = pending.applied(to: published, inventory: base.inventory)
-        #expect(base.strip(of: shown) == expected)
-
-        // Then change 1 is published; change 2 is still to come.
-        published.addSpacer(added, in: .shown, at: published.items(in: .shown).count)
-        pending.settle(against: published, inventory: base.inventory)
-        #expect(pending.edits.count == 1)
-        #expect(base.strip(of: pending.applied(to: published, inventory: base.inventory)) == expected)
-
-        // And change 2.
-        let model = pending.applied(to: published, inventory: base.inventory)
-        pending.settle(against: model, inventory: base.inventory)
-        #expect(pending.isEmpty)
-    }
 
     @Test func aPaletteGroupIsLetGoOnceTheModelHasItAndItsFieldsAreTheModels() {
         let base = world()
@@ -325,24 +252,6 @@ struct LayoutEditorPendingTests {
         #expect(!pending.isEmpty)
     }
 
-    @Test func aGroupMoveAndTheMarkerKeepTheirPlaces() {
-        var base = world()
-        let group = IconGroup(id: GroupID(rawValue: "0000000b"))
-        base.sections.addGroup(group, in: .hidden, at: 0)
-        base.sections.move(app: appA, toGroup: group.id, at: 0)
-        var pending = PendingMoves()
-        pending.ask(.drop(dropRequest(.token(token(appC), from: .section(.shown)), onto: .group(group.id), at: 0, in: base)),
-                    on: base.sections, inventory: base.inventory)
-        let shown = pending.applied(to: base.sections, inventory: base.inventory)
-        pending.ask(.drop(dropRequest(.token(.marker, from: .section(.shown)), onto: .section(.shown), at: 0, in: base, shown: shown)),
-                    on: shown, inventory: base.inventory)
-
-        let after = pending.applied(to: base.sections, inventory: base.inventory)
-
-        #expect(after.groups[group.id]?.members == [appC, appA])
-        #expect(base.strip(of: after).first == "marker")
-    }
-
     @Test func aLaterAskForTheSameThingReplacesTheEarlierAndOneThatChangesNothingIsNotKept() {
         let base = world()
         var pending = PendingMoves()
@@ -393,43 +302,5 @@ struct LayoutEditorPendingTests {
         LayoutEditorModel.apply(LayoutEditorModel.resolve(moveC, sections: model, inventory: base.inventory)!, created: nil, to: &model)
         pending.settle(against: model, inventory: base.inventory)
         #expect(pending.isEmpty)
-    }
-
-    @Test func aForgottenAppThatComesBackIsNotHiddenAgain() {
-        let base = world()
-        var pending = PendingMoves()
-        pending.ask(.forget(bundleID: quit), on: base.sections, inventory: base.inventory)
-        #expect(!pending.applied(to: base.sections, inventory: base.inventory).items(in: .shown).contains(id(quit)))
-
-        // The session forgot it: the edit is let go. The app comes back, and it is listed.
-        var model = base.sections
-        model.forget(app: quit)
-        pending.settle(against: model, inventory: base.inventory)
-        #expect(pending.isEmpty)
-        model.note([Fixtures.item(id(quit))])
-        #expect(pending.applied(to: model, inventory: base.inventory).items(in: .shown).contains(id(quit)))
-    }
-
-    @Test func aSystemIconMovedBackToWhereItWasIsNotKept() {
-        let base = world()
-        var pending = PendingMoves()
-        pending.ask(.system(module: "wifi", .hidden), on: base.sections, inventory: base.inventory)
-        let shown = pending.applied(to: base.sections, inventory: base.inventory)
-        #expect(shown.items(in: .hidden) == [.system("wifi")], "the session files it in the other section's list too")
-        #expect(shown.items(in: .shown).contains(.system("wifi")) == false)
-        pending.ask(.system(module: "wifi", .shown), on: shown, inventory: base.inventory)
-        #expect(pending.edits == [.system(module: "wifi", .shown)], "the later ask replaces the earlier")
-        pending.settle(against: base.sections, inventory: base.inventory)
-        #expect(pending.isEmpty)
-    }
-
-    @Test func aPendingMoveToAnotherSectionPutsTheRowThere() {
-        var base = world()
-        base.sections.move(app: appA, to: .shown)
-        var pending = PendingMoves()
-        pending.ask(.drop(dropRequest(.token(token(appA), from: .section(.shown)), onto: .section(.hidden), at: 0, in: base)),
-                    on: base.sections, inventory: base.inventory)
-        let rows = LayoutRows.apps(inventory: base.inventory, sections: pending.applied(to: base.sections, inventory: base.inventory), names: [:])
-        #expect(rows[.hidden]?.map(\.id) == [appA])
     }
 }

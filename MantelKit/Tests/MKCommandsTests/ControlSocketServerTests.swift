@@ -95,15 +95,15 @@ struct ControlSocketServerTests {
     }
 
     @Test func aHandlersFailureIsTheReply() async throws {
-        let server = makeServer { _, _ in .failure(code: .unavailable, message: "Probes aren't built yet") }
+        let server = makeServer { _, _ in .failure(code: .unavailable, message: "Not yet") }
         try server.start()
         defer { server.stop() }
 
         let client = try RawClient(path: socketURL)
-        let probe = request(.probe(.inventory, options: [:]))
-        try await client.send(probe)
+        let refresh = request(.refresh)
+        try await client.send(refresh)
         #expect(try await client.readReply()
-                == ReplyEnvelope(id: probe.id, result: .failure(code: .unavailable, message: "Probes aren't built yet")))
+                == ReplyEnvelope(id: refresh.id, result: .failure(code: .unavailable, message: "Not yet")))
     }
 
     @Test func repliesAreInRequestOrder() async throws {

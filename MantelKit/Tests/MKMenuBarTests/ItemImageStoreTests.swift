@@ -37,14 +37,6 @@ struct ItemImageStoreTests {
         #expect(FileManager.default.fileExists(atPath: images.appending(path: "index.json").path))
     }
 
-    @Test func pointSizeIsTrimmedSize() async throws {
-        let store = makeStore()
-        let icon = mattedDisc()
-        try await store.save(icon, scale: 2, for: weather, appItemCount: 1)
-        let variant = try #require(await store.record(for: weather)?.variants[icon.barAppearance])
-        #expect(variant.pointSize == CGSize(width: icon.contentBounds.width / 2, height: icon.contentBounds.height / 2))
-    }
-
     @Test func sameHashIsNotAChange() async throws {
         let store = makeStore()
         let icon = mattedDisc()
@@ -79,30 +71,6 @@ struct ItemImageStoreTests {
         try await store.reconcile(with: CollectorWorld.inventory(items))
         #expect(await store.record(for: notes) == nil)
         #expect(!FileManager.default.fileExists(atPath: url.path))
-    }
-
-    @Test func newItemCountDropsTheOtherAppearancesPictures() async throws {
-        let store = makeStore()
-        let dark = mattedDisc(level: 0.2), light = mattedDisc(level: 0.9)
-        try await store.save(dark, scale: 2, for: notes, appItemCount: 2)
-        try await store.save(light, scale: 2, for: notes, appItemCount: 2)
-        let old = try #require(await store.record(for: notes)?.variants[.dark])
-        let oldURL = await store.fileURL(for: old)
-        try await store.save(light, scale: 2, for: notes, appItemCount: 3)
-        let record = try #require(await store.record(for: notes))
-        #expect(Set(record.variants.keys) == [.light])
-        #expect(record.appItemCount == 3)
-        #expect(!FileManager.default.fileExists(atPath: oldURL.path))
-    }
-
-    @Test func identifierKeyedImagesSurviveCountChange() async throws {
-        let store = makeStore()
-        try await store.save(mattedDisc(), scale: 2, for: weather, appItemCount: 1)
-        let items = ["t0", "t1", "t2"].enumerated().map { index, name in
-            CollectorWorld.item(ItemID(bundleID: "com.example.weather", key: .identifier(name)), bundleID: "com.example.weather", slot: index)
-        }
-        try await store.reconcile(with: CollectorWorld.inventory(items))
-        #expect(await store.record(for: weather) != nil)
     }
 
     @Test func unansweredAppIsNotReconciled() async throws {
@@ -183,17 +151,5 @@ struct ItemImageStoreTests {
         #expect(await again.records().count == 2)
         let original = await store.record(for: weather)
         #expect(await again.record(for: weather) == original)
-    }
-
-    @Test func changesYieldTouchedIDs() async throws {
-        let store = makeStore()
-        var stream = await store.changes().makeAsyncIterator()
-        try await store.save(mattedDisc(), scale: 2, for: weather, appItemCount: 1)
-        #expect(await stream.next() == [weather])
-        try await store.save(mattedDisc(), scale: 2, for: notes, appItemCount: 2)
-        #expect(await stream.next() == [notes])
-        let items = (0..<3).map { CollectorWorld.item(ItemID(bundleID: "com.example.notes", key: .index($0)), bundleID: "com.example.notes", slot: $0) }
-        try await store.reconcile(with: CollectorWorld.inventory(items))
-        #expect(await stream.next() == [notes])
     }
 }

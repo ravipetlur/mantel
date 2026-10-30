@@ -19,7 +19,7 @@ struct SettingsPane: View {
                             fileGranted: { coordinator.permissionsChanged() })
         case .advanced: AdvancedPane(coordinator: coordinator)
         case .diagnostics: DiagnosticsPane(coordinator: coordinator)
-        case .about: AboutPane()
+        case .about: AboutPane(coordinator: coordinator)
         }
     }
 }

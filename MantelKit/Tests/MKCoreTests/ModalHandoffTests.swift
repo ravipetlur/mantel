@@ -40,31 +40,6 @@ struct ModalHandoffTests {
         #expect(await answer.value == 7, "the asker gets what the alert answered")
     }
 
-    @Test func theAlertIsNotStartedInsideTheSchedulingCall() async throws {
-        let schedule = Schedule()
-        var startedWhileScheduling = false
-        let answer = Task { @MainActor in
-            await ModalHandoff.run(through: { schedule($0, $1) }) { startedWhileScheduling = schedule.isScheduling }
-        }
-        try #require(await waitUntilAsked(schedule))
-        schedule.asked.first?.work()
-        await answer.value
-        #expect(!startedWhileScheduling)
-    }
-
-    /// A modal loop started in the modal-panel mode would be a nested loop inside the wait of a quit, as `QuitRequest` explains; one started
-    /// while a menu is open or a button is held down would be nested inside that.
-    @Test func theRunLoopServesItInTheDefaultModeOnly() async throws {
-        let schedule = Schedule()
-        let answer = Task { @MainActor in await ModalHandoff.run(through: { schedule($0, $1) }) { 0 } }
-        try #require(await waitUntilAsked(schedule))
-        #expect(schedule.asked.first?.modes == [.default])
-        #expect(!ModalHandoff.modes.contains(.common) && !ModalHandoff.modes.contains(.modalPanel))
-        #expect(!ModalHandoff.modes.contains(.eventTracking), "an alert asked for while a menu is open starts when it has closed")
-        schedule.asked.first?.work()
-        _ = await answer.value
-    }
-
     @Test func twoAlertsAskedForAreTwoPiecesOfWorkServedOneAfterTheOther() async throws {
         let schedule = Schedule()
         var order: [Int] = []

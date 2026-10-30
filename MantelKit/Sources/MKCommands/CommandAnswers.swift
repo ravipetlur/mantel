@@ -39,7 +39,7 @@ public enum ResetOutcome: Sendable, Equatable {
     case done
     /// Another reset was still running, and this one wasn't started.
     case alreadyUnderWay
-    /// It wasn't started, and nothing was changed: the sentence says why (a platform test is changing the menu bar, Mantel is quitting).
+    /// It wasn't started, and nothing was changed: the sentence says why (Mantel is quitting, a reset is under way).
     case refused(String)
     /// It was started and stopped, and everything is shown: the sentence says what happened and what to do.
     case failed(String)

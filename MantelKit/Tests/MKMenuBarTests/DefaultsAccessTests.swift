@@ -74,7 +74,9 @@ struct DefaultsAccessTests {
         #expect(preferences.held(spacing) == .integer(4))
     }
 
-    @Test(arguments: [FakePreferences.Behavior.drops, .refuses])
+    /// The service drops the write, refuses it, or keeps something else than it was given (once): the key is as it was, and a change
+    /// that isn't there leaves nothing to put back.
+    @Test(arguments: [FakePreferences.Behavior.drops, .refuses, .replacesOnce(.integer(99))])
     func notPersistedWhenReadBackDiffers(_ behavior: FakePreferences.Behavior) async throws {
         let preferences = FakePreferences([spacing: .integer(6)])
         preferences.behave(behavior, forKey: spacing)
@@ -86,23 +88,8 @@ struct DefaultsAccessTests {
         }
 
         #expect(error?.errorDescription == "macOS didn't keep the change to NSStatusItemSpacing. Try again.")
-        #expect(preferences.held(spacing) == .integer(6), "the key is as it was")
+        #expect(preferences.held(spacing) == .integer(6), "the key is as it was (a 99 it kept is taken away again)")
         #expect(await journal.records().isEmpty, "and a change that isn't there leaves nothing to put back")
-    }
-
-    @Test func aChangeThatWasNotKeptIsPutBack() async throws {
-        // The service keeps something else than it was given, once.
-        let preferences = FakePreferences([spacing: .integer(6)])
-        preferences.behave(.replacesOnce(.integer(99)), forKey: spacing)
-        let journal = makeJournal()
-        let access = DefaultsAccess(journal: journal, preferences: preferences)
-
-        await #expect(throws: DefaultsAccessError.notPersisted(key: spacing)) {
-            try await access.write(.integer(8), forKey: spacing, in: domain, lifetime: .kept)
-        }
-
-        #expect(preferences.held(spacing) == .integer(6), "the 99 is taken away again")
-        #expect(await journal.records().isEmpty)
     }
 
     @Test func aKeyThatCantBePutBackKeepsItsRecord() async throws {
@@ -255,16 +242,20 @@ struct DefaultsAccessTests {
 
     // MARK: Putting back
 
-    @Test func undoPutsBackOriginalAndRemovesRecord() async throws {
-        let preferences = FakePreferences([spacing: .integer(6)])
+    /// A key that wasn't there is recorded as absent, and putting it back removes it.
+    @Test(arguments: [PlistValue.integer(6), nil])
+    func undoPutsBackOriginalAndRemovesRecord(original: PlistValue?) async throws {
+        let preferences = original.map { FakePreferences([spacing: $0]) } ?? FakePreferences()
         let journal = makeJournal()
         let access = DefaultsAccess(journal: journal, preferences: preferences)
         try await access.write(.integer(8), forKey: spacing, in: domain, lifetime: .untilQuit)
+        #expect(await journal.records().map(\.entry) == [entry(spacing, original: original)])
 
         try await access.undo(key: spacing, in: domain)
 
-        #expect(preferences.held(spacing) == .integer(6))
-        #expect(preferences.writes.last == FakePreferences.Write(key: spacing, value: .integer(6), domain: domain))
+        #expect(preferences.held(spacing) == original)
+        #expect(preferences.writes.last == FakePreferences.Write(key: spacing, value: original, domain: domain),
+                "an absent key is removed, not set to something")
         #expect(await journal.records().isEmpty)
     }
 
@@ -289,21 +280,6 @@ struct DefaultsAccessTests {
         try await access.undo(key: spacing, in: domain)
 
         #expect(preferences.writes.isEmpty)
-    }
-
-    @Test func removeIsJournaledAsAbsent() async throws {
-        // A key that wasn't there is recorded as absent, and putting it back removes it.
-        let preferences = FakePreferences()
-        let journal = makeJournal()
-        let access = DefaultsAccess(journal: journal, preferences: preferences)
-        try await access.write(.integer(8), forKey: spacing, in: domain, lifetime: .untilQuit)
-        #expect(await journal.records().map(\.entry) == [entry(spacing, original: nil)])
-
-        try await access.undo(key: spacing, in: domain)
-
-        #expect(preferences.held(spacing) == nil)
-        #expect(preferences.writes.last == FakePreferences.Write(key: spacing, value: nil, domain: domain), "removed, not set to something")
-        #expect(await journal.records().isEmpty)
     }
 
     @Test func removingAKeyThatHoldsAValueJournalsTheValue() async throws {
@@ -337,32 +313,21 @@ struct DefaultsAccessTests {
         #expect(await journal.records().map(\.key) == [journalKey(padding)])
     }
 
-    @Test func anOldRecordIsNotPutBackOverSomeoneElsesChange() async throws {
+    /// A record a week old is put back, unless someone else has changed the key since: their change stays, and the record is dropped.
+    @Test(arguments: [false, true])
+    func anOldRecordIsPutBackUnlessSomeoneElseChangedTheKey(someoneChangedIt: Bool) async throws {
         let preferences = FakePreferences([spacing: .integer(6)])
         let journal = makeJournal()
         let access = DefaultsAccess(journal: journal, preferences: preferences)
         try await access.write(.integer(8), forKey: spacing, in: domain, lifetime: .untilQuit)
         clock.advance(by: .seconds(8 * 24 * 60 * 60))
-        preferences.change(spacing, to: .integer(3))   // someone else, since
+        if someoneChangedIt { preferences.change(spacing, to: .integer(3)) }
 
         let failures = await journal.replay(using: DefaultsJournalRestorer(access: access))
 
         #expect(failures.isEmpty)
-        #expect(preferences.held(spacing) == .integer(3), "their change stays")
-        #expect(await journal.records().isEmpty, "and the record is dropped")
-    }
-
-    @Test func anOldRecordNobodyChangedIsPutBack() async throws {
-        let preferences = FakePreferences([spacing: .integer(6)])
-        let journal = makeJournal()
-        let access = DefaultsAccess(journal: journal, preferences: preferences)
-        try await access.write(.integer(8), forKey: spacing, in: domain, lifetime: .untilQuit)
-        clock.advance(by: .seconds(8 * 24 * 60 * 60))
-
-        let failures = await journal.replay(using: DefaultsJournalRestorer(access: access))
-
-        #expect(failures.isEmpty)
-        #expect(preferences.held(spacing) == .integer(6))
+        #expect(preferences.held(spacing) == (someoneChangedIt ? .integer(3) : .integer(6)), "their change stays")
+        #expect(await journal.records().isEmpty, "and the record is gone")
     }
 
     @Test func aRestoreThatWasNotKeptStaysInTheJournal() async throws {

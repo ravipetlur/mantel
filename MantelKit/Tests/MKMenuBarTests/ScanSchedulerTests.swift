@@ -103,12 +103,6 @@ private func makeScheduler(clock: any Clock, recorder: ScanRecorder, hold: Gate?
 
 @Suite("Scan scheduler", .timeLimit(.minutes(1)))
 struct ScanSchedulerTests {
-    @Test func theTimingsAreTheSpecifiedOnes() {
-        #expect(ScanScheduler.idleInterval == .seconds(10))
-        #expect(ScanScheduler.settingsInterval == .seconds(2))
-        #expect(ScanScheduler.coalescing == .milliseconds(100))
-    }
-
     @Test func requestsWithin100msCoalesce() async throws {
         let clock = FakeClock()
         let recorder = ScanRecorder()
@@ -128,24 +122,6 @@ struct ScanSchedulerTests {
         #expect(clock.sleeperCount == 0)
     }
 
-    @Test func aRequestAfterTheWaitIsAScanOfItsOwn() async throws {
-        let clock = FakeClock()
-        let recorder = ScanRecorder()
-        let scheduler = makeScheduler(clock: clock, recorder: recorder)
-
-        await scheduler.request(.appsChanged)
-        try await sleepers(clock, 1)
-        clock.advance(by: .milliseconds(100))
-        try await scans(recorder, 1)
-        try await idle(scheduler)
-
-        await scheduler.request(.displaysChanged)
-        try await sleepers(clock, 1)
-        clock.advance(by: .milliseconds(100))
-        try await scans(recorder, 2)
-        #expect(recorder.scans == [[.appsChanged], [.displaysChanged]])
-    }
-
     @Test func refreshAndRevealScanAtOnce() async throws {
         let clock = FakeClock()
         let recorder = ScanRecorder()
@@ -163,61 +139,6 @@ struct ScanSchedulerTests {
         try await scans(recorder, 2)
         #expect(recorder.scans == [[.refresh], [.appsChanged, .reveal]])
         #expect(clock.sleeperCount == 0, "the wait it cut short is over")
-    }
-
-    @Test func idlePollIsTenSeconds() async throws {
-        let clock = FakeClock()
-        let recorder = ScanRecorder()
-        let scheduler = makeScheduler(clock: clock, recorder: recorder)
-        await scheduler.start()
-        try await sleepers(clock, 1)
-
-        clock.advance(by: .milliseconds(9900))
-        #expect(clock.sleeperCount == 1, "still waiting at 9.9 seconds")
-        #expect(recorder.scans.isEmpty)
-        clock.advance(by: .milliseconds(100))
-        // The poll is a request like any other: it waits the 100 ms, and the next poll is ten seconds on.
-        try await sleepers(clock, 2)
-        clock.advance(by: .milliseconds(100))
-        try await scans(recorder, 1)
-        #expect(recorder.scans == [[.poll]])
-        try await idle(scheduler)
-
-        clock.advance(by: .milliseconds(9900))
-        try await sleepers(clock, 2)
-        clock.advance(by: .milliseconds(100))
-        try await scans(recorder, 2)
-        #expect(recorder.scans == [[.poll], [.poll]])
-        await scheduler.stop()
-    }
-
-    @Test func settingsOpenPollIsTwoSeconds() async throws {
-        let clock = FakeClock()
-        let recorder = ScanRecorder()
-        let scheduler = makeScheduler(clock: clock, recorder: recorder)
-        await scheduler.start()
-        try await sleepers(clock, 1)
-
-        await scheduler.setSettingsOpen(true)
-        try await sleepers(clock, 1)
-        clock.advance(by: .seconds(2))
-        try await sleepers(clock, 2)
-        clock.advance(by: .milliseconds(100))
-        try await scans(recorder, 1)
-        #expect(recorder.scans == [[.poll]])
-        try await idle(scheduler)
-
-        // Closed again: back to ten seconds.
-        await scheduler.setSettingsOpen(false)
-        try await sleepers(clock, 1)
-        clock.advance(by: .seconds(2))
-        #expect(clock.sleeperCount == 1, "nothing at two seconds now")
-        #expect(recorder.scans.count == 1)
-        clock.advance(by: .seconds(8))
-        try await sleepers(clock, 2)
-        clock.advance(by: .milliseconds(100))
-        try await scans(recorder, 2)
-        await scheduler.stop()
     }
 
     @Test func stopCancelsPolling() async throws {

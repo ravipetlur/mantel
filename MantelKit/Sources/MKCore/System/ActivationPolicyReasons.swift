@@ -8,8 +8,9 @@ public enum ActivationPolicyKind: Sendable, Equatable {
 
 /// Why Mantel is an ordinary app, kept in one place so that the reasons can't undo each other: it is one while any of them holds.
 ///
-/// - **A window of Mantel's is open** (Settings, which holds Diagnostics, or onboarding). The person who switches to another app with a
-///   window open has the Dock and ⌘-Tab to come back by. Alerts and menus aren't windows in this sense.
+/// - **A window of Mantel's is open** (Settings, which holds Diagnostics, onboarding, or the one that offers an update). The person who
+///   switches to another app with a window open has the Dock and ⌘-Tab to come back by. Alerts, menus and popovers aren't windows in this
+///   sense.
 /// - **Mantel has taken the menu bar over** to make room for revealed icons (`MenuBarTakeover`): it needs a menu bar of its own for as
 ///   long as that lasts.
 ///
@@ -32,6 +33,8 @@ public struct ActivationPolicyReasons: Sendable, Equatable {
     public enum Window: Sendable, Hashable, CaseIterable {
         case settings
         case onboarding
+        /// The window that offers an update and shows its install.
+        case update
     }
 
     public private(set) var openWindows: Set<Window> = []

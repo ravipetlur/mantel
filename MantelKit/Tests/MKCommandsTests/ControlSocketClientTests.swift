@@ -29,11 +29,11 @@ struct ControlSocketClientTests {
     }
 
     @Test func aFailureIsAnAnswerNotAnError() async throws {
-        let server = try startServer { _ in .failure(code: .unavailable, message: "Probes aren't built yet") }
+        let server = try startServer { _ in .failure(code: .unavailable, message: "Not yet") }
         defer { server.stop() }
 
-        let result = try await ControlSocketClient(path: socketURL).send(.probe(.capture, options: [:]))
-        #expect(result == .failure(code: .unavailable, message: "Probes aren't built yet"))
+        let result = try await ControlSocketClient(path: socketURL).send(.refresh)
+        #expect(result == .failure(code: .unavailable, message: "Not yet"))
     }
 
     @Test func aRefusalIsTheAnswerToAClientTheAppRefused() async throws {
@@ -72,8 +72,25 @@ struct ControlSocketClientTests {
 
     // MARK: Nobody there
 
-    @Test func noSocketMeansNotRunning() async {
-        let client = ControlSocketClient(path: socketURL)
+    enum NobodyThere: CaseIterable, CustomTestStringConvertible {
+        case noSocket, aServerThatHasStopped, aPathNoSocketCouldHave
+
+        var testDescription: String { String(describing: self) }
+    }
+
+    @Test(arguments: NobodyThere.allCases)
+    func nobodyThereMeansNotRunning(_ nobody: NobodyThere) async throws {
+        let client: ControlSocketClient
+        switch nobody {
+        case .noSocket:
+            client = ControlSocketClient(path: socketURL)
+        case .aServerThatHasStopped:
+            let server = try startServer()
+            server.stop()
+            client = ControlSocketClient(path: socketURL)
+        case .aPathNoSocketCouldHave:
+            client = ControlSocketClient(path: folder.url.appending(path: String(repeating: "x", count: 120)))
+        }
         await #expect(throws: ClientError.notRunning) { try await client.send(.ping) }
     }
 
@@ -81,18 +98,6 @@ struct ControlSocketClientTests {
     func aLeftoverFileMeansNotRunning(stale: StaleThing) async throws {
         try stale.make(at: socketURL)
         let client = ControlSocketClient(path: socketURL)
-        await #expect(throws: ClientError.notRunning) { try await client.send(.ping) }
-    }
-
-    @Test func aServerThatHasStoppedMeansNotRunning() async throws {
-        let server = try startServer()
-        server.stop()
-        let client = ControlSocketClient(path: socketURL)
-        await #expect(throws: ClientError.notRunning) { try await client.send(.ping) }
-    }
-
-    @Test func aPathNoSocketCouldHaveMeansNotRunning() async {
-        let client = ControlSocketClient(path: folder.url.appending(path: String(repeating: "x", count: 120)))
         await #expect(throws: ClientError.notRunning) { try await client.send(.ping) }
     }
 
@@ -111,40 +116,25 @@ struct ControlSocketClientTests {
         await gate.open()
     }
 
-    @Test func aServerThatHangsUpWithoutAnsweringIsAProtocolError() async throws {
-        let canned = CannedServer(path: socketURL, reply: nil)
-        withExtendedLifetime(canned) {}
-        let client = ControlSocketClient(path: socketURL)
-        do {
-            _ = try await client.send(.ping)
-            Issue.record("expected a protocol error")
-        } catch {
-            guard case .protocolError = error else {
-                Issue.record("expected a protocol error, got \(error)")
-                return
-            }
-        }
+    enum BadAnswer: Sendable, CustomTestStringConvertible {
+        case hangsUpWithoutAnswering
+        case text(String)
+        case anAnswerToAnotherRequest
+
+        var testDescription: String { String(describing: self) }
     }
 
-    @Test(arguments: ["this is not json\n", "[]\n", "{\"result\":{\"status\":\"maybe\"}}\n"])
-    func anAnswerThatCannotBeReadIsAProtocolError(text: String) async throws {
-        let canned = CannedServer(path: socketURL, reply: Data(text.utf8))
-        withExtendedLifetime(canned) {}
-        let client = ControlSocketClient(path: socketURL)
-        do {
-            _ = try await client.send(.ping)
-            Issue.record("expected a protocol error")
-        } catch {
-            guard case .protocolError = error else {
-                Issue.record("expected a protocol error, got \(error)")
-                return
-            }
+    @Test(arguments: [BadAnswer.hangsUpWithoutAnswering, .text("this is not json\n"), .text("[]\n"),
+                      .text("{\"result\":{\"status\":\"maybe\"}}\n"), .anAnswerToAnotherRequest])
+    func anAnswerThatIsNotThisRequestsOrCannotBeReadIsAProtocolError(_ answer: BadAnswer) async throws {
+        let reply: Data?
+        switch answer {
+        case .hangsUpWithoutAnswering: reply = nil
+        case .text(let text): reply = Data(text.utf8)
+        case .anAnswerToAnotherRequest:
+            reply = try LineCodec.encode(ReplyEnvelope(id: UUID(), result: .ok(.string("not for you"))))
         }
-    }
-
-    @Test func anAnswerToAnotherRequestIsAProtocolError() async throws {
-        let stray = ReplyEnvelope(id: UUID(), result: .ok(.string("not for you")))
-        let canned = CannedServer(path: socketURL, reply: try LineCodec.encode(stray))
+        let canned = CannedServer(path: socketURL, reply: reply)
         withExtendedLifetime(canned) {}
         let client = ControlSocketClient(path: socketURL)
         do {

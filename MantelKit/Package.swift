@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "MKLayout", targets: ["MKLayout"]),
         .library(name: "MKMenuBar", targets: ["MKMenuBar"]),
         .library(name: "MKSearch", targets: ["MKSearch"]),
+        .library(name: "MKUpdate", targets: ["MKUpdate"]),
     ],
     // No `dependencies:`: Mantel uses no third-party code.
     targets: [
@@ -29,12 +30,16 @@ let package = Package(
         .target(name: "MKPrivateShims", publicHeadersPath: "include"),
         // The platform layer: reading the menu bar through Accessibility into an inventory of items, plist files and their
         // journal, the strip capture, the click-replay tap, the three ways of hiding icons and the controller that keeps one in
-        // charge, the session that turns events into plans for it, and the probes that exercise each of them.
+        // charge, and the session that turns events into plans for it.
         .target(name: "MKMenuBar", dependencies: ["MKCore", "MKCommands", "MKLayout", "MKPrivateShims"]),
         // The command bar's brain: the fuzzy matcher, the candidates it searches and where they come from (the icons and Mantel's own
         // actions, behind a protocol later providers join), the ranked search over what the providers offered when the bar opened, and the
         // resolver that turns an icon named in words into the one icon. It reads no Accessibility and draws nothing.
         .target(name: "MKSearch", dependencies: ["MKCore", "MKLayout"]),
+        // The updater's pure logic: version numbers, the release feed, the checksum file, who a release may be installed over, the
+        // daily schedule, the order of an install and its recovery, and what a check answers. The networking, the system's code checks
+        // and the file replacing are the app's.
+        .target(name: "MKUpdate", dependencies: ["MKCore"]),
         // What every test target shares: throwaway folders.
         .target(name: "MKTestSupport", dependencies: ["MKCore"], path: "Tests/MKTestSupport"),
         .testTarget(name: "MKCoreTests", dependencies: ["MKCore", "MKTestSupport"]),
@@ -42,5 +47,6 @@ let package = Package(
         .testTarget(name: "MKLayoutTests", dependencies: ["MKLayout", "MKCore", "MKTestSupport"]),
         .testTarget(name: "MKMenuBarTests", dependencies: ["MKMenuBar", "MKCore", "MKCommands", "MKLayout", "MKTestSupport"]),
         .testTarget(name: "MKSearchTests", dependencies: ["MKSearch", "MKCore", "MKLayout", "MKTestSupport"]),
+        .testTarget(name: "MKUpdateTests", dependencies: ["MKUpdate", "MKCore", "MKTestSupport"]),
     ]
 )

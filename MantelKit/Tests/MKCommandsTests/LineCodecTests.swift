@@ -88,7 +88,7 @@ struct LineCodecTests {
     }
 
     @Test func encodeHasNoEmbeddedNewlines() throws {
-        let command = MantelCommand.probe(.inventory, options: ["note": "two\nlines\r\nand a separator \u{2028}"])
+        let command = MantelCommand.icon(.show, query: "two\nlines\r\nand a separator \u{2028}", kind: .left)
         let data = try LineCodec.encode(RequestEnvelope(id: UUID(), command: command))
         #expect(data.last == UInt8(ascii: "\n"))
         #expect(data.dropLast().contains(UInt8(ascii: "\n")) == false)

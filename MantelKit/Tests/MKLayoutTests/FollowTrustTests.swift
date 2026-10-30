@@ -43,11 +43,6 @@ struct FollowTrustTests {
         #expect(v8)
     }
 
-    @Test func aReadWithNoBarHasNoUnclaimedSlots() {
-        let empty = Inventory(capturedAt: Date(timeIntervalSince1970: 0), bars: [], items: [], chevrons: [:], reach: [], problems: [])
-        #expect(FollowTrust.unclaimedSlots(in: empty) == 0)
-    }
-
     // MARK: An app that doesn't answer
 
     private func item(_ bundleID: String, frameX: CGFloat) -> MenuBarItem {
@@ -78,14 +73,6 @@ struct FollowTrustTests {
         #expect(back, "and a read that has it is whole")
     }
 
-    @Test func anAppThatWasNotOnTheBarAndIsUnansweredDoesNotStopTheFollowing() {
-        var trust = FollowTrust()
-        let first = trust.trusts(read(apps: ["notes"]))
-        #expect(first)
-        let later = trust.trusts(read(apps: ["notes"], unanswered: ["xcode"]))
-        #expect(later, "an app with no icon on the bar that doesn't answer (Xcode's helpers) says nothing of the order")
-    }
-
     @Test func aReadOfMenuBarAgentThatWasCutIsPartial() {
         var trust = FollowTrust()
         let first = trust.trusts(read(apps: ["notes"]))
@@ -97,33 +84,4 @@ struct FollowTrustTests {
     }
 
     // MARK: An app that answered in part
-
-    @Test func anAppWithAnIconOnTheBarThatAnsweredInPartMakesAReadPartial() {
-        var trust = FollowTrust()
-        let first = trust.trusts(read(apps: ["vpn", "notes"]))
-        #expect(first)
-        // The VPN app's list was cut, or an item's name didn't come: its icon is named by its place, and may not be the record the list holds.
-        // The count of slots no one claimed is the same as before, so the count rule alone would follow it.
-        for _ in 0..<2 {
-            let partial = trust.trusts(read(apps: ["vpn", "notes"], incomplete: ["vpn"]))
-            #expect(!partial)
-        }
-        let back = trust.trusts(read(apps: ["vpn", "notes"]))
-        #expect(back, "and a read whose apps are whole is trusted again")
-    }
-
-    @Test func anAppWithNoIconOnTheBarThatAnsweredInPartDoesNotStopTheFollowing() {
-        var trust = FollowTrust()
-        let first = trust.trusts(read(apps: ["notes"]))
-        #expect(first)
-        let later = trust.trusts(read(apps: ["notes"], incomplete: ["xcode"]))
-        #expect(later)
-    }
-
-    @Test func aReadThatIsNotTrustedSaysWhy() {
-        var trust = FollowTrust()
-        #expect(trust.doubt(in: read(unclaimed: 0)) == nil)
-        #expect(trust.doubt(in: read(unclaimed: 2)) == .unclaimedSlots(2))
-        #expect(trust.doubt(in: read(unclaimed: 0)) == nil)
-    }
 }

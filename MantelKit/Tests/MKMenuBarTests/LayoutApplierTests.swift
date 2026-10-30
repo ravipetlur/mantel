@@ -331,43 +331,25 @@ struct LayoutApplierTests {
 
     // MARK: Held
 
-    @Test func heldWhileAProbeRunsThenWrites() async {
-        let h = Harness()
-        h.reads.answer([matching()])
-        h.held.set(LayoutWords.heldForAProbe)
-        await h.request(cause: .newApps)
-
-        // A second and more of waiting: the inputs are kept and nothing is written, and the status says why.
-        await h.advance(4)
-        #expect(h.writer.writeCount == 0)
-        #expect(await h.applier.status().isPending)
-        #expect(await h.applier.status().availability == .held("A platform test is changing the menu bar. Mantel writes the order when it finishes."))
-
-        h.held.set(nil)
-        #expect(await h.settled())
-        #expect(h.writer.writeCount == 1)
-        #expect(await h.applier.status().availability == .available)
-    }
-
     @Test func heldUnderTheWideSpacer() async {
         let h = Harness()
         h.reads.answer([matching()])
-        h.held.set(LayoutHold.reason(probeChangingMenuBar: false, engine: .spacer))
+        h.held.set(LayoutHold.reason(engine: .spacer))
         await h.request()
         await h.advance(3)
         #expect(h.writer.writeCount == 0)
+        #expect(await h.applier.status().isPending)
         #expect(await h.applier.status().availability == .held("The wide spacer is hiding icons, so Mantel waits to change the order."))
 
-        h.held.set(LayoutHold.reason(probeChangingMenuBar: false, engine: .allowlist))
+        h.held.set(LayoutHold.reason(engine: .allowlist))
         #expect(await h.settled())
         #expect(h.writer.writeCount == 1)
     }
 
     @Test func theHoldTextsAreTheOnesGiven() {
-        #expect(LayoutHold.reason(probeChangingMenuBar: true, engine: .spacer) == "A platform test is changing the menu bar. Mantel writes the order when it finishes.")
-        #expect(LayoutHold.reason(probeChangingMenuBar: false, engine: .spacer) == "The wide spacer is hiding icons, so Mantel waits to change the order.")
-        #expect(LayoutHold.reason(probeChangingMenuBar: false, engine: .allowlist) == nil)
-        #expect(LayoutHold.reason(probeChangingMenuBar: false, engine: nil) == nil)
+        #expect(LayoutHold.reason(engine: .spacer) == "The wide spacer is hiding icons, so Mantel waits to change the order.")
+        #expect(LayoutHold.reason(engine: .allowlist) == nil)
+        #expect(LayoutHold.reason(engine: nil) == nil)
     }
 
     // MARK: Putting back
@@ -641,40 +623,29 @@ struct LayoutApplierTests {
         #expect(h.writer.writes.first?.keys.count == 3)
     }
 
-    @Test func anAppThatIsntRunningDoesNotKeepOwnItemsFromBeingWritten() async throws {
+    /// Three apps have keys; the one between the other two in the table's range is either not running (not among the running apps) or
+    /// running but showing nothing in the read (it didn't show an item, and its keys are still where the table has them).
+    @Test(arguments: [false, true])
+    func anAppThatIsntRunningDoesNotKeepOwnItemsFromBeingWrittenButOneThatRunsButShowsNothingStillKeepsItsSide(runs: Bool) async throws {
         let h = Harness()
-        let a = F.nameless("a"), b = F.nameless("b"), gone = F.nameless("gone")
-        // Three apps have keys; the one that isn't running (not among the running apps) sits between the other two in the table's range.
+        let a = F.nameless("a"), b = F.nameless("b"), other = F.nameless("other")
         h.writer.table = LayoutTableSnapshot(distances: [
             LayoutKey.status(bundleID: a.bundleID, autosaveName: "Item-0"): 400, LayoutKey.status(bundleID: b.bundleID, autosaveName: "Item-0"): 100,
-            LayoutKey.status(bundleID: gone.bundleID, autosaveName: "Item-0"): 50, LayoutKey.status(bundleID: gone.bundleID, autosaveName: "Item-1"): 500])
-        h.reads.answer([matching()])
-        let inventory = F.inventory([F.appItem(a, x: 300), F.appItem(b, x: 400)] + F.ownDrawn().items)
-
-        await h.request(F.inputs(F.sections(hidden: [a, gone], shown: [b])), inventory: inventory)
-        #expect(await h.settled())
-
-        let report = try #require(await h.applier.status().lastReport)
-        #expect(report.notPlaced.isEmpty, "the dots are written between a and b whatever keys the app that isn't there still has")
-        #expect(report.placed == 3)
-    }
-
-    @Test func anAppThatRunsButShowsNothingInTheReadStillKeepsItsSide() async throws {
-        let h = Harness()
-        let a = F.nameless("a"), b = F.nameless("b"), quiet = F.nameless("quiet")
-        // As the test above, but the app between them is running: the read lists no item of it (it didn't show one), and its keys are still
-        // where the table has them, so the dots can't go between a and b.
-        h.writer.table = LayoutTableSnapshot(distances: [
-            LayoutKey.status(bundleID: a.bundleID, autosaveName: "Item-0"): 400, LayoutKey.status(bundleID: b.bundleID, autosaveName: "Item-0"): 100,
-            LayoutKey.status(bundleID: quiet.bundleID, autosaveName: "Item-0"): 50, LayoutKey.status(bundleID: quiet.bundleID, autosaveName: "Item-1"): 500])
+            LayoutKey.status(bundleID: other.bundleID, autosaveName: "Item-0"): 50, LayoutKey.status(bundleID: other.bundleID, autosaveName: "Item-1"): 500])
         let items = [F.appItem(a, x: 300), F.appItem(b, x: 400)] + F.ownDrawn().items
-        let inventory = F.inventory(items, running: Set(items.map(\.ownerBundleID)).union([quiet.bundleID]))
+        let inventory = runs ? F.inventory(items, running: Set(items.map(\.ownerBundleID)).union([other.bundleID])) : F.inventory(items)
         h.reads.answer([matching()])
 
-        await h.request(F.inputs(F.sections(hidden: [a, quiet], shown: [b])), inventory: inventory)
+        await h.request(F.inputs(F.sections(hidden: [a, other], shown: [b])), inventory: inventory)
         #expect(await h.settled())
+
         let report = try #require(await h.applier.status().lastReport)
-        #expect(report.notPlaced.contains(OwnItems.hiddenDotName), "which apps run comes from the running apps, not from the items the read has")
+        if runs {
+            #expect(report.notPlaced.contains(OwnItems.hiddenDotName), "which apps run comes from the running apps, not from the items the read has")
+        } else {
+            #expect(report.notPlaced.isEmpty, "the dots are written between a and b whatever keys the app that isn't there still has")
+            #expect(report.placed == 3)
+        }
     }
 
     @Test func placedCountsOnlyThePlacesThatMoveAnIconOnTheBar() async throws {
@@ -829,28 +800,19 @@ struct LayoutApplierTests {
         }
     }
 
-    @Test func aNamedAppThatHasNoGapIsReportedNotPlaced() async throws {
-        let h = Harness()
-        let a = F.nameless("a"), c = F.nameless("c"), n = F.named("n")
+    @Test(arguments: [
         // a (200.4) is meant to be left of c (200), and they are 0.4 apart: n between them has no gap that the writer would keep.
-        h.writer.table = LayoutTableSnapshot(distances: [itemKey(a): 200.4, itemKey(c): 200, F.key(n): 60])
-        h.reads.answer([matching()])
-        let inventory = F.inventory([F.appItem(a, x: 300), F.appItem(n, x: 330), F.appItem(c, x: 360)] + F.ownDrawn().items)
-
-        await h.request(F.inputs(F.sections(shown: [a, n, c])), inventory: inventory)
-        #expect(await h.settled())
-
-        let report = try #require(await h.applier.status().lastReport)
-        #expect(report.notPlaced.contains(n.string), "the app that wasn't written is in the report")
-        #expect(h.writer.writes.first?.keys[.item(n)] == nil)
-    }
-
-    @Test func appsTheTableHasTheOtherWayRoundDontKeepAnAppBetweenThemFromBeingWritten() async throws {
-        let h = Harness()
-        let a = F.nameless("a"), c = F.nameless("c"), n = F.named("n")
+        (a: 200.4, c: 200.0, n: 60.0, written: false),
         // a (100) is meant to be left of c (300), and the table has them the other way round. Neither can be reordered, and n is no less
         // placeable for it: it is written right of the one that agrees with the order of the rest.
-        h.writer.table = LayoutTableSnapshot(distances: [itemKey(a): 100, itemKey(c): 300, F.key(n): 200])
+        (a: 100.0, c: 300.0, n: 200.0, written: true),
+    ])
+    func aNamedAppBetweenTwoThatLeaveNoGapOrAreTheOtherWayRoundIsWrittenOnlyWhereTheWriterKeepsIt(
+        aAt: Double, cAt: Double, nAt: Double, written: Bool
+    ) async throws {
+        let h = Harness()
+        let a = F.nameless("a"), c = F.nameless("c"), n = F.named("n")
+        h.writer.table = LayoutTableSnapshot(distances: [itemKey(a): aAt, itemKey(c): cAt, F.key(n): nAt])
         h.reads.answer([matching()])
         let inventory = F.inventory([F.appItem(a, x: 300), F.appItem(n, x: 330), F.appItem(c, x: 360)] + F.ownDrawn().items)
 
@@ -858,8 +820,8 @@ struct LayoutApplierTests {
         #expect(await h.settled())
 
         let report = try #require(await h.applier.status().lastReport)
-        #expect(!report.notPlaced.contains(n.string))
-        #expect(h.writer.writes.first?.keys[.item(n)] == F.key(n))
+        #expect(report.notPlaced.contains(n.string) == !written, "an app that wasn't written is in the report")
+        #expect(h.writer.writes.first?.keys[.item(n)] == (written ? F.key(n) : nil))
     }
 
     @Test func ownItemsThatCantBeToldApartFromAnUnplacedOneAreNotWrittenEither() async throws {
@@ -1117,7 +1079,7 @@ struct LayoutApplierTests {
 
     @Test func quittingDropsTheRequestThatCantBeWrittenNow() async {
         let held = Harness()
-        held.held.set(LayoutWords.heldForAProbe)
+        held.held.set(LayoutWords.heldForTheSpacer)
         await held.request()
         await held.applier.flushForQuit()
         #expect(held.writer.writeCount == 0)
@@ -1354,14 +1316,20 @@ struct LayoutApplierTests {
                 F.inventory(F.ownDrawn().items + [F.appItem(a, x: 150), clock]))
     }
 
-    @Test func anAppTheFirstWriteMovedAmongTheStayingModulesIsWrittenBackAndTheWriteIsNotAccepted() async throws {
+    @Test(arguments: [nil, 600.0])
+    func anAppTheFirstWriteMovedAmongTheStayingModulesIsWrittenBackAndTheWriteIsNotAccepted(tableAfterTheFirstWrite: Double?) async throws {
         // a's entry is at 190, right of the clock (200): among the modules that stay. The request's read has no clock, so the first try
         // writes it above the system items; the bar the verification reads has the clock. The second try would leave it out; the write is
-        // not accepted, and the first write's move is undone.
+        // not accepted, and the first write's move is undone. When the table macOS has after the first write puts the app at 600, left of
+        // the clock's reach, the second try would plan from that and not see an app among the modules that stay: the app's place before the
+        // write is what counts, and the write puts it back all the same.
         let h = Harness(rules: F.rules(.byRank))
         let a = F.nameless("a")
         let world = aRequestReadWithoutTheClock(a, entry: 190)
         h.writer.table = world.table
+        if let tableAfterTheFirstWrite {
+            h.writer.tablesAfterWrites([LayoutTableSnapshot(distances: ["module:Clock": 200, itemKey(a): tableAfterTheFirstWrite])])
+        }
         let differs = F.inventory(F.ownDrawn([.divider, .hiddenDot, .alwaysDot]).items + [F.appItem(a, x: 300), F.systemItem("clock", x: 900)])
         h.reads.answer([differs])
 
@@ -1375,12 +1343,16 @@ struct LayoutApplierTests {
         #expect(await h.applier.status().lastError == .notAccepted)
     }
 
-    @Test func anAppTheFirstWriteMovedAmongTheStayingModulesIsWrittenBackWhenTheFirstCheckMatches() async throws {
-        // The bar shows the order the first write was meant to make: the check matches, and the app it moved from among the modules that
-        // stay would be accepted. It is written back all the same.
+    /// The bar shows the order the first write was meant to make: the check matches, and the app it moved from among the modules that stay
+    /// would be accepted. It is written back all the same. The place that counts is the one written: an app that was at 500, left of the
+    /// clock, is put near the system items by the first write (the request's read has no clock), at or below the clock's 200.
+    @Test(arguments: [(entry: 190.0, firstAtMost: Double?.none, keyCount: Int?.some(1)), (entry: 500.0, firstAtMost: 200.0, keyCount: nil)])
+    func anAppTheFirstWriteMovedAmongTheStayingModulesIsWrittenBackWhenTheFirstCheckMatches(
+        entry: Double, firstAtMost: Double?, keyCount: Int?
+    ) async throws {
         let h = Harness(rules: F.rules(.byRank))
         let a = F.nameless("a")
-        let world = aRequestReadWithoutTheClock(a, entry: 190)
+        let world = aRequestReadWithoutTheClock(a, entry: entry)
         h.writer.table = world.table
         h.reads.answer([world.with])
 
@@ -1388,26 +1360,12 @@ struct LayoutApplierTests {
         #expect(await h.settled())
 
         #expect(h.writer.writeCount == 2)
-        #expect(h.writer.writes.last?.arrangement.distances[.item(a)] == 190 && h.writer.writes.last?.keys.count == 1)
-        #expect(await h.applier.status().lastError == .notAccepted)
-    }
-
-    @Test func anAppTheFirstWritePutFarLeftIsStillWrittenBack() async throws {
-        // The table macOS has after the first write puts the app at 600, left of the clock's reach: the second try would plan from that
-        // and not see an app among the modules that stay. The app's place before the write is what counts.
-        let h = Harness(rules: F.rules(.byRank))
-        let a = F.nameless("a")
-        let world = aRequestReadWithoutTheClock(a, entry: 190)
-        h.writer.table = world.table
-        h.writer.tablesAfterWrites([LayoutTableSnapshot(distances: ["module:Clock": 200, itemKey(a): 600])])
-        let differs = F.inventory(F.ownDrawn([.divider, .hiddenDot, .alwaysDot]).items + [F.appItem(a, x: 300), F.systemItem("clock", x: 900)])
-        h.reads.answer([differs])
-
-        await h.request(F.inputs(F.sections(hidden: [a]), widths: [.system("clock"): 30]), inventory: world.before)
-        #expect(await h.settled())
-
-        #expect(h.writer.writeCount == 2, "no second try: the write puts the app back")
-        #expect(h.writer.writes.last?.arrangement.distances[.item(a)] == 190)
+        if let firstAtMost {
+            let first = try #require(h.writer.writes.first?.arrangement.distances[.item(a)])
+            #expect(first <= firstAtMost, "the first write put it among the modules that stay")
+        }
+        #expect(h.writer.writes.last?.arrangement.distances[.item(a)] == entry)
+        if let keyCount { #expect(h.writer.writes.last?.keys.count == keyCount) }
         #expect(await h.applier.status().lastError == .notAccepted)
     }
 
@@ -1447,24 +1405,6 @@ struct LayoutApplierTests {
         let first = try #require(h.writer.writes.first?.arrangement.distances[.item(a)])
         #expect(first > 150, "the first write put it left of Bluetooth, so only where it was says it is among the modules that stay")
         #expect(h.writer.writes.last?.arrangement.distances[.item(a)] == 140)
-        #expect(await h.applier.status().lastError == .notAccepted)
-    }
-
-    @Test func anAppThatWasAboveTheModulesAndIsWrittenAmongThemIsWrittenBack() async throws {
-        // a was at 500, left of the clock; the request's read has no clock, so the first write puts it near the system items, at or
-        // below the clock's 200. The place that counts here is the one written.
-        let h = Harness(rules: F.rules(.byRank))
-        let a = F.nameless("a")
-        let world = aRequestReadWithoutTheClock(a, entry: 500)
-        h.writer.table = world.table
-        h.reads.answer([world.with])
-
-        await h.request(F.inputs(F.sections(hidden: [a]), widths: [.system("clock"): 30]), inventory: world.before)
-        #expect(await h.settled())
-
-        let first = try #require(h.writer.writes.first?.arrangement.distances[.item(a)])
-        #expect(first <= 200, "the first write put it among the modules that stay")
-        #expect(h.writer.writes.last?.arrangement.distances[.item(a)] == 500)
         #expect(await h.applier.status().lastError == .notAccepted)
     }
 
@@ -1561,47 +1501,32 @@ struct LayoutApplierTests {
         }
     }
 
-    @Test func anAppWithSeveralItemsAmongTheStayingModulesInHiddenStopsNeitherTheDotsNorTheShownApps() async throws {
+    @Test(arguments: [false, true])
+    func anAppAmongTheStayingModulesInHiddenStopsNeitherTheDotsNorTheShownApps(withSeveralItems: Bool) async throws {
         let h = Harness(rules: F.rules(.byRank))
         let first = F.nameless("i", 0), second = F.nameless("i", 1), s = F.named("s")
-        // Between Clock (60) and Bluetooth (120) sit the app's two entries (80, 100), the person put it in Hidden, and the plan conceals it:
-        // it isn't matched (its frames are where it was last drawn), so it gets no key. Its places are right of anything a write places.
-        h.writer.table = LayoutTableSnapshot(distances: ["module:Clock": 60, "module:Bluetooth": 120, itemKey(first): 80,
-                                                         LayoutKey.status(bundleID: first.bundleID, autosaveName: "Item-1"): 100, F.key(s): 150])
+        let app = withSeveralItems ? [first, second] : [first]
+        // Between Clock (60) and Bluetooth (120) sit the app's entries (80 and 100, or one at 90), the person put it in Hidden, and (with
+        // several items) the plan conceals it: it isn't matched (its frames are where it was last drawn), so it gets no key. s is left of
+        // Bluetooth, and its places are right of anything a write places.
+        var distances: [String: Double] = ["module:Clock": 60, "module:Bluetooth": 120, F.key(s): 150]
+        distances[itemKey(first)] = withSeveralItems ? 80 : 90
+        if withSeveralItems { distances[LayoutKey.status(bundleID: first.bundleID, autosaveName: "Item-1")] = 100 }
+        h.writer.table = LayoutTableSnapshot(distances: distances)
         h.reads.answer([matching()])
-        let inventory = F.slotted(F.ownDrawn().items + [F.appItem(first, x: 300), F.appItem(second, x: 330), F.appItem(s, x: 360),
-                                                        F.systemItem("clock", x: 900), F.systemItem("bluetooth", x: 850)])
+        let items = F.ownDrawn().items + app.enumerated().map { F.appItem($1, x: 300 + Double($0) * 30) }
+            + [F.appItem(s, x: 300 + Double(app.count) * 30), F.systemItem("clock", x: 900), F.systemItem("bluetooth", x: 850)]
+        let inventory = withSeveralItems ? F.slotted(items) : F.inventory(items)
 
-        await h.request(F.inputs(F.sections(hidden: [first, second], shown: [s]), widths: [.system("clock"): 30, .system("bluetooth"): 30]),
-                        inventory: inventory, concealedApps: [first.bundleID])
+        await h.request(F.inputs(F.sections(hidden: app, shown: [s]), widths: [.system("clock"): 30, .system("bluetooth"): 30]),
+                        inventory: inventory, concealedApps: withSeveralItems ? [first.bundleID] : [])
         #expect(await h.settled())
 
         let report = try #require(await h.applier.status().lastReport)
-        #expect(Set(report.unresolved) == [first, second], "it can't be reordered")
+        #expect(Set(report.unresolved) == Set(app), "it can't be reordered")
         #expect(report.notPlaced.isEmpty, "and it doesn't stop the dots or the Shown app from being placed")
         let write = try #require(h.writer.writes.first)
-        #expect(write.keys[.item(first)] == nil && write.keys[.item(second)] == nil)
-        #expect(write.keys[.item(s)] == F.key(s) && write.keys[.dot(.hidden)] != nil && write.keys[.divider] != nil)
-    }
-
-    @Test func anAppAmongTheStayingModulesInHiddenStopsNeitherTheDotsNorTheShownApps() async throws {
-        let h = Harness(rules: F.rules(.byRank))
-        let itsycal = F.nameless("i"), s = F.named("s")
-        // Between Clock (60) and Bluetooth (120) sits an app with one entry (90), and the person put it in Hidden. s is left of Bluetooth.
-        h.writer.table = LayoutTableSnapshot(distances: ["module:Clock": 60, "module:Bluetooth": 120, itemKey(itsycal): 90, F.key(s): 150])
-        h.reads.answer([matching()])
-        let inventory = F.inventory(F.ownDrawn().items + [F.appItem(itsycal, x: 300), F.appItem(s, x: 330), F.systemItem("clock", x: 900),
-                                                          F.systemItem("bluetooth", x: 850)])
-
-        await h.request(F.inputs(F.sections(hidden: [itsycal], shown: [s]), widths: [.system("clock"): 30, .system("bluetooth"): 30]),
-                        inventory: inventory)
-        #expect(await h.settled())
-
-        let report = try #require(await h.applier.status().lastReport)
-        #expect(report.unresolved == [itsycal], "it can't be reordered")
-        #expect(report.notPlaced.isEmpty, "and it doesn't stop the dots from being placed")
-        let write = try #require(h.writer.writes.first)
-        #expect(write.keys[.item(itsycal)] == nil, "it stays where macOS has it")
+        #expect(app.allSatisfy { write.keys[.item($0)] == nil }, "it stays where macOS has it")
         #expect(write.keys[.item(s)] == F.key(s) && write.keys[.dot(.hidden)] != nil && write.keys[.divider] != nil)
     }
 

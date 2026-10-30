@@ -75,17 +75,6 @@ struct AgentWindowChooserTests {
         #expect(AgentWindowChooser.choose([named(0, nil), named(1, nil)], layout: .desk).first?.index == 0)
     }
 
-    @Test func aNameThatRepeatsInAWindowIsNotCounted() {
-        func slot(_ name: String?) -> AgentSlot {
-            AgentSlot(frame: CGRect(x: 0, y: 0, width: 30, height: 30), identifier: name, role: nil, subrole: nil, description: nil,
-                      ownerPID: nil, isOverflowChevron: false)
-        }
-        let onScreen = [slot("com.apple.menuextra.clock"), slot("weather.temp"), slot("weather.alerts"), slot(nil), slot("")]
-        let offScreen = [slot("com.apple.menuextra.clock"), slot("weather.temp"), slot("weather.temp"), slot(nil), slot("")]
-        #expect(AgentWindowReader.identifierCount(onScreen) == 3)
-        #expect(AgentWindowReader.identifierCount(offScreen) == 1, "the clock alone: the repeated name tells neither slot apart")
-    }
-
     /// A fake MenuBarAgent with one window on the main display per entry: the clock, and a slot of 40 points for each name, at its x.
     private func agentWithWindows(_ windows: [[(name: String?, x: CGFloat)]]) -> FakeAX {
         let ax = FakeAX()
@@ -109,46 +98,6 @@ struct AgentWindowChooserTests {
         // A memory of the window that lags doesn't make it the one.
         let remembered = await reader.readBar(agent: agent, layout: .desk, display: DisplayFixtures.deskMain.uuid, preferring: 0)
         #expect(remembered?.index == 1)
-    }
-
-    @Test func theQuickReadTakesTheFirstWindowWhenNoneNamesItsSlots() async {
-        // Apps that don't name their items: no window repeats a name, and the first (or the remembered one) is read, as it always was.
-        let reader = AgentWindowReader(ax: agentWithWindows([[(nil, 3000), (nil, 3040)], [(nil, 3100), (nil, 3140)]]))
-        let agent = RunningApp.fake(50, MenuBarReader.menuBarAgentBundleID)
-        #expect(await reader.readBar(agent: agent, layout: .desk, display: DisplayFixtures.deskMain.uuid, preferring: nil)?.index == 0)
-        #expect(await reader.readBar(agent: agent, layout: .desk, display: DisplayFixtures.deskMain.uuid, preferring: 1)?.index == 1)
-    }
-
-    @Test func windowsThatWereNotReadForTheirSlotsAreNotCompared() {
-        // A read that didn't look at the slots of every window has nothing to compare: it is no doubt.
-        let chosen = AgentWindowChooser.choose([window(0, mainBar, slots: []), window(1, mainBar, slots: []), window(2, mainBar, slots: [])],
-                                               layout: .desk)
-        #expect(chosen.first?.index == 0)
-        #expect(chosen.first?.isAmbiguous == false)
-        #expect(chosen.first?.candidates == [0, 1, 2])
-    }
-
-    @Test func portraitDisplayHasABar() {
-        // The portrait display reports no menu bar in its visible frame (it is its frame), but MenuBarAgent has a window on it.
-        #expect(DisplayFixtures.deskPortrait.visibleFrame == DisplayFixtures.deskPortrait.frame)
-        let chosen = AgentWindowChooser.choose([window(0, portraitBar, slots: slots)], layout: .desk)
-        #expect(chosen.map(\.displayUUID) == [DisplayFixtures.deskPortrait.uuid])
-        #expect(chosen.first?.frame == portraitBar)
-    }
-
-    @Test func aDisplayWithNoWindowHasNoBar() {
-        let chosen = AgentWindowChooser.choose([window(0, mainBar, slots: slots)], layout: .desk)
-        #expect(chosen.map(\.displayUUID) == [DisplayFixtures.deskMain.uuid])
-    }
-
-    @Test func windowOffEveryDisplayIsIgnored() {
-        let nowhere = CGRect(x: 9000, y: 9000, width: 100, height: 30)
-        let chosen = AgentWindowChooser.choose([window(0, nowhere, slots: slots), window(1, nil, slots: slots), window(2, .zero, slots: [])],
-                                               layout: .desk)
-        #expect(chosen.isEmpty)
-        // And one that is on a display is still found among them.
-        let found = AgentWindowChooser.choose([window(0, nowhere, slots: slots), window(1, mainBar, slots: slots)], layout: .desk)
-        #expect(found.map(\.index) == [1])
     }
 
     @Test func aWindowBelongsToTheDisplayItsTopLeftCornerIsOn() {

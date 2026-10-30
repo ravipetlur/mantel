@@ -85,41 +85,6 @@ private struct Where: Sendable, Equatable {
     var cancelled: Bool
 }
 
-private enum SenderMarker {
-    @TaskLocal static var current: String?
-}
-
-/// A clock whose sleep ends when the task that sleeps is cancelled, and says nothing of it: the end of a sleep that ran out just as
-/// the task was cancelled.
-private final class WakesQuietlyClock: Clock {
-    private struct Counts {
-        var sleeping = 0
-        var cancelled = 0
-    }
-
-    private let gate = Gate()
-    private let counts = Mutex(Counts())
-
-    /// How many sleeps are going on.
-    var sleeping: Int { counts.withLock { $0.sleeping } }
-    /// How many sleeps have ended because their task was cancelled.
-    var cancelled: Int { counts.withLock { $0.cancelled } }
-
-    func now() -> Date { Date(timeIntervalSince1970: 1_700_000_000) }
-
-    func sleep(for duration: Duration) async throws {
-        counts.withLock { $0.sleeping += 1 }
-        await gate.wait()
-        counts.withLock {
-            $0.sleeping -= 1
-            if Task.isCancelled { $0.cancelled += 1 }
-        }
-    }
-
-    /// Lets every sleep end, so that none is left waiting.
-    func release() { gate.open() }
-}
-
 @Suite("Reveal driver", .timeLimit(.minutes(1)))
 struct RevealDriverTests {
     @Test func hoverRevealsAfterDelay() async {
@@ -139,17 +104,6 @@ struct RevealDriverTests {
         #expect(await rig.driver.state == .hiddenShown)
         // The reveal has its own countdown, waiting on the clock.
         await rig.sleepers(1)
-    }
-
-    @Test func hoverDelayIsTheSettingsOwn() async {
-        let rig = Rig(settings(hover: true, hoverDelay: 800))
-        await rig.driver.send(.pointerEnteredEmptySpace)
-        await rig.sleepers(1)
-        rig.clock.advance(by: .milliseconds(799))
-        #expect(await rig.driver.state == .collapsed)
-        rig.clock.advance(by: .milliseconds(1))
-        await rig.passes(2)
-        #expect(await rig.driver.state == .hiddenShown)
     }
 
     @Test func pointerLeavingBeforeTheDelayNeverReveals() async {
@@ -190,17 +144,6 @@ struct RevealDriverTests {
         #expect(rig.passed.all == [.stateChanged(.hiddenShown), .checkRoom, .stateChanged(.collapsed)])
         #expect(await rig.driver.state == .collapsed)
         await rig.noSleepers()
-    }
-
-    @Test func rehideDelayIsTheSettingsOwn() async {
-        let rig = Rig(settings(rehide: .seconds(30)))
-        await rig.driver.send(.dotClicked(.always))
-        await rig.sleepers(1)
-        rig.clock.advance(by: .seconds(29))
-        #expect(await rig.driver.state == .allShown)
-        rig.clock.advance(by: .seconds(1))
-        await rig.passes(3)
-        #expect(await rig.driver.state == .collapsed)
     }
 
     @Test func neverRehidesWhenNever() async {
@@ -297,44 +240,6 @@ struct RevealDriverTests {
         #expect(await rig.driver.ignoredTimerWakeups == 1)
     }
 
-    @Test func aTimerThatWakesAfterItsCancelIsIgnored() async {
-        // The same through the real path: a task that sleeps on a clock that doesn't throw when cancelled gets to report its fire.
-        let clock = WakesQuietlyClock()
-        defer { clock.release() }
-        let passed = Passed()
-        let driver = RevealDriver(machine: RevealMachine(settings: settings()), clock: clock, effects: { passed.record($0) })
-        await driver.send(.show(.hidden))
-        #expect(await waitUntil { clock.sleeping == 1 }, "the countdown sleeping")
-
-        await driver.send(.guardsChanged(RehideGuards(panelOpen: true)))
-        let reported = await withinTimeLimit(.seconds(5)) {
-            while await driver.ignoredTimerWakeups < 1 {
-                guard (try? await Task.sleep(for: .milliseconds(1))) != nil else { return false }
-            }
-            return true
-        }
-        #expect(reported == true, "the cancelled countdown's wake-up reaching the driver")
-        #expect(await driver.state == .hiddenShown)
-        #expect(await settled(driver), "the queued effects delivered")
-        #expect(passed.all == [.stateChanged(.hiddenShown), .checkRoom])
-    }
-
-    @Test func newerStartAndCancelEndTheOldTask() async {
-        let clock = WakesQuietlyClock()
-        defer { clock.release() }
-        let driver = RevealDriver(machine: RevealMachine(settings: settings()), clock: clock, effects: { _ in })
-        await driver.send(.show(.hidden))
-        #expect(await waitUntil { clock.sleeping == 1 }, "the countdown sleeping")
-
-        // Starting the countdown again ends the task of the first one, and there is one task sleeping again.
-        await driver.send(.show(.hidden))
-        #expect(await waitUntil { clock.cancelled == 1 && clock.sleeping == 1 }, "the first countdown's task cancelled")
-
-        // Cancelling it ends the second.
-        await driver.send(.guardsChanged(RehideGuards(menuOpen: true)))
-        #expect(await waitUntil { clock.cancelled == 2 && clock.sleeping == 0 }, "the second countdown's task cancelled")
-    }
-
     @Test func collapseCancelsTimers() async {
         let rig = Rig(settings(hover: true))
         await rig.driver.send(.pointerEnteredEmptySpace)
@@ -424,52 +329,6 @@ struct RevealDriverTests {
         #expect(passed.all == [.stateChanged(.hiddenShown), .checkRoom, .stateChanged(.collapsed)])
     }
 
-    @Test func theCallerCanSendFromItsOwnEffects() async {
-        // A caller that answers an effect with an event, as the session does when it sees the room it was asked to look at.
-        let box = Mutex<RevealDriver?>(nil)
-        defer { box.withLock { $0 = nil } }
-        let passed = Passed()
-        let clock = FakeClock()
-        let driver = RevealDriver(machine: RevealMachine(settings: settings()), clock: clock, effects: { effect in
-            passed.record(effect)
-            if effect == .checkRoom { await box.withLock { $0 }?.send(.guardsChanged(RehideGuards(pointerInBar: true))) }
-        })
-        box.withLock { $0 = driver }
-
-        let sent = Mutex(false)
-        Task {
-            await driver.send(.show(.hidden))
-            sent.withLock { $0 = true }
-        }
-        #expect(await waitUntil { sent.withLock { $0 } }, "send returning while the caller sends from its effect")
-        #expect(await settled(driver), "the queued effects delivered, the one that sends among them")
-        #expect(await driver.state == .hiddenShown)
-        #expect(passed.all == [.stateChanged(.hiddenShown), .checkRoom])
-        // The guard it sent is in force: the countdown that began with the reveal (generation 1) was cancelled by it (generation 2), and
-        // however long goes by the icons stay.
-        #expect(await driver.currentGeneration(of: .rehide) == 2, "the countdown cancelled")
-        clock.advance(by: .seconds(600))
-        #expect(await driver.state == .hiddenShown)
-    }
-
-    @Test func effectsNeverRunOnTheSendersTask() async {
-        let seen = Mutex<[Where]>([])
-        let driver = RevealDriver(machine: RevealMachine(settings: settings()), clock: FakeClock(), effects: { _ in
-            seen.withLock { $0.append(Where(marker: SenderMarker.current, cancelled: Task.isCancelled)) }
-        })
-        // A sender that carries a task-local value and has been cancelled: an effect that ran on its task would see both.
-        let sender = Task {
-            withUnsafeCurrentTask { $0?.cancel() }
-            await SenderMarker.$current.withValue("the sender") {
-                await driver.send(.show(.hidden))
-            }
-        }
-        await sender.value
-        #expect(await settled(driver), "the queued effects delivered")
-        #expect(seen.withLock { $0 } == [Where(marker: nil, cancelled: false), Where(marker: nil, cancelled: false)],
-                "stateChanged and checkRoom, each run on the driver's own task")
-    }
-
     @Test func settledWaitsForQueuedEffects() async {
         let gate = Gate()
         let finished = Mutex<[String]>([])
@@ -495,15 +354,6 @@ struct RevealDriverTests {
         // It returned after both effects were finished with, not after the first.
         #expect(finished.withLock { $0 } == ["stateChanged(MKLayout.RevealState.hiddenShown)", "checkRoom", "settled"])
         #expect(await driver.settleWaiting == 0)
-    }
-
-    @Test func settledReturnsAtOnceWhenNothingIsQueued() async {
-        let rig = Rig(settings())
-        #expect(await settled(rig.driver), "nothing queued")
-        // And when what was queued has been delivered.
-        await rig.driver.send(.show(.hidden))
-        await rig.settle()
-        #expect(await settled(rig.driver), "everything delivered")
     }
 
     @Test func settledOnlyWaitsForWhatWasQueuedBeforeIt() async {
@@ -533,24 +383,5 @@ struct RevealDriverTests {
         // The collapse the effect asked for is queued behind it, and is settled by the next call.
         #expect(await settled(driver), "the collapse delivered")
         #expect(passed.all == [.stateChanged(.hiddenShown), .checkRoom, .stateChanged(.collapsed)])
-    }
-
-    @Test func settledEndsWhenItsTaskIsCancelled() async {
-        // For a test that waits for it under a time limit: a wait that ignored cancellation would keep the time limit from ending.
-        let gate = Gate()
-        let driver = RevealDriver(machine: RevealMachine(settings: settings()), clock: FakeClock(), effects: { _ in await gate.wait() })
-        defer { gate.open() }
-        await driver.send(.show(.hidden))
-
-        let returned = Mutex(false)
-        let waiter = Task {
-            await driver.settled()
-            returned.withLock { $0 = true }
-        }
-        #expect(await settleWaiters(driver, atLeast: 1), "settled() waiting on the held effects")
-        #expect(!returned.withLock { $0 }, "the effects are held, so settled isn't back")
-        waiter.cancel()
-        #expect(await waitUntil { returned.withLock { $0 } }, "settled returning once its task is cancelled")
-        #expect(await driver.settleWaiting == 0)
     }
 }

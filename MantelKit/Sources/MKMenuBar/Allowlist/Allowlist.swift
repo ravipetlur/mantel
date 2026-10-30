@@ -49,7 +49,7 @@ public protocol AllowlistAssertionHandle: Sendable {
 }
 
 /// macOS's allowlist ("assessment mode"): every app that isn't on it has its status items concealed for as long as the
-/// assertion lives. The live one is `LiveAllowlist`; tests and the probes' tests give their own.
+/// assertion lives. The live one is `LiveAllowlist`; a test gives its own.
 public protocol AllowlistControlling: Sendable {
     /// Loads the framework and checks it. Only reads; never activates anything.
     func inspect() -> AllowlistInspection
@@ -62,7 +62,7 @@ public protocol AllowlistControlling: Sendable {
 /// The real one, through the shim.
 ///
 /// - The assertion object is held strongly until `invalidate()`. Whether macOS releases the assertion when the object is
-///   released without `invalidate` is for the platform test to find out; `deinit` here invalidates, so that a handle that
+///   released without `invalidate` isn't known; `deinit` here invalidates, so that a handle that
 ///   is dropped never leaves one live.
 /// - macOS calls the completion handler on a thread of its own, so nothing here assumes which.
 /// - **An activation that doesn't finish is given up on.** If macOS never calls the completion handler, or the task is
@@ -70,8 +70,8 @@ public protocol AllowlistControlling: Sendable {
 ///   has a handle to release, so nobody else could. Until then the assertion would sit live, hiding every app's items.
 public struct LiveAllowlist: AllowlistControlling {
     /// How long macOS gets to finish an activation. Not measured yet: the working estimate for the stall MenuBarAgent
-    /// has per apply is 100 to 150 ms, so 3 seconds is more than twenty times that. The platform test measures the real
-    /// figure (`activateToCompletionMs`); change this only if that says an activation can take longer.
+    /// has per apply is 100 to 150 ms, so 3 seconds is more than twenty times that. Change this only if a measure of the real
+    /// figure says an activation can take longer.
     public static let activationTimeout: Duration = .seconds(3)
 
     /// What starts an activation: it is given the items, the apps and the completion handler (which macOS calls, once, on any

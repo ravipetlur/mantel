@@ -6,47 +6,43 @@ import Testing
 /// When an icon can't be shown, and what is said of it.
 @Suite("Icon show check", .timeLimit(.minutes(2)))
 struct IconShowCheckTests {
-    private let app = ItemID(bundleID: "com.example.notes", key: .identifier("main"))
-    private let system = ItemID.system("nowplaying")
-
-    @Test func aRunningAppCanBeShown() {
-        #expect(IconShowCheck.refusal(for: app, hasProcess: true, hasItems: true, planConceals: true) == nil)
-        #expect(IconShowCheck.refusal(for: app, hasProcess: true, hasItems: false, planConceals: false) == nil)
+    struct Case: Sendable {
+        var item: ItemID
+        var hasProcess: Bool
+        var hasItems: Bool
+        var planConceals: Bool
+        var neverDrawn = false
+        var noSuchIcon = false
+        var refusal: IconClickFailure?
     }
 
-    @Test func anAppThatQuitButIsStillListedIsLeftToTheDriver() {
-        // Remembered with an item in the last read: the driver's own rule lets it through, so a show does too.
-        #expect(IconShowCheck.refusal(for: app, hasProcess: false, hasItems: true, planConceals: false) == nil)
-    }
+    private static let notes = ItemID(bundleID: "com.example.notes", key: .identifier("main"))
+    private static let nowPlaying = ItemID.system("nowplaying")
+    private static let oldIcon = ItemID(bundleID: "com.example.app", key: .identifier("x.old"))
 
-    @Test func anAppWithNoProcessAndNoItemsIsNotRunning() {
-        #expect(IconShowCheck.refusal(for: app, hasProcess: false, hasItems: false, planConceals: false) == .notRunning)
-        #expect(IconShowCheck.refusal(for: app, hasProcess: false, hasItems: false, planConceals: true) == .notRunning)
-    }
-
-    @Test func aSystemItemThePlanTakesOffTheBarCantBeReached() {
-        #expect(IconShowCheck.refusal(for: system, hasProcess: false, hasItems: false, planConceals: true) == .unreachable)
-    }
-
-    @Test func anAppThatIsNeverDrawnCantBeReached() {
-        // macOS doesn't tie its icon to it, or the person turned it off in System Settings › Menu Bar: a reveal draws nothing.
-        #expect(IconShowCheck.refusal(for: app, hasProcess: true, hasItems: true, planConceals: false, neverDrawn: true) == .unreachable)
-        #expect(IconShowCheck.refusal(for: app, hasProcess: false, hasItems: true, planConceals: true, neverDrawn: true) == .unreachable)
-    }
-
-    @Test func anAppThatIsNeverDrawnAndNotRunningIsNotRunning() {
-        #expect(IconShowCheck.refusal(for: app, hasProcess: false, hasItems: false, planConceals: false, neverDrawn: true) == .notRunning)
-    }
-
-    @Test func aSystemItemOnTheBarCanBeShownWithoutAProcessOrItems() {
-        #expect(IconShowCheck.refusal(for: system, hasProcess: false, hasItems: false, planConceals: false) == nil)
-    }
-
-    @Test func anIconTheAppDoesNotListIsUnreachableAtOnce() {
-        let app = ItemID(bundleID: "com.example.app", key: .identifier("x.old"))
-        #expect(IconShowCheck.refusal(for: app, hasProcess: true, hasItems: true, planConceals: false, noSuchIcon: true) == .unreachable)
-        // An app that isn't running is still not running.
-        #expect(IconShowCheck.refusal(for: app, hasProcess: false, hasItems: false, planConceals: false, noSuchIcon: true) == .notRunning)
-        #expect(IconShowCheck.refusal(for: app, hasProcess: true, hasItems: true, planConceals: false, noSuchIcon: false) == nil)
+    @Test(arguments: [
+        // A running app can be shown.
+        Case(item: notes, hasProcess: true, hasItems: true, planConceals: true, refusal: nil),
+        Case(item: notes, hasProcess: true, hasItems: false, planConceals: false, refusal: nil),
+        // One that quit but was remembered with an item in the last read: the driver's own rule lets it through, so a show does too.
+        Case(item: notes, hasProcess: false, hasItems: true, planConceals: false, refusal: nil),
+        // No process and no items is not running, never drawn or not.
+        Case(item: notes, hasProcess: false, hasItems: false, planConceals: false, refusal: .notRunning),
+        Case(item: notes, hasProcess: false, hasItems: false, planConceals: true, refusal: .notRunning),
+        Case(item: notes, hasProcess: false, hasItems: false, planConceals: false, neverDrawn: true, refusal: .notRunning),
+        // A system item the plan takes off the bar can't be reached; one on the bar can be shown without a process or items.
+        Case(item: nowPlaying, hasProcess: false, hasItems: false, planConceals: true, refusal: .unreachable),
+        Case(item: nowPlaying, hasProcess: false, hasItems: false, planConceals: false, refusal: nil),
+        // An app that is never drawn (macOS doesn't tie its icon to it, or it is turned off in System Settings › Menu Bar): a reveal draws nothing.
+        Case(item: notes, hasProcess: true, hasItems: true, planConceals: false, neverDrawn: true, refusal: .unreachable),
+        Case(item: notes, hasProcess: false, hasItems: true, planConceals: true, neverDrawn: true, refusal: .unreachable),
+        // An icon the app does not list is unreachable at once; an app that isn't running is still not running.
+        Case(item: oldIcon, hasProcess: true, hasItems: true, planConceals: false, noSuchIcon: true, refusal: .unreachable),
+        Case(item: oldIcon, hasProcess: false, hasItems: false, planConceals: false, noSuchIcon: true, refusal: .notRunning),
+        Case(item: oldIcon, hasProcess: true, hasItems: true, planConceals: false, noSuchIcon: false, refusal: nil),
+    ])
+    func whenAnIconCantBeShown(_ check: Case) {
+        #expect(IconShowCheck.refusal(for: check.item, hasProcess: check.hasProcess, hasItems: check.hasItems, planConceals: check.planConceals,
+                                      neverDrawn: check.neverDrawn, noSuchIcon: check.noSuchIcon) == check.refusal)
     }
 }

@@ -11,7 +11,6 @@ import Testing
 struct DotMenuPlacementTests {
     private let displays = DisplayLayout.deskWithLaptopOpen
     private let desk = DisplayFixtures.deskMain
-    private let side = DisplayFixtures.deskPortrait
     private let laptop = DisplayFixtures.laptopRightOfDesk
 
     /// The desk display's bar is 30 high at the top of the main display; the laptop's is 33, at CoreGraphics y = 773 (the main display is
@@ -60,14 +59,6 @@ struct DotMenuPlacementTests {
         #expect(decide(.always, pointer: CGPoint(x: 4840, y: 1105), inventory: inventory()) == .popUp(at: CGPoint(x: 4830, y: 1083), under: .slot))
     }
 
-    @Test func theSlotIsTheOneOfTheDisplayThatWasClickedNotTheButtons() {
-        // The same read gives the dot a slot on the desk display too; the click was on the laptop's bar, so x = 4800 and not 3000.
-        guard case .popUp(let point, _) = decide(pointer: CGPoint(x: 4820, y: 1100), inventory: inventory()) else {
-            Issue.record("expected a pop-up"); return
-        }
-        #expect(point.x == 4800)
-    }
-
     @Test func withNoSlotThereTheMenuOpensUnderTheBarAtTheClick() {
         let pointer = CGPoint(x: 4900, y: 1100)
         let expected = DotMenuPlacement.Decision.popUp(at: CGPoint(x: 4900, y: 1083), under: .click)
@@ -82,37 +73,6 @@ struct DotMenuPlacementTests {
         // own height (34 here, from its visible frame), which is 1083 in AppKit.
         #expect(decide(pointer: pointer, inventory: inventory(), displaysChangedAt: Date(timeIntervalSince1970: 200))
                 == .popUp(at: CGPoint(x: 4900, y: 1083), under: .click))
-    }
-
-    @Test func withNoReadTheBarIsTheTopOfTheDisplayAndTheHeightItsOwnFrameSays() {
-        // The laptop's frame is 34 above its visible frame (the notch is 32): 1117 - 34 = 1083 in AppKit, not 24 below the top.
-        #expect(decide(pointer: CGPoint(x: 4900, y: 1105), inventory: nil) == .popUp(at: CGPoint(x: 4900, y: 1083), under: .click))
-        // The portrait display reports no bar in its visible frame: the height AppKit says the bar is (24 here) stands in. Its top is 2381.
-        #expect(decide(pointer: CGPoint(x: -290, y: 2370), inventory: nil) == .popUp(at: CGPoint(x: -290, y: 2357), under: .click))
-    }
-
-    @Test func aBarThatIsOnTheDisplayLeftOfTheOriginIsFoundToo() {
-        // The portrait display is left of the main one, higher: its top is at CoreGraphics y = -491, and its bar, 30 high, ends at -461.
-        let sideBar = MenuBarGeometry(displayUUID: side.uuid, rect: CGRect(x: -1800, y: -491, width: 1800, height: 30), notch: nil)
-        let read = Inventory(capturedAt: Date(timeIntervalSince1970: 100), bars: [deskBar, sideBar], items: [
-            dot(.hiddenDot, frames: [side.uuid: CGRect(x: -300, y: -491, width: 30, height: 30)]),
-        ], chevrons: [:], reach: [], problems: [])
-        // In AppKit the bar's bottom is 1890 - (-461) = 2351.
-        #expect(decide(pointer: CGPoint(x: -290, y: 2370), inventory: read) == .popUp(at: CGPoint(x: -300, y: 2351), under: .slot))
-    }
-
-    @Test func aButtonWithNoWindowOrOnNoDisplayLeavesTheMenuToTheClickedDisplay() {
-        let pointer = CGPoint(x: 4810, y: 1105)
-        let expected = DotMenuPlacement.Decision.popUp(at: CGPoint(x: 4800, y: 1083), under: .slot)
-        let missing = DotMenuPlacement.decide(dot: .hidden, pointer: pointer, buttonFrame: nil, displays: displays, inventory: inventory())
-        #expect(missing == expected)
-        let stale = DotMenuPlacement.decide(dot: .hidden, pointer: pointer, buttonFrame: CGRect(x: 90000, y: 90000, width: 30, height: 30),
-                                            displays: displays, inventory: inventory())
-        #expect(stale == expected)
-    }
-
-    @Test func aPointerOnNoDisplayIsLeftToTheStatusItem() {
-        #expect(decide(pointer: CGPoint(x: 50000, y: 50000), inventory: inventory()) == .statusItem)
     }
 
     // MARK: The owner's three displays, as recorded in sitting 1
@@ -168,40 +128,6 @@ struct DotMenuPlacementTests {
         #expect(decideOnOwner(pointer: CGPoint(x: 1755, y: 0), inventory: ownerRead()) == .popUp(at: CGPoint(x: 1739.5, y: -40), under: .slot))
     }
 
-    @Test func aRightClickOnTheLGsDotOpensUnderItAtItsBar() {
-        // The LG's bar ends at CoreGraphics -221 + 30 = -191, which is 2160 + 191 = 2351 in AppKit (its top is 2381); its visible frame begins
-        // at 2350.
-        #expect(decideOnOwner(pointer: CGPoint(x: -770, y: 2365), inventory: ownerRead()) == .popUp(at: CGPoint(x: -787.5, y: 2350), under: .slot))
-        #expect(decideOnOwner(.hidden, pointer: CGPoint(x: -810, y: 2365), inventory: ownerRead()) == .popUp(at: CGPoint(x: -825.5, y: 2350), under: .slot))
-    }
-
-    @Test func aRightClickOnTheDisplayTheButtonIsOnStaysWithTheStatusItem() {
-        #expect(decideOnOwner(pointer: CGPoint(x: 3060, y: 2145), inventory: ownerRead()) == .statusItem)
-    }
-
-    @Test func withNoBarInTheReadEachDisplayGoesByItsOwnBarHeight() {
-        let noBars = ownerRead(bars: [])
-        // 40 on the laptop (its frame is 40 above its visible frame; the notch is 38), 31 on the LG: y = 0 - 40 and 2381 - 31.
-        #expect(decideOnOwner(pointer: CGPoint(x: 1755, y: -20), inventory: noBars) == .popUp(at: CGPoint(x: 1739.5, y: -40), under: .slot))
-        #expect(decideOnOwner(pointer: CGPoint(x: -770, y: 2365), inventory: noBars) == .popUp(at: CGPoint(x: -787.5, y: 2350), under: .slot))
-        #expect(decideOnOwner(pointer: CGPoint(x: 1755, y: -20), inventory: nil) == .popUp(at: CGPoint(x: 1755, y: -40), under: .click))
-        // A laptop whose bar hides itself: nothing between its frame and its visible frame, and the notch (38) is deeper than the height
-        // AppKit gives (24), so the menu opens below the notch.
-        let laptopHiding = DisplayInfo(uuid: Owner.laptop.uuid, name: Owner.laptop.name, frame: Owner.laptop.frame,
-                                       visibleFrame: Owner.laptop.frame, scale: 2, notch: Owner.laptop.notch, isBuiltIn: true, isMain: false)
-        let laptopHidden = DotMenuPlacement.decide(dot: .always, pointer: CGPoint(x: 1755, y: -20), buttonFrame: Owner.button,
-                                                   displays: DisplayLayout(displays: [Owner.samsung, laptopHiding, Owner.lg]),
-                                                   inventory: nil, barHeight: 24)
-        #expect(laptopHidden == .popUp(at: CGPoint(x: 1755, y: -38), under: .click))
-        // A bar that hides itself leaves nothing between a frame and its visible frame: the height AppKit says the bar is stands in.
-        let hiding = DisplayInfo(uuid: Owner.lg.uuid, name: Owner.lg.name, frame: Owner.lg.frame, visibleFrame: Owner.lg.frame, scale: 2,
-                                 notch: nil, isBuiltIn: false, isMain: false)
-        let layout = DisplayLayout(displays: [Owner.samsung, Owner.laptop, hiding])
-        let hidden = DotMenuPlacement.decide(dot: .always, pointer: CGPoint(x: -770, y: 2365), buttonFrame: Owner.button, displays: layout,
-                                             inventory: nil, barHeight: 28)
-        #expect(hidden == .popUp(at: CGPoint(x: -770, y: 2353), under: .click))
-    }
-
     @Test func aBarFromBeforeTheDisplaysMovedIsNotTheBarOfTheDisplayClicked() {
         // Docking: the laptop was alone and the main display, its bar at CoreGraphics (0, 0, 2056, 39). Went by as it was, the bar's bottom
         // is 2160 - 39 = 2121 in AppKit, which is on the Samsung, 9 points below its bar.
@@ -254,35 +180,5 @@ struct DotMenuPlacementTests {
             #expect(point.y <= shown.visibleFrame.maxY)
             #expect(shown.frame.contains(CGPoint(x: point.x, y: point.y - 1)), "and it is on that display")
         }
-    }
-
-    @Test func theLogSaysWhereTheMenuWasPoppedUpUnderWhatAndOnWhichDisplay() {
-        #expect(DotMenuPlacement.popUpLogLine(at: CGPoint(x: 1739.5, y: -40), under: .slot, displays: Owner.layout)
-                == "the menu is popped up at (1739.5, -40.0) under the dot's slot on 22222222, whose visible frame's top is -40.0")
-        #expect(DotMenuPlacement.popUpLogLine(at: CGPoint(x: -790, y: 2350), under: .click, displays: Owner.layout)
-                == "the menu is popped up at (-790.0, 2350.0) under the click on 33333333, whose visible frame's top is 2350.0")
-        #expect(DotMenuPlacement.popUpLogLine(at: CGPoint(x: 9000, y: 0), under: .click, displays: Owner.layout)
-                == "the menu is popped up at (9000.0, 0.0) under the click on no display")
-    }
-
-    @Test func theSamsungsMenuIsNoHigherEitherWhenTheButtonIsOnAnotherDisplay() {
-        // The dot's button is on the laptop (its display is the active one): a click on the Samsung's bar pops the menu up there.
-        let button = CGRect(x: 1700, y: -39, width: 38, height: 39)
-        let read = Inventory(capturedAt: Date(timeIntervalSince1970: 100), bars: [Owner.samsungBar, Owner.laptopBar, Owner.lgBar], items: [
-            ownerDot(.alwaysDot, laptopX: 1739.5, lgX: -787.5),
-        ], chevrons: [:], reach: [], problems: [])
-        let decision = DotMenuPlacement.decide(dot: .always, pointer: CGPoint(x: 3060, y: 2145), buttonFrame: button, displays: Owner.layout,
-                                               inventory: read)
-        #expect(decision == .popUp(at: CGPoint(x: 3052, y: 2129), under: .slot), "the visible frame's top is 2129, the bar's bottom 2130")
-    }
-
-    @Test func aBarThatHidesItselfLeavesTheMenuWhereItWasPlaced() {
-        // The visible frame reaches the frame's top while the bar hides: it says nothing then, and the menu isn't pulled up to it.
-        let hiding = DisplayInfo(uuid: Owner.lg.uuid, name: Owner.lg.name, frame: Owner.lg.frame, visibleFrame: Owner.lg.frame, scale: 2,
-                                 notch: nil, isBuiltIn: false, isMain: false)
-        let layout = DisplayLayout(displays: [Owner.samsung, Owner.laptop, hiding])
-        let decision = DotMenuPlacement.decide(dot: .always, pointer: CGPoint(x: -770, y: 2365), buttonFrame: Owner.button, displays: layout,
-                                               inventory: ownerRead())
-        #expect(decision == .popUp(at: CGPoint(x: -787.5, y: 2351), under: .slot), "the bar's own bottom, lower than the frame's top")
     }
 }

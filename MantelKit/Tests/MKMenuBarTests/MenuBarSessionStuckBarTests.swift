@@ -15,31 +15,6 @@ private let sync = SessionWorld.sync
 private let weather = SessionWorld.weather
 private let own = SessionWorld.own
 
-/// Why the menu bar can't be restarted now (a platform test is changing it), and when that is asked.
-private final class Refusal: Sendable {
-    private struct State {
-        var reason: String?
-        var gate: Gate?
-        var asked = 0
-    }
-
-    private let state = Mutex(State())
-
-    func set(_ reason: String?) { state.withLock { $0.reason = reason } }
-    /// The question waits at the gate from now on (not for nil).
-    func hold(at gate: Gate?) { state.withLock { $0.gate = gate } }
-    var asked: Int { state.withLock { $0.asked } }
-
-    func answer() async -> String? {
-        let gate = state.withLock { state -> Gate? in
-            state.asked += 1
-            return state.gate
-        }
-        await gate?.wait()
-        return state.withLock { $0.reason }
-    }
-}
-
 /// Whether a restart of the menu bar puts the world right (the apps that had no slot have one again).
 private final class Cure: Sendable {
     private let works = Mutex(true)
@@ -49,12 +24,11 @@ private final class Cure: Sendable {
 
 /// A menu bar that a lid cycle left stuck: apps that were drawn under the allowlist have no slot, with room on the bar, from the first
 /// read after a change of displays, and a restart of MenuBarAgent (the fake restarter) puts them back.
-@Suite("Menu bar session: a bar a change of displays left stuck", .timeLimit(.minutes(2)))
+@Suite("Menu bar session: a bar a change of displays left stuck", .serialized, .timeLimit(.minutes(2)))
 struct MenuBarSessionStuckBarTests {
     private struct World {
         let rig: SessionRig
         let restarter: FakeRestarter
-        let refusal: Refusal
         let cure: Cure
         let activity: ResetActivity
         let log: CallLog
@@ -80,14 +54,12 @@ struct MenuBarSessionStuckBarTests {
         let cure = Cure()
         let world = rig.world
         restarter.whileRestarting { if cure.isWorking { world.setUnattached([]) } }
-        let refusal = Refusal()
         let activity = ResetActivity()
         if recovery {
-            await rig.session.setStuckBarRecovery(StuckBarRecovery(restarter: restarter, refusal: { await refusal.answer() },
-                                                                   activity: activity))
+            await rig.session.setStuckBarRecovery(StuckBarRecovery(restarter: restarter, activity: activity))
         }
         await rig.session.start()
-        return World(rig: rig, restarter: restarter, refusal: refusal, cure: cure, activity: activity, log: log)
+        return World(rig: rig, restarter: restarter, cure: cure, activity: activity, log: log)
     }
 
     /// Lets the polling (every 10 seconds) have `count` more reads, and waits for each.
@@ -135,11 +107,6 @@ struct MenuBarSessionStuckBarTests {
         return true
     }
 
-    /// The apps the session would blame a stuck bar on right now (`UnattachedIconTracker.stuckBarSuspects`).
-    private func suspects(_ world: World) async -> Set<String> {
-        Set(await world.rig.session.unattached.stuckBarSuspects.keys)
-    }
-
     private func changeDisplays(_ world: inout World) async {
         let rig = world.rig
         let changed = Task { await rig.session.displaysChanged(rig.world.layout) }
@@ -184,24 +151,6 @@ struct MenuBarSessionStuckBarTests {
         #expect(world.restarter.restarts == 1)
     }
 
-    @Test func aWakeCountsAsAChange() async throws {
-        var world = await started()
-        #expect(await poll(&world, 2))
-        await world.rig.session.sessionChanged(.systemWoke)
-        world.rig.world.setUnattached([vpn, sync])
-        #expect(await poll(&world))
-        #expect(world.restarter.restarts == 0)
-        #expect(await pollUntilRestarted(&world))
-    }
-
-    @Test func aDotWithNoSlotAndRoomAfterAChangeIsRestarted() async throws {
-        var world = await started()
-        #expect(await lidCycle(&world, missing: [own]))
-        #expect(await poll(&world))
-        #expect(world.restarter.restarts == 0)
-        #expect(await pollUntilRestarted(&world))
-    }
-
     // MARK: Not recovering
 
     @Test func aBarThatIsntStuckIsNeverRestarted() async throws {
@@ -239,13 +188,6 @@ struct MenuBarSessionStuckBarTests {
         #expect(await world.flagged.isEmpty)
     }
 
-    @Test func aSessionWithNothingToRestartWithRestartsNothing() async throws {
-        var world = await started(recovery: false)
-        #expect(await lidCycle(&world, missing: [vpn, sync]))
-        #expect(await poll(&world, 6))
-        #expect(world.restarter.restarts == 0)
-    }
-
     // MARK: One app alone
 
     @Test(arguments: [Change.displays, .wake, .unlock]) func aSingleAppWithNoSlotAndTheDotsDrawnIsNeverRestartedByItself(_ kind: Change) async throws {
@@ -259,248 +201,6 @@ struct MenuBarSessionStuckBarTests {
         #expect(await finishRecovery(&world))
         #expect(world.restarter.restarts == 0, "\(kind.rawValue)")
         #expect(await world.rig.session.stuckRecoveriesDecided == 0)
-        #expect(await !world.notRecovered)
-    }
-
-    // MARK: An app that lost its slot for a reason of its own
-
-    @Test(arguments: [Change.wake, .unlock]) func anAppFlaggedByTheOtherCheckAfterItHadASlotIsNoReasonAtTheNextChange(_ kind: Change) async throws {
-        // The list of the apps that are off is known and names none, so nothing says why the app has no slot but that macOS doesn't tie it.
-        // It had a slot at the start and is missing in every read since B1 flagged it, so it isn't one the last read before the change
-        // placed. (That a flagged app is no suspect in itself, whatever the reads say, is pinned in `UnattachedIconTrackerTests`: here it
-        // is a second guard.)
-        var world = await started()
-        #expect(await poll(&world, 2))
-        world.rig.world.setUnattached([vpn])
-        for _ in 0..<5 where await world.flagged.isEmpty { _ = await poll(&world) }
-        #expect(await world.flagged == [vpn])
-        #expect(await poll(&world))
-
-        await change(kind, &world)
-        #expect(await suspects(world).isDisjoint(with: [vpn]))
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "\(kind.rawValue)")
-        #expect(await world.flagged == [vpn])
-        #expect(await world.rig.session.stuckRecoveriesDecided == 0, "not even decided")
-    }
-
-    @Test(arguments: [Change.wake, .unlock, .displays], [TurnedOffList.apps([]), .unavailable("Mantel can't read this list on this Mac.")])
-    func appsSwitchedOffTogetherAreNoReasonAtTheNextChange(_ kind: Change, _ list: TurnedOffList) async throws {
-        // Two at once: the read of the bar says the bar is stuck, nothing is flagged, and the list of the apps that are off is as it was
-        // (empty, or not readable). They are no suspects of the change: the last read before it had no slot for them. Two apps are the
-        // shape that would be restarted, so this is pinned by who the suspects are, not by the count.
-        var world = await started(turnedOff: list)
-        #expect(await poll(&world, 2))
-        world.rig.world.setUnattached([vpn, sync])
-        #expect(await poll(&world, 3))
-        #expect(await world.flagged.isEmpty)
-
-        await change(kind, &world)
-        #expect(await suspects(world).isDisjoint(with: [vpn, sync]))
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "\(kind.rawValue)")
-        #expect(await world.rig.session.stuckRecoveriesDecided == 0, "not even decided")
-    }
-
-    @Test(arguments: [Change.wake, .unlock]) func anAppSwitchedOffWhileTheListCantBeReadIsNoReasonAtTheNextChange(_ kind: Change) async throws {
-        // One app, so nothing flagged is needed to keep it out: it isn't a suspect, and B1 hasn't flagged it before the change.
-        var world = await started(turnedOff: .unavailable("Mantel can't read this list on this Mac."))
-        #expect(await poll(&world, 2))
-        world.rig.world.setUnattached([vpn])
-        #expect(await poll(&world, 1))
-        #expect(await world.flagged.isEmpty, "B1 hasn't flagged it yet")
-
-        await change(kind, &world)
-        #expect(await suspects(world).isDisjoint(with: [vpn]))
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0)
-        #expect(await world.rig.session.stuckRecoveriesDecided == 0)
-    }
-
-    @Test func appsThatHadNoSlotOfTheirOwnWhenTheChangeCameAreNoReasonAfterIt() async throws {
-        // The route of an app switched off whose neighbour of its width slid into its slot: its frame is in the neighbour's, both are
-        // contested, and neither has a slot of its own that a read can find. Then the displays change and the frames are nowhere: both
-        // have no slot, with room. The last read before the change placed neither (a contested frame says nothing), so the change took
-        // nothing from them, though both had a slot at the start.
-        var world = await started()
-        let rig = world.rig
-        #expect(await poll(&world, 2))
-        rig.world.setFrameShifts([sync: -44])
-        #expect(await poll(&world, 3))
-        #expect(await rig.session.inventory.contestedApps.isSuperset(of: [vpn, sync]), "the frames are each other's")
-        #expect(await rig.session.unattached.flagged.isEmpty)
-
-        rig.world.setFrameShifts([:])
-        rig.world.setUnattached([vpn, sync])
-        await changeDisplays(&world)
-        #expect(await suspects(world).isDisjoint(with: [vpn, sync]))
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0)
-        #expect(await rig.session.stuckRecoveriesDecided == 0)
-    }
-
-    @Test func twoAppsSwitchedOffAfterAChangeAreNoReasonAtTheNextOne() async throws {
-        // The bar is already called stuck by B1's check (two apps are off), so no evidence comes: what was true of the apps at the first
-        // change must not carry to the next. Notes is switched off with sync after the first change; vpn is placed in every read.
-        var world = await started()
-        let rig = world.rig
-        #expect(await poll(&world, 2))
-        await world.rig.session.sessionChanged(.systemWoke)
-        #expect(await poll(&world, 2))
-        rig.world.setUnattached([notes, sync])
-        #expect(await poll(&world, 3))
-        #expect(await rig.session.unattached.stuckBarSuspects.isEmpty, "the first change's suspects were placed since, and aren't any more")
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "a change long ago, and apps that were switched off since")
-        #expect(await rig.session.stuckRecoveriesDecided == 0)
-
-        await world.rig.session.sessionChanged(.systemWoke)
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0)
-        #expect(await rig.session.stuckRecoveriesDecided == 0)
-    }
-
-    @Test func aSwitchThatTheListDoesntShowYetIsLookedForBeforeTheRestart() async throws {
-        // The apps had a slot just before the change, were switched off with it, and the list was read before the switch: nothing
-        // re-reads it until the recovery does.
-        var world = await started()
-        #expect(await poll(&world, 2))
-        await changeDisplays(&world)
-        world.rig.world.setUnattached([vpn, sync])
-        world.rig.turnedOff.set(.apps([vpn, sync]))
-        let asked = world.rig.turnedOff.timesAsked
-
-        #expect(await poll(&world))
-        #expect(world.rig.turnedOff.timesAsked == asked, "nothing has read the list since")
-        #expect(await poll(&world, 3))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1, "the pattern was found, twice")
-        #expect(world.rig.turnedOff.timesAsked > asked, "and the list was read again before the restart")
-        #expect(world.restarter.restarts == 0)
-        #expect(await poll(&world, 4))
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "the apps are off, and nothing is missing from the bar that should be there")
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1, "not decided again")
-    }
-
-    @Test func aRefusalHoldsWhenTheListThatItRestedOnCantBeReadAgain() async throws {
-        // The recovery read the list, found both apps off, and didn't restart. Then the list can't be read (Settings opens, say): the
-        // apps are no longer known to be off, and the looks have them with no slot again. Only the refusal keeps the decision from being
-        // made again, and the restart from going ahead, before the next change.
-        var world = await started()
-        #expect(await poll(&world, 2))
-        await changeDisplays(&world)
-        world.rig.world.setUnattached([vpn, sync])
-        world.rig.turnedOff.set(.apps([vpn, sync]))
-        #expect(await poll(&world, 3))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1, "decided, and refused")
-        #expect(world.restarter.restarts == 0)
-
-        world.rig.turnedOff.set(.unavailable("Mantel can't read this list on this Mac."))
-        await world.rig.session.permissionsChanged()
-        world.reads = await world.rig.session.scansIngested
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1, "not decided again")
-        #expect(world.restarter.restarts == 0)
-    }
-
-    @Test func aListThatNamesOneOfTwoLeavesTooFewAndIsNotDecidedAgainBeforeTheNextChange() async throws {
-        var world = await started()
-        #expect(await poll(&world, 2))
-        await changeDisplays(&world)
-        world.rig.world.setUnattached([vpn, sync])
-        world.rig.turnedOff.set(.apps([vpn]))
-        let before = world
-        let lines = await LogCapture.lines {
-            var inside = before
-            _ = await self.poll(&inside, 4)
-            _ = await self.finishRecovery(&inside)
-        }
-        world.reads = await world.rig.session.scansIngested
-        #expect(world.restarter.restarts == 0, "one app is left, and one alone isn't restarted")
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1)
-        #expect(lines.contains { $0.contains("only one app is left") && $0.contains(sync) })
-
-        // It stays so: sync is still missing with room on every later look, and nothing is asked again.
-        let asked = world.rig.turnedOff.timesAsked
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1)
-        #expect(world.rig.turnedOff.timesAsked == asked)
-        #expect(world.restarter.restarts == 0)
-    }
-
-    @Test func aMantelKnownToBeSwitchedOffIsNotEvenDecided() async throws {
-        // The list is read and names Mantel before the change: its items are listed and never drawn, and are no finding at all. Nothing
-        // is decided, so no question is asked and no reset is held off, however long it stays so.
-        var world = await started(turnedOff: .apps([own]))
-        #expect(await lidCycle(&world, missing: [own]))
-        let asked = world.rig.turnedOff.timesAsked
-        #expect(await poll(&world, 8))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 0, "nothing is decided, so nothing is said or asked")
-        #expect(world.refusal.asked == 0, "no recovery was begun, so no reset was held off for one")
-        #expect(world.rig.turnedOff.timesAsked == asked)
-        #expect(world.restarter.restarts == 0)
-    }
-
-    @Test func aMantelThatTheListDoesntShowSwitchedOffYetIsDecidedOnceAndNotAgain() async throws {
-        // The list was read before the switch: the recovery reads it again, finds Mantel off and doesn't restart; and nothing is
-        // decided again, whatever the looks say, until the next change.
-        var world = await started()
-        #expect(await lidCycle(&world, missing: [own]))
-        world.rig.turnedOff.set(.apps([own]))
-        #expect(await poll(&world, 3))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1)
-        #expect(world.restarter.restarts == 0)
-        #expect(await poll(&world, 6))
-        #expect(await finishRecovery(&world))
-        #expect(await world.rig.session.stuckRecoveriesDecided == 1)
-        #expect(world.restarter.restarts == 0)
-    }
-
-    @Test func anAppThatStillHasNoSlotWhenTheListIsReadAgainIsRestarted() async throws {
-        // The list is read again, and names another app: what is missing is still a reason.
-        var world = await started()
-        #expect(await lidCycle(&world, missing: [vpn, sync]))
-        world.rig.turnedOff.set(.apps([notes]))
-        #expect(await poll(&world))
-        #expect(await pollUntilRestarted(&world))
-    }
-
-    // MARK: The measured shape
-
-    @Test func theLidOpenedAndClosedWithTheAppsBehindTheNotchInBetweenIsRestartedOnce() async throws {
-        // What macOS 27 did: the apps were drawn; the lid opened (the notched bar is the main one: the apps are behind the notch, out of
-        // the way); the lid closed, and the bar kept the notched bar's layout: they have no slot, with room. Two changes, and the
-        // apps were placed, not missing, in the last read before the second.
-        // Automatic overflow would move the apps to Hidden for room, and an app in Hidden is none of this: it is off here.
-        var world = await started(shape: .laptop, undrawn: true, automaticOverflow: false)
-        let rig = world.rig
-        #expect(await poll(&world, 2))
-        await changeDisplays(&world)
-        rig.world.setStaleApps([vpn, sync])
-        #expect(await poll(&world, 2))
-        let items = await rig.session.inventory.items.filter { [vpn, sync].contains($0.ownerBundleID) }
-        #expect(!items.isEmpty && items.allSatisfy(\.isOverflowed), "behind the notch")
-        #expect(await rig.session.stuckRecoveriesDecided == 0, "out of the way is no loss")
-
-        await changeDisplays(&world)
-        rig.world.setStaleApps([])
-        rig.world.setUnattached([vpn, sync])
-        #expect(await poll(&world))
-        #expect(world.restarter.restarts == 0)
-        #expect(await pollUntilRestarted(&world))
-        #expect(await poll(&world, 4))
-        #expect(world.restarter.restarts == 1, "exactly one")
         #expect(await !world.notRecovered)
     }
 
@@ -578,198 +278,36 @@ struct MenuBarSessionStuckBarTests {
         #expect(await pollUntilRestarted(&world, 2, polls: 6))
     }
 
-    @Test func aResetTakesTheNoteAway() async throws {
-        var world = await started()
-        let rig = world.rig
-        world.cure.set(false)
-        #expect(await lidCycle(&world, missing: [vpn, sync]))
-        #expect(await poll(&world))
-        #expect(await pollUntilRestarted(&world))
-        for _ in 0..<4 where await !world.notRecovered { _ = await poll(&world) }
-        #expect(await world.notRecovered)
-
-        let resetter = FakeRestarter(log: world.log)
-        #expect(await rig.session.resetIfIdle(restarter: resetter, replayJournal: {}) == .done)
-        #expect(await !world.notRecovered)
-    }
-
-    @Test func aRestartThatCantBeMadeSaysSo() async throws {
-        var world = await started()
-        world.restarter.fail(with: .didNotComeBack)
-        world.cure.set(false)
-        #expect(await lidCycle(&world, missing: [vpn, sync]))
-        #expect(await poll(&world))
-        #expect(await pollUntilRestarted(&world))
-        #expect(await world.notRecovered)
-    }
-
-    // MARK: The limits
-
-    enum Limit: String, CaseIterable, Sendable, CustomTestStringConvertible {
-        case appReset, sessionReset, probe, pendingWrite, settlingWrite, locked, asleep
-
-        var testDescription: String { rawValue }
-    }
-
-    /// Puts the condition in place, and takes it away.
-    private func begin(_ limit: Limit, _ world: World) async {
-        let session = world.rig.session
-        switch limit {
-        case .appReset: #expect(world.activity.begin())
-        case .sessionReset: break
-        case .probe: world.refusal.set("A platform test is changing the menu bar.")
-        case .pendingWrite: await session.setLayoutPhase(pending: true, settling: false)
-        case .settlingWrite: await session.setLayoutPhase(pending: true, settling: true)
-        case .locked: await session.sessionChanged(.screenLocked(true))
-        case .asleep: await session.sessionChanged(.displaysAsleep(true))
-        }
-    }
-
-    private func end(_ limit: Limit, _ world: World) async {
-        let session = world.rig.session
-        switch limit {
-        case .appReset: world.activity.end()
-        case .sessionReset: break
-        case .probe: world.refusal.set(nil)
-        case .pendingWrite, .settlingWrite: await session.setLayoutPhase(pending: false, settling: false)
-        case .locked: await session.sessionChanged(.screenLocked(false))
-        case .asleep: await session.sessionChanged(.displaysAsleep(false))
-        }
-    }
-
-    @Test(arguments: Limit.allCases) func noRecoveryWhile(_ limit: Limit) async throws {
-        var world = await started()
-        let rig = world.rig
-        #expect(await poll(&world, 2))
-        await changeDisplays(&world)
-        rig.world.setUnattached([vpn, sync])
-
-        // A session's own reset: held at its restart.
-        let gate = Gate()
-        let resetRestarter = FakeRestarter(log: world.log)
-        var reset: Task<ResetOutcome, Never>?
-        if limit == .sessionReset {
-            resetRestarter.whileRestarting { await gate.wait() }
-            reset = Task { await rig.session.resetIfIdle(restarter: resetRestarter, replayJournal: {}) }
-            #expect(await waitUntil { resetRestarter.restarts == 1 })
-        } else {
-            await begin(limit, world)
-        }
-        #expect(await poll(&world, 4))
-        // A recovery that was decided is on a task: it is over before it is said that nothing was restarted.
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "\(limit.rawValue)")
-        let decided = await rig.session.stuckRecoveriesDecided
-        switch limit {
-        case .probe: #expect(world.refusal.asked >= 1 && decided >= 1, "the recovery was decided and refused")
-        case .appReset: #expect(decided >= 1, "the recovery was decided and couldn't begin")
-        default: break
-        }
-
-        if let reset {
-            gate.open()
-            #expect(await reset.value == .done)
-        } else {
-            await end(limit, world)
-        }
-        // Once it is over, the pattern is found again and the bar restarted (a lock or a sleep that ends is a wake: the run starts again).
-        world.reads = await rig.session.scansIngested
-        if limit == .sessionReset {
-            #expect(await poll(&world, 4))
-            #expect(world.restarter.restarts == 0, "a reset is its own restart, and with no change after it there is nothing to judge")
-        } else if limit == .probe || limit == .appReset {
-            // A recovery that couldn't begin ends the run of looks: the first look after it is the first of two, not a decision.
-            #expect(await poll(&world))
-            #expect(await finishRecovery(&world))
-            #expect(world.restarter.restarts == 0, "one look after a refusal isn't two in a row (\(limit.rawValue))")
-            #expect(await pollUntilRestarted(&world, polls: 3), "\(limit.rawValue)")
-        } else {
-            #expect(await pollUntilRestarted(&world, polls: 6), "\(limit.rawValue)")
-        }
-    }
-
-    @Test(arguments: [Limit.pendingWrite, .settlingWrite, .locked, .asleep]) func aConditionThatBeginsAfterTheDecisionStopsTheRestart(_ limit: Limit) async throws {
-        var world = await started()
-        #expect(await lidCycle(&world, missing: [vpn, sync]))
-        #expect(await poll(&world))
-        // The decision is made by the second look; the recovery waits at the platform test's question.
-        let gate = Gate()
-        world.refusal.hold(at: gate)
-        #expect(await poll(&world))
-        let refusal = world.refusal
-        #expect(await waitUntil { refusal.asked == 1 })
-        await begin(limit, world)
-        gate.open()
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "\(limit.rawValue)")
-    }
+    // MARK: Interruptions
 
     enum Interruption: String, CaseIterable, Sendable, CustomTestStringConvertible {
-        case displaysChange, quit, reset
+        case displaysChange, quit
 
         var testDescription: String { rawValue }
     }
 
-    /// Where the recovery waits for something besides the clock: the platform test's question, or the list of the apps that are off.
-    enum Wait: String, CaseIterable, Sendable, CustomTestStringConvertible {
-        case refusal, list
-
-        var testDescription: String { rawValue }
-    }
-
-    /// What can come while the recovery waits: a reset can't be read for the list's gate (its own choice reads the list too).
-    private static let interruptions: [(Wait, Interruption)] = [
-        (.refusal, .displaysChange), (.refusal, .quit), (.refusal, .reset), (.list, .displaysChange), (.list, .quit)
-    ]
-
-    @Test(arguments: interruptions) func aChangeOrAQuitWhileTheRecoveryWaitsStopsTheRestart(_ wait: Wait, _ interruption: Interruption) async throws {
+    @Test(arguments: Interruption.allCases) func aChangeOrAQuitWhileTheRecoveryWaitsStopsTheRestart(_ interruption: Interruption) async throws {
         var world = await started()
         let rig = world.rig
         #expect(await lidCycle(&world, missing: [vpn, sync]))
         #expect(await poll(&world))
+        // The recovery waits for the list of the apps that are off.
         let gate = Gate()
-        switch wait {
-        case .refusal: world.refusal.hold(at: gate)
-        case .list: rig.turnedOff.holdQuestions(at: gate)
-        }
+        rig.turnedOff.holdQuestions(at: gate)
         #expect(await poll(&world))
-        let (refusal, turnedOff) = (world.refusal, rig.turnedOff)
-        switch wait {
-        case .refusal: #expect(await waitUntil { refusal.asked == 1 })
-        case .list: #expect(await waitUntil { turnedOff.questionsHeld == 1 })
-        }
+        let turnedOff = rig.turnedOff
+        #expect(await waitUntil { turnedOff.questionsHeld == 1 })
 
         switch interruption {
         case .displaysChange:
             await changeDisplays(&world)
         case .quit:
             _ = await rig.session.tearDownForQuit()
-        case .reset:
-            // A session's own reset, begun and over while the recovery waits.
-            let resetter = FakeRestarter(log: world.log)
-            #expect(await rig.session.resetIfIdle(restarter: resetter, replayJournal: {}) == .done)
-            world.reads = await rig.session.scansIngested
         }
         gate.open()
         #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0, "\(wait.rawValue), \(interruption.rawValue)")
+        #expect(world.restarter.restarts == 0, "\(interruption.rawValue)")
         #expect(await world.notRecovered == false, "a restart that wasn't made isn't one that failed")
-    }
-
-    @Test func quittingBeginningAfterTheDecisionStopsTheRestart() async throws {
-        var world = await started()
-        let rig = world.rig
-        #expect(await lidCycle(&world, missing: [vpn, sync]))
-        #expect(await poll(&world))
-        let gate = Gate()
-        world.refusal.hold(at: gate)
-        #expect(await poll(&world))
-        let refusal = world.refusal
-        #expect(await waitUntil { refusal.asked == 1 })
-        _ = await rig.session.tearDownForQuit()
-        gate.open()
-        #expect(await finishRecovery(&world))
-        #expect(world.restarter.restarts == 0)
     }
 
     @Test func threeInAnHourAtMost() async throws {

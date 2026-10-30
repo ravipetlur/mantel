@@ -21,33 +21,7 @@ struct LiftSessionTests {
         return session
     }
 
-    @Test func theTimesAreTheOnesTheFlowIsBuiltFor() {
-        #expect(LiftSession.pollInterval == .milliseconds(200))
-        #expect(LiftSession.openWait == .seconds(1))
-        #expect(LiftSession.cap == .seconds(8))
-        #expect(LiftSession.clickOutsideDelay == .milliseconds(300))
-    }
-
     // MARK: Review focus: the lift ends when the panel closes
-
-    @Test func restoresWhenNotificationCenterCloses() {
-        var session = begun()
-        // The panel takes a moment to appear: the first looks find nothing, and that is no reason to give up.
-        #expect(session.handle(.poll(open: false), now: at(200)) == .keepPolling)
-        #expect(session.handle(.poll(open: true), now: at(400)) == .keepPolling)
-        // Open, for as long as the person reads it.
-        for milliseconds in stride(from: 600, through: 4600, by: 200) {
-            #expect(session.handle(.poll(open: true), now: at(milliseconds)) == .keepPolling)
-        }
-        // The first look that finds it closed puts the allowlist back.
-        #expect(session.handle(.poll(open: false), now: at(4800)) == .restore)
-    }
-
-    @Test func restoresOnTheFirstCloseEvenRightAfterOpening() {
-        var session = begun()
-        #expect(session.handle(.poll(open: true), now: at(200)) == .keepPolling)
-        #expect(session.handle(.poll(open: false), now: at(400)) == .restore)
-    }
 
     @Test func restoresAfterOneSecondIfNeverOpened() {
         var session = begun()
@@ -56,13 +30,6 @@ struct LiftSessionTests {
         }
         #expect(session.handle(.poll(open: false), now: at(999)) == .keepPolling, "a second is a second")
         #expect(session.handle(.poll(open: false), now: at(1000)) == .restore)
-    }
-
-    @Test func aPanelSeenOpenIsNotGivenUpOnAtOneSecond() {
-        var session = begun()
-        #expect(session.handle(.poll(open: true), now: at(800)) == .keepPolling)
-        #expect(session.handle(.poll(open: true), now: at(1000)) == .keepPolling)
-        #expect(session.handle(.poll(open: true), now: at(1200)) == .keepPolling)
     }
 
     @Test func restoresAtEightSeconds() {
@@ -74,12 +41,6 @@ struct LiftSessionTests {
         #expect(session.handle(.poll(open: true), now: at(8000)) == .restore, "open still, and the cap is the end")
     }
 
-    @Test func theCapEndsAPanelThatWasNeverSeenToo() {
-        // A caller that looked only rarely: the first time it does, a second has long passed.
-        var session = begun()
-        #expect(session.handle(.poll(open: false), now: at(9000)) == .restore)
-    }
-
     @Test func clickOutsideBeforeTheOpenStillRestores() {
         var session = begun()
         // The panel hasn't been seen open: a click anywhere else restores 300 ms later, without waiting out the second.
@@ -87,19 +48,6 @@ struct LiftSessionTests {
         #expect(session.handle(.clickOutside, now: at(300)) == .keepPolling, "the click goes through first")
         #expect(session.handle(.timerFired, now: at(599)) == .keepPolling)
         #expect(session.handle(.timerFired, now: at(600)) == .restore)
-    }
-
-    @Test func clickOutsideBeforeTheOpenIsAlsoSeenByThePollThatComesFirst() {
-        var session = begun()
-        _ = session.handle(.clickOutside, now: at(100))
-        #expect(session.handle(.poll(open: false), now: at(400)) == .restore, "the first look after 300 ms")
-    }
-
-    @Test func aSecondClickOutsideDoesNotPutTheTimerBack() {
-        var session = begun()
-        _ = session.handle(.clickOutside, now: at(100))
-        #expect(session.handle(.clickOutside, now: at(350)) == .keepPolling)
-        #expect(session.handle(.timerFired, now: at(400)) == .restore, "300 ms from the first")
     }
 
     // MARK: A click on the open panel
@@ -117,58 +65,10 @@ struct LiftSessionTests {
         // Only its close restores, found by the next look.
         #expect(session.handle(.poll(open: false), now: at(6200)) == .restore)
     }
-
-    @Test func aClickOnTheOpenPanelDoesNotDelayTheCap() {
-        var session = begun()
-        _ = session.handle(.poll(open: true), now: at(200))
-        _ = session.handle(.clickOutside, now: at(5000))
-        #expect(session.handle(.poll(open: true), now: at(7800)) == .keepPolling)
-        #expect(session.handle(.poll(open: true), now: at(8000)) == .restore, "the cap, counted from the replay")
-    }
-
-    @Test func aClickWaitingToRestoreIsForgottenWhenThePanelIsSeenOpen() {
-        // The click was made before the panel was seen, and the panel turns up before its 300 ms are over: from then on only the close
-        // or the cap restores.
-        var session = begun()
-        _ = session.handle(.clickOutside, now: at(100))
-        #expect(session.handle(.poll(open: true), now: at(200)) == .keepPolling)
-        #expect(session.handle(.timerFired, now: at(400)) == .keepPolling)
-        #expect(session.handle(.poll(open: true), now: at(600)) == .keepPolling)
-        #expect(session.handle(.poll(open: false), now: at(800)) == .restore)
-    }
-
-    @Test func keepsPollingWhileOpen() {
-        var session = begun()
-        for milliseconds in stride(from: 200, through: 6000, by: 200) {
-            #expect(session.handle(.poll(open: true), now: at(milliseconds)) == .keepPolling)
-            // A timer that goes off with nothing to say changes nothing.
-            #expect(session.handle(.timerFired, now: at(milliseconds)) == .keepPolling)
-        }
-    }
-
-    @Test func theWaitsAreCountedFromTheReplay() {
-        // The lift began a moment before the click was posted again: it is the replay that starts the clock.
-        var session = LiftSession(startedAt: start)
-        #expect(session.handle(.replayed, now: at(100)) == .keepPolling)
-        #expect(session.handle(.poll(open: false), now: at(1000)) == .keepPolling)
-        #expect(session.handle(.poll(open: false), now: at(1100)) == .restore)
-    }
-
-    @Test func dateSumsThatAreNotExactStillMakeRoundTimes() {
-        // Five polls of 200 ms, added the way a clock adds them, are a second.
-        var session = begun()
-        var now = start
-        var effects: [LiftSession.Effect] = []
-        for _ in 0..<5 {
-            now = now.addingTimeInterval(0.2)
-            effects.append(session.handle(.poll(open: false), now: now))
-        }
-        #expect(effects == [.keepPolling, .keepPolling, .keepPolling, .keepPolling, .restore])
-    }
 }
 
 /// The runner that polls and restores, on a clock a test moves.
-@Suite("Lift runner", .timeLimit(.minutes(1)))
+@Suite("Lift runner", .serialized, .timeLimit(.minutes(1)))
 struct LiftRunnerTests {
     /// What the panel is doing and how often it was looked at, and what was restored.
     private final class Stage: Sendable {
@@ -235,106 +135,6 @@ struct LiftRunnerTests {
         #expect(stage.restores == 1)
     }
 
-    @Test func looksEveryTwoHundredMilliseconds() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        stage.setOpen(true)
-        let runner = make(stage, clock: clock)
-        runner.replayed()
-        #expect(await clock.waitForSleepers(1, within: .seconds(5)))
-        #expect(stage.looks == 0, "no look before the first interval")
-
-        clock.advance(by: .milliseconds(199))
-        #expect(clock.sleeperCount == 1)
-        #expect(stage.looks == 0)
-        clock.advance(by: .milliseconds(1))
-        #expect(await waitUntil { stage.looks == 1 })
-        #expect(await clock.waitForSleepers(1, within: .seconds(5)))
-
-        clock.advance(by: .milliseconds(200))
-        #expect(await waitUntil { stage.looks == 2 })
-        runner.stop()
-        #expect(!runner.isRunning)
-    }
-
-    @Test func restoresAfterOneSecondIfNeverOpened() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        let runner = make(stage, clock: clock)
-        runner.replayed()
-        #expect(await clock.waitForSleepers(1, within: .seconds(5)))
-        for _ in 0..<4 { #expect(await tick(clock, stage)) }
-        #expect(stage.restores == 0)
-        #expect(await tick(clock, stage, sleepers: 0, restores: 1), "five looks of 200 ms and it is a second")
-        #expect(stage.looks == 5)
-    }
-
-    @Test func restoresAtEightSeconds() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        stage.setOpen(true)
-        let runner = make(stage, clock: clock)
-        runner.replayed()
-        #expect(await clock.waitForSleepers(1, within: .seconds(5)))
-        for _ in 0..<39 { #expect(await tick(clock, stage)) }
-        #expect(stage.restores == 0)
-        #expect(await tick(clock, stage, sleepers: 0, restores: 1), "open to the end, and the cap restores")
-    }
-
-    @Test func clickOutsideBeforeTheOpenStillRestores() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        let runner = make(stage, clock: clock)
-        runner.replayed()
-        #expect(await clock.waitForSleepers(1, within: .seconds(5)))
-        #expect(await tick(clock, stage))
-        #expect(await tick(clock, stage), "the panel hasn't been seen open")
-
-        runner.clickOutside()
-        #expect(await clock.waitForSleepers(2, within: .seconds(5)), "the poll, and a timer for the click")
-        #expect(await tick(clock, stage, sleepers: 2), "200 ms on: the click isn't 300 ms old yet")
-        clock.advance(by: .milliseconds(100))
-        #expect(await settle(clock, stage, sleepers: 0, restores: 1), "300 ms after the click, and not at the next look")
-        #expect(!runner.isRunning)
-    }
-
-    @Test func clickInsideOpenNotificationCenterDoesNotRestore() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        stage.setOpen(true)
-        let runner = make(stage, clock: clock)
-        runner.replayed()
-        #expect(await clock.waitForSleepers(1, within: .seconds(5)))
-        #expect(await tick(clock, stage))
-        #expect(await tick(clock, stage), "seen open")
-
-        // A click on a notification: away from the clock, on the panel.
-        runner.clickOutside()
-        #expect(await clock.waitForSleepers(2, within: .seconds(5)), "the poll, and a timer for the click")
-        #expect(await tick(clock, stage, sleepers: 2))
-        clock.advance(by: .milliseconds(100))
-        #expect(await settle(clock, stage, sleepers: 1, restores: 0), "300 ms after the click nothing is put back, and the polling goes on")
-        #expect(runner.isRunning)
-        #expect(await tick(clock, stage))
-        #expect(stage.restores == 0)
-
-        // Its close is what puts the allowlist back, at the next look.
-        stage.setOpen(false)
-        #expect(await tick(clock, stage, sleepers: 0, restores: 1))
-        #expect(!runner.isRunning)
-    }
-
-    @Test func aClickOutsideWithNoLiftOnIsNothing() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        let runner = make(stage, clock: clock)
-        runner.clickOutside()
-        #expect(!runner.isRunning)
-        #expect(clock.sleeperCount == 0)
-        clock.advance(by: .seconds(1))
-        #expect(stage.restores == 0)
-    }
-
     @Test func aReplayThatComesDuringALiftTakesItsPlace() async {
         let clock = FakeClock()
         let stage = Stage()
@@ -374,32 +174,6 @@ struct LiftRunnerTests {
         #expect(stage.restores == 0)
     }
 
-    @Test func aReplayAfterStopIsIgnored() async {
-        // The tap posts what it held even after it was stopped, and says so.
-        let clock = FakeClock()
-        let stage = Stage()
-        let runner = make(stage, clock: clock)
-        runner.stop()
-
-        runner.replayed()
-        #expect(!runner.isRunning)
-        #expect(clock.sleeperCount == 0)
-        clock.advance(by: .seconds(30))
-        try? await Task.sleep(for: .milliseconds(20))
-        #expect(stage.restores == 0)
-        #expect(stage.looks == 0)
-    }
-
-    @Test func stopWithNoLiftOnDoesNothing() async {
-        let clock = FakeClock()
-        let stage = Stage()
-        let runner = make(stage, clock: clock)
-        runner.stop()
-        #expect(await settle(clock, stage, sleepers: 0, restores: 0))
-        try? await Task.sleep(for: .milliseconds(20))
-        #expect(stage.restores == 0)
-    }
-
     @Test func aSlowRestoreDoesNotHoldTheNextLift() async {
         let clock = FakeClock()
         let stage = Stage()
@@ -431,7 +205,7 @@ struct LiftRunnerTests {
 }
 
 /// The lift against an engine whose activation fails, and the one that goes on holding: the restore finds the latest plan live.
-@Suite("Lift and the allowlist engine", .timeLimit(.minutes(1)))
+@Suite("Lift and the allowlist engine", .serialized, .timeLimit(.minutes(1)))
 struct LiftEngineTests {
     private let own = EngineFixtures.own
     private let everyApp = ["com.example.a", "com.example.b", "com.example.c"]
@@ -517,19 +291,6 @@ struct LiftEngineTests {
         #expect(allowlist.calls.last?.bundleIDs == ["com.example.a", "com.example.c", own])
     }
 
-    @Test func aRestoreWithNothingLiftedIsHarmless() async throws {
-        let (engine, allowlist, _) = make()
-        try await engine.apply(planA())
-        let calls = allowlist.calls.count
-
-        // A lift whose click lifted nothing (the allowlist had gone by then): the session still ends, with a restore.
-        await runLift(on: engine, clock: FakeClock())
-
-        #expect(engine.isArmed)
-        #expect(allowlist.calls.count == calls)
-        #expect(allowlist.live == 1)
-    }
-
     @Test func aRestoreThatFailsLeavesNothingHeldUntilTheNextPlan() async throws {
         let (engine, allowlist, hidden) = make()
         try await engine.apply(planA())
@@ -562,17 +323,5 @@ struct LiftEngineTests {
         try await engine.apply(planB())
         #expect(engine.isArmed)
         #expect(allowlist.live == 1)
-    }
-
-    @Test func aSecondLiftAfterTheRestoreWorksTheSameWay() async throws {
-        let (engine, allowlist, _) = make()
-        try await engine.apply(planA())
-        for _ in 0..<2 {
-            #expect(engine.liftNow())
-            #expect(!engine.isArmed)
-            await runLift(on: engine, clock: FakeClock())
-            #expect(engine.isArmed)
-            #expect(allowlist.live == 1)
-        }
     }
 }

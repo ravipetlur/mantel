@@ -1,6 +1,5 @@
 import CoreGraphics
 import Foundation
-import MKCommands
 import MKCore
 
 /// One item MenuBarAgent draws in a display's menu bar. MenuBarAgent draws each display's bar as one window, so all it
@@ -35,22 +34,6 @@ public struct AgentWindow: Codable, Sendable, Equatable {
     public init(frame: CGRect, slots: [AgentSlot]) {
         self.frame = frame
         self.slots = slots
-    }
-}
-
-/// What one of MenuBarAgent's windows says of itself, read from its own attributes (never from the slots in it): which of its
-/// windows is the active Space's is not told by anything that is known yet, so what the windows differ in is recorded.
-public struct AgentWindowDetail: Sendable, Equatable {
-    public let frame: CGRect
-    /// The values of `AXRole`, `AXSubrole`, `AXMain`, `AXFocused` and `AXIdentifier` where the window has them, and of every other
-    /// attribute that holds a true or false.
-    public let attributes: [String: JSONValue]
-    public let slotCount: Int
-
-    public init(frame: CGRect, attributes: [String: JSONValue], slotCount: Int) {
-        self.frame = frame
-        self.attributes = attributes
-        self.slotCount = slotCount
     }
 }
 
@@ -127,28 +110,19 @@ public struct MenuBarSnapshot: Codable, Sendable, Equatable {
     public let layout: DisplayLayout
     public let agentWindows: [AgentWindow]
     public let apps: [AppExtras]
-    /// The whole tree under MenuBarAgent, for the platform test (depth at most 6); nil in a normal read.
-    public let rawAgentTree: JSONValue?
     /// What kept the read from being whole, in words: Accessibility isn't granted, MenuBarAgent isn't running.
     public let problems: [String]
-    /// The frames of the front app's menus when the snapshot was taken, in CoreGraphics global points (a probe that is asked for the whole
-    /// menu bar records them): without them a later replay can't tell which icons are under the menus (`BarRegion`). Empty when they
-    /// weren't read. They are frames and nothing else: no name of the app or of a menu.
-    public let frontMenuFrames: [CGRect]
 
-    public init(capturedAt: Date, layout: DisplayLayout, agentWindows: [AgentWindow], apps: [AppExtras],
-                rawAgentTree: JSONValue?, problems: [String] = [], frontMenuFrames: [CGRect] = []) {
+    public init(capturedAt: Date, layout: DisplayLayout, agentWindows: [AgentWindow], apps: [AppExtras], problems: [String] = []) {
         self.capturedAt = capturedAt
         self.layout = layout
         self.agentWindows = agentWindows
         self.apps = apps
-        self.rawAgentTree = rawAgentTree
         self.problems = problems
-        self.frontMenuFrames = frontMenuFrames
     }
 
     private enum CodingKeys: String, CodingKey {
-        case capturedAt, layout, agentWindows, apps, rawAgentTree, problems, frontMenuFrames
+        case capturedAt, layout, agentWindows, apps, problems
     }
 
     public init(from decoder: any Decoder) throws {
@@ -157,15 +131,7 @@ public struct MenuBarSnapshot: Codable, Sendable, Equatable {
         layout = try container.decode(DisplayLayout.self, forKey: .layout)
         agentWindows = try container.decode([AgentWindow].self, forKey: .agentWindows)
         apps = try container.decode([AppExtras].self, forKey: .apps)
-        rawAgentTree = try container.decodeIfPresent(JSONValue.self, forKey: .rawAgentTree)
         problems = try container.decodeIfPresent([String].self, forKey: .problems) ?? []
-        frontMenuFrames = try container.decodeIfPresent([CGRect].self, forKey: .frontMenuFrames) ?? []
-    }
-
-    /// The snapshot with the front app's menus recorded.
-    public func withFrontMenuFrames(_ frames: [CGRect]) -> MenuBarSnapshot {
-        MenuBarSnapshot(capturedAt: capturedAt, layout: layout, agentWindows: agentWindows, apps: apps, rawAgentTree: rawAgentTree,
-                        problems: problems, frontMenuFrames: frames)
     }
 }
 

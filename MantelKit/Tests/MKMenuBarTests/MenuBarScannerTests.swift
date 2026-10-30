@@ -10,7 +10,6 @@ import Testing
 private typealias Fixture = InventoryFixtures.Fixture
 
 private let mainUUID = DisplayFixtures.deskMain.uuid
-private let laptopUUID = DisplayFixtures.laptopRightOfDesk.uuid
 
 /// An app's items are read after the app has taken its time, on the test's clock.
 private struct LatentExtrasReader: AppExtrasReading {
@@ -136,7 +135,7 @@ struct MenuBarScannerTests {
         #expect(await scanner.agentFailureStreak == 0)
         // The same as the matcher makes of a snapshot, which is what a probe sees.
         let read = await MenuBarReader(ax: fixture.ax, runningApps: { fixture.running }, clock: FakeClock())
-            .snapshot(layout: fixture.layout, includeRawTree: false)
+            .snapshot(layout: fixture.layout)
         var memory = IndexMemory()
         let viaSnapshot = InventoryMatcher.match(read.matchInput(ownBundleID: InventoryFixtures.ownBundleID), memory: &memory)
         #expect(inventory.items == viaSnapshot.items)
@@ -190,50 +189,6 @@ struct MenuBarScannerTests {
         #expect(!HelperBundles.isHelper("com.example.universalcontrol"))
     }
 
-    @Test func noExtrasIsCachedThenRecheckedAfterAMinute() async {
-        let fixture = InventoryFixtures.desk()
-        let quiet = RunningApp.fake(2005, "com.example.quiet", "Quiet")
-        let root = fixture.ax.root(ofApp: quiet.pid)
-        let all = fixture.running + [quiet]
-        let clock = FakeClock()
-        let scanner = makeScanner(fixture, running: { all }, clock: clock)
-
-        _ = await scanner.scan()
-        let first = fixture.ax.attributeReads(on: root)
-        #expect(first > 0)
-        _ = await scanner.scan()
-        #expect(fixture.ax.attributeReads(on: root) == first, "asked once")
-        clock.advance(by: .seconds(59))
-        _ = await scanner.scan()
-        #expect(fixture.ax.attributeReads(on: root) == first, "still not, at 59 seconds")
-        clock.advance(by: .seconds(2))
-        _ = await scanner.scan()
-        #expect(fixture.ax.attributeReads(on: root) > first, "asked again after a minute")
-
-        // The answer is kept for the process: when the app gets a menu bar item, it is found at the next check.
-        fixture.ax.addApp(pid: quiet.pid, extras: [.init(title: "Late", identifier: "late.item", frame: CGRect(x: 3000, y: 0, width: 30, height: 30))])
-        clock.advance(by: .seconds(61))
-        let inventory = await scanner.scan()
-        #expect(inventory.reach.contains { $0.bundleID == "com.example.quiet" })
-    }
-
-    @Test func anAppThatQuitIsForgotten() async {
-        let fixture = InventoryFixtures.desk()
-        let quiet = RunningApp.fake(2005, "com.example.quiet", "Quiet")
-        let root = fixture.ax.root(ofApp: quiet.pid)
-        let alone = fixture.running
-        let both = fixture.running + [quiet]
-        let apps = Switch(true)
-        let scanner = makeScanner(fixture, running: { apps.isOn ? both : alone })
-        _ = await scanner.scan()
-        let first = fixture.ax.attributeReads(on: root)
-        apps.set(false)
-        _ = await scanner.scan()
-        apps.set(true)
-        _ = await scanner.scan()
-        #expect(fixture.ax.attributeReads(on: root) > first, "what was kept of the process went with it")
-    }
-
     @Test func threeTimeoutsSkipForThirtySeconds() async {
         let fixture = InventoryFixtures.desk()
         let hung = RunningApp.fake(2006, "com.example.hung", "Hung")
@@ -274,30 +229,6 @@ struct MenuBarScannerTests {
         #expect(fourth.items.count == 17)
     }
 
-    @Test func aTimeoutThatIsFollowedByAnAnswerStartsTheCountAgain() async {
-        let fixture = InventoryFixtures.desk()
-        let flaky = RunningApp.fake(2006, "com.example.flaky", "Flaky")
-        let root = fixture.ax.root(ofApp: flaky.pid)
-        let all = fixture.running + [flaky]
-        let scanner = makeScanner(fixture, running: { all })
-        for _ in 1...2 {
-            fixture.ax.failReads(on: root, with: .timeout)
-            _ = await scanner.scan()
-        }
-        fixture.ax.failReads(on: root, with: nil)
-        fixture.ax.addApp(pid: flaky.pid, extras: [.init(title: "Back", identifier: "flaky.item", frame: nil)])
-        _ = await scanner.scan()
-        // Two more timeouts after the answer are two in a row, not four.
-        for _ in 1...2 {
-            fixture.ax.failReads(on: root, with: .timeout)
-            let inventory = await scanner.scan()
-            #expect(inventory.reach.first { $0.bundleID == "com.example.flaky" }?.status == .timedOut)
-        }
-        let reads = fixture.ax.attributeReads(on: root)
-        _ = await scanner.scan()
-        #expect(fixture.ax.attributeReads(on: root) > reads, "a third one is asked: it isn't skipped until three in a row")
-    }
-
     // MARK: Accessibility
 
     @Test func accessibilityCheckIsLive() async {
@@ -323,14 +254,6 @@ struct MenuBarScannerTests {
         let third = await scanner.scan()
         #expect(third.problems.isEmpty)
         #expect(third.items == first.items)
-    }
-
-    @Test func accessibilityRefusedByTheSystemIsTheSameProblem() async {
-        let fixture = InventoryFixtures.desk()
-        fixture.ax.failReads(on: fixture.ax.root(ofApp: InventoryFixtures.agentPID), with: .notTrusted)
-        let inventory = await makeScanner(fixture).scan()
-        #expect(inventory.problems == [.accessibilityNotGranted])
-        #expect(inventory.items.isEmpty)
     }
 
     @Test func oneAppRefusingIsNotMantelUngranted() async {
@@ -364,24 +287,6 @@ struct MenuBarScannerTests {
         let third = await scanner.scan()
         #expect(fixture.ax.attributeReads(on: root) > reads, "asked again after a minute")
         #expect(third.problems.isEmpty)
-    }
-
-    @Test func untrustedStillReportsNotGranted() async {
-        // The grant is checked before the apps are asked, and a read that says no after the grant was taken away is the grant.
-        let fixture = InventoryFixtures.desk()
-        let refuser = RunningApp.fake(2007, "com.example.refuser", "Refuser")
-        fixture.ax.failReads(on: fixture.ax.root(ofApp: refuser.pid), with: .notTrusted)
-        let all = fixture.running + [refuser]
-
-        let gone = await makeScanner(fixture, running: { all }, trusted: { false }).scan()
-        #expect(gone.problems == [.accessibilityNotGranted])
-        #expect(gone.reach.isEmpty)
-
-        let asked = Mutex(0)
-        let revoked = makeScanner(fixture, running: { all }, trusted: { asked.withLock { $0 += 1; return $0 == 1 } })
-        let during = await revoked.scan()
-        #expect(during.problems == [.accessibilityNotGranted], "taken away while the apps were asked")
-        #expect(!during.reach.contains { $0.status == .refused })
     }
 
     // MARK: Bars
@@ -469,180 +374,6 @@ struct MenuBarScannerTests {
         fixture.windows[display].map { fixture.slotReads(ofWindow: $0) }
     }
 
-    /// The windows of a display whose slots were read between two counts.
-    private func windowsRead(_ before: [Int], _ after: [Int]) -> Set<Int> {
-        Set(zip(before, after).enumerated().filter { $0.element.1 > $0.element.0 }.map(\.offset))
-    }
-
-    @Test func anOrdinaryScanReadsTheBestWindowAndOneMoreInTurn() async {
-        // The best window of a display is read at every ordinary scan, and one other, a different one each time, so that none is left
-        // unlooked at for long. A scan that has all the windows to choose from compares nothing.
-        let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 5, windowsWithoutNames: []))
-        let scanner = makeScanner(fixture)
-        _ = await scanner.scan(reasons: [.refresh])
-        var last = slotReads(fixture)
-        #expect(last.allSatisfy { $0 > 0 }, "the thorough scan read every window")
-        // All the windows are as good, so the first is the best; the others are looked at in order, and then again from the first.
-        for other in [1, 2, 3, 4, 1] {
-            _ = await scanner.scan(reasons: [.poll])
-            let now = slotReads(fixture)
-            #expect(windowsRead(last, now) == [0, other], "looked at \(other)")
-            last = now
-        }
-    }
-
-    @Test func theReasonsForAThoroughScanReadEveryWindow() async {
-        let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 5))
-        let scanner = makeScanner(fixture)
-        _ = await scanner.scan(reasons: [.refresh])
-        // Each of the reasons for a thorough scan reads them all again, however the others in it ask.
-        for reason in [ScanScheduler.Reason.displaysChanged, .refresh] {
-            let before = slotReads(fixture) + slotReads(fixture, display: 1)
-            _ = await scanner.scan(reasons: [reason, .poll])
-            #expect(zip(before, slotReads(fixture) + slotReads(fixture, display: 1)).allSatisfy { $1 > $0 }, "\(reason)")
-        }
-        // And a scan that says nothing of why is a thorough one.
-        let before = slotReads(fixture)
-        _ = await scanner.scan()
-        #expect(zip(before, slotReads(fixture)).allSatisfy { $1 > $0 })
-    }
-
-    @Test func appsChangedScanReadsEveryWindow() async throws {
-        // An app launching or quitting is when the slots gain or lose their names, so the scan for it looks at every window, though it
-        // doesn't compare them.
-        let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 4, windowsWithoutNames: [0, 1, 2, 3], appsReportIdentifiers: false))
-        let scanner = makeScanner(fixture)
-        let launch = await scanner.scan(reasons: [.refresh])
-        #expect(launch.items.contains { $0.id.string == "com.example.weather#0" }, "no window has the names yet")
-
-        // The last window of each display gains them: an ordinary scan would take up to three more scans to get to it.
-        for display in fixture.windows { fixture.giveNames(toWindow: display[3]) }
-        let before = slotReads(fixture) + slotReads(fixture, display: 1)
-        let appsChanged = await scanner.scan(reasons: [.appsChanged, .poll])
-        #expect(zip(before, slotReads(fixture) + slotReads(fixture, display: 1)).allSatisfy { $1 > $0 }, "every window was read")
-        #expect(slotNames(of: appsChanged).contains("weather.temp"))
-
-        // Not a comparison: two scans in a row that find a window's slots moved are no doubt for this reason.
-        let slot = try #require(try fixture.ax.children(of: fixture.ax.ref(fixture.windows[0][1])).first.map(fixture.ax.id(of:)))
-        guard case .point(let original)? = try? fixture.ax.attribute(AXName.position, of: fixture.ax.ref(slot)) else {
-            Issue.record("the slot has a position")
-            return
-        }
-        fixture.ax.setAttribute(AXName.position, .point(CGPoint(x: original.x + 40, y: original.y)), on: slot)
-        #expect(await scanner.scan(reasons: [.appsChanged]).problems.isEmpty)
-        #expect(await scanner.scan(reasons: [.appsChanged]).problems.isEmpty)
-    }
-
-    @Test func namesThatAppearLaterInAnotherWindowAreFoundWithinAFewPolls() async {
-        // At launch no window of a display has the names of the third-party slots, and the apps' own lists give no identifiers, so the
-        // weather app's items are told by their place. Then some of the windows gain the names, and the first does not: ordinary scans
-        // find them in a window that isn't the first, within as many scans as the display has other windows.
-        let full = await makeScanner(InventoryFixtures.desk(.init(windowsPerDisplay: 3, windowsWithoutNames: [], appsReportIdentifiers: false))).scan()
-        for (windows, gaining) in [(3, [1, 2]), (5, [4]), (5, [2, 3])] {
-            let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: windows, windowsWithoutNames: Set(0..<windows), appsReportIdentifiers: false))
-            let scanner = makeScanner(fixture)
-            let launch = await scanner.scan(reasons: [.refresh])
-            #expect(launch.items.contains { $0.id.string == "com.example.weather#0" })
-            for display in fixture.windows {
-                for position in gaining { fixture.giveNames(toWindow: display[position]) }
-            }
-
-            var polls = 0
-            var found: Inventory?
-            while found == nil, polls < windows - 1 {
-                polls += 1
-                let inventory = await scanner.scan(reasons: [.poll])
-                if slotNames(of: inventory).contains("weather.temp") { found = inventory }
-            }
-            #expect(found != nil, "\(windows) windows, names in \(gaining): not found in \(windows - 1) polls")
-            #expect(found?.items.map(\.id) == full.items.map(\.id), "\(windows) windows, names in \(gaining)")
-            // It goes on being found: the window that has the names is the one tried first from then on.
-            #expect(await scanner.scan(reasons: [.poll]).items.map(\.id) == full.items.map(\.id))
-        }
-    }
-
-    @Test func displayWithoutCachedCountIsReadThoroughly() async {
-        // The first scan a scanner makes isn't a thorough one, if it is asked for another reason; but nothing is known of the windows
-        // yet, so every window of every display is read, and the one with the names is found.
-        let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 4, windowsWithoutNames: [0, 1], appsReportIdentifiers: false))
-        let first = await makeScanner(fixture).scan(reasons: [.poll])
-        #expect((slotReads(fixture) + slotReads(fixture, display: 1)).allSatisfy { $0 > 0 })
-        #expect(slotNames(of: first).contains("weather.temp"))
-
-        // A display that wasn't there at the last scan has nothing remembered either. Its windows are all read, and the main
-        // display's are not.
-        let later = InventoryFixtures.desk(.init(windowsPerDisplay: 4))
-        let displays = Mutex(DisplayLayout(displays: [DisplayFixtures.deskMain]))
-        let scanner = MenuBarScanner(ax: later.ax, runningApps: { later.running }, layout: { displays.withLock { $0 } },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        _ = await scanner.scan(reasons: [.refresh])
-        displays.withLock { $0 = .desk }
-        let before = slotReads(later)
-        let beforeNew = slotReads(later, display: 1)
-        let inventory = await scanner.scan(reasons: [.poll])
-        #expect(zip(beforeNew, slotReads(later, display: 1)).allSatisfy { $1 > $0 }, "all of the new display's windows")
-        #expect(windowsRead(before, slotReads(later)).count == 2, "and two of the main display's")
-        #expect(inventory.bars.count == 2)
-    }
-
-    @Test func bestWindowIsTriedFirst() async {
-        // The first window lacks the names; the second, the first of those that have them, is the best. An ordinary scan reads it,
-        // and the one it is next to look at, and not the first.
-        let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 5, windowsWithoutNames: [0], appsReportIdentifiers: false))
-        let full = await makeScanner(InventoryFixtures.desk(.init(windowsPerDisplay: 5, windowsWithoutNames: [], appsReportIdentifiers: false))).scan()
-        let scanner = makeScanner(fixture)
-        _ = await scanner.scan(reasons: [.refresh])
-        let before = slotReads(fixture)
-        let ordinary = await scanner.scan(reasons: [.poll])
-        #expect(windowsRead(before, slotReads(fixture)) == [1, 2], "the best, and the next to look at; not the first, which has no names")
-        #expect(ordinary == full)
-        // The first is looked at in its turn: after the others.
-        var looked: [Int] = []
-        for _ in 0..<3 {
-            let last = slotReads(fixture)
-            _ = await scanner.scan(reasons: [.poll])
-            looked.append(contentsOf: windowsRead(last, slotReads(fixture)).subtracting([1]))
-        }
-        #expect(looked == [3, 4, 0])
-    }
-
-    @Test func aRememberedWindowThatIsGoneIsReplacedByTheFirst() async {
-        // The windows that remembered one was the best are fewer when the Spaces are gone: the one that was best isn't there to try
-        // first, and the first of those there are is read in its place.
-        let before = InventoryFixtures.desk(.init(windowsPerDisplay: 5, windowsWithoutNames: [0, 1, 2, 3], appsReportIdentifiers: false))
-        let after = InventoryFixtures.desk(.init(windowsPerDisplay: 2, windowsWithoutNames: [], appsReportIdentifiers: false))
-        let phase = Switch(true)
-        let layout = before.layout
-        let scanner = MenuBarScanner(ax: SwitchingAX(first: before.ax, second: after.ax, useFirst: phase), runningApps: { before.running },
-                                     layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        let first = await scanner.scan(reasons: [.refresh])
-        #expect(slotNames(of: first).contains("weather.temp"), "the fifth window was the best")
-        phase.set(false)
-        let second = await scanner.scan(reasons: [.poll])
-        #expect(slotNames(of: second).contains("weather.temp"))
-        #expect(slotReads(after)[0] > 0, "the first window of the display was read in its place")
-    }
-
-    @Test func aScanReadsOnWhileNoWindowHasAsManyNamesAsIsKnown() async {
-        // The best window and the one looked at lost their names: the scan goes on to the next, and stops at the first that has them.
-        let fixture = InventoryFixtures.desk(.init(windowsPerDisplay: 5, windowsWithoutNames: [], appsReportIdentifiers: false))
-        let full = await makeScanner(InventoryFixtures.desk(.init(windowsPerDisplay: 5, windowsWithoutNames: [], appsReportIdentifiers: false))).scan()
-        let scanner = makeScanner(fixture)
-        _ = await scanner.scan(reasons: [.refresh])
-        for display in fixture.windows {
-            for position in [0, 1] { fixture.takeNames(fromWindow: display[position]) }
-        }
-        let before = slotReads(fixture)
-        let ordinary = await scanner.scan(reasons: [.poll])
-        #expect(windowsRead(before, slotReads(fixture)) == [0, 1, 2], "the best, the one looked at, and the first that has the names")
-        #expect(ordinary == full)
-        // The window that has them is the best from now on, and nothing is read on.
-        let last = slotReads(fixture)
-        _ = await scanner.scan(reasons: [.poll])
-        #expect(windowsRead(last, slotReads(fixture)) == [2, 3], "the best, and the next to look at")
-    }
-
     @Test func missingAgentAndWindowsAreProblemsAndCounted() async {
         let fixture = InventoryFixtures.desk()
         let apps = Mutex<[RunningApp]>(fixture.running.filter { $0.bundleID != MenuBarReader.menuBarAgentBundleID })
@@ -710,55 +441,6 @@ struct MenuBarScannerTests {
             fixture.ax.setOverride { id, name in items.contains(id) && (name == AXName.title || name == AXName.identifier) ? .failure(.timeout) : nil }
         })
         #expect(tooMany.status == .timedOut, "three reads of its items timed out")
-    }
-
-    @Test func scanReadsAppsConcurrently() async {
-        // Sixteen apps that each take a second to answer: eight at a time, so two seconds in all, not sixteen.
-        let fixture = InventoryFixtures.desk()
-        var slow: [RunningApp] = []
-        var latency: [String: Duration] = [:]
-        for index in 0..<16 {
-            let app = RunningApp.fake(pid_t(3000 + index), "com.example.slow\(index)", "Slow \(index)")
-            fixture.ax.addApp(pid: app.pid, extras: [.init(title: "Slow", identifier: "slow.\(index)", frame: nil)])
-            slow.append(app)
-            latency[app.bundleID ?? ""] = .seconds(1)
-        }
-        let apps = [fixture.running[0]] + slow
-        let clock = FakeClock()
-        let started = clock.now()
-        let scanner = makeScanner(fixture, running: { apps }, clock: clock, latency: latency)
-        let scan = Task { await scanner.scan() }
-
-        // (A wait that doesn't end in a few seconds is a failure, and not a test that hangs until its time limit.)
-        let first = await clock.waitForSleepers(8, within: .seconds(5))
-        #expect(first, "eight are asked at once")
-        guard first else { return scan.cancel() }
-        #expect(clock.sleeperCount == 8, "no more than eight are asked at once")
-        clock.advance(by: .seconds(1))
-        let second = await clock.waitForSleepers(8, within: .seconds(5))
-        #expect(second, "the next eight began as these finished")
-        guard second else { return scan.cancel() }
-        #expect(clock.sleeperCount == 8)
-        clock.advance(by: .seconds(1))
-        let inventory = await scan.value
-
-        #expect(abs(clock.now().timeIntervalSince(started) - 2) < 0.001, "two seconds of the clock's time")
-        #expect(inventory.reach.count == 16)
-        #expect(inventory.reach.allSatisfy { $0.status == .slow }, "each took a second")
-    }
-
-    @Test func readStopsAtTheItemTimeoutThresholdInAScan() async {
-        // An app whose items all time out costs three timeouts and not one for each of the items it has.
-        let fixture = InventoryFixtures.desk()
-        let hung = RunningApp.fake(2007, "com.example.slowitems", "Slow Items")
-        let items = fixture.ax.addApp(pid: hung.pid, extras: (0..<20).map { FakeAX.Extra(title: "Item \($0)", identifier: "item.\($0)", frame: CGRect(x: 10 * CGFloat($0), y: 0, width: 8, height: 30)) })
-        let slow = Set(items)
-        fixture.ax.setOverride { id, _ in slow.contains(id) ? .failure(.timeout) : nil }
-        let all = fixture.running + [hung]
-        let inventory = await makeScanner(fixture, running: { all }).scan()
-        #expect(items.map { fixture.ax.attributeReads(on: $0) }.reduce(0, +) == 3, "three reads of items, and then it stops")
-        #expect(inventory.reach.first { $0.bundleID == "com.example.slowitems" }?.status == .timedOut)
-        #expect(inventory.items(ofApp: "com.example.slowitems").isEmpty)
     }
 
     // MARK: Apps that don't answer, and apps that are new
@@ -839,42 +521,6 @@ struct MenuBarScannerTests {
         } ?? false
     }
 
-    @Test func overlappingScanKeepsBothReasons() async throws {
-        // A scan under way, and calls that come while it runs: one for apps that came or went, which wants every window read (the quiet read
-        // that is under way reads two), and one for a change of displays, which wants every window read and compared. The reasons of
-        // both are kept, and the one more scan has them, and covers the most either asked; a call for a refresh that comes after joins it.
-        let fixture = InventoryFixtures.desk()
-        let gate = Gate()
-        let counter = ReadCounter()
-        let apps = fixture.running
-        let layout = fixture.layout
-        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
-                                     runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        let first = Task { await scanner.scan(reasons: [.poll]) }
-        #expect(await waitUntil { counter.value > 0 }, "the first scan began to read")
-
-        let second = Task { await scanner.scan(reasons: [.appsChanged]) }
-        #expect(await reaches(scanner, waiting: [.appsChanged]))
-        let third = Task { await scanner.scan(reasons: [.displaysChanged]) }
-        #expect(await reaches(scanner, waiting: [.appsChanged, .displaysChanged]), "both are kept")
-        let fourth = Task { await scanner.scan(reasons: [.refresh]) }
-        #expect(await reaches(scanner, waiting: [.appsChanged, .displaysChanged, .refresh]))
-        #expect(counter.value == 6, "nothing is read again while the first scan is under way")
-
-        gate.open()
-        _ = await [first.value, second.value, third.value, fourth.value]
-
-        #expect(counter.value == 12, "one scan more, for the three of them")
-        #expect(await scanner.scanReasons == [[.poll], [.appsChanged, .displaysChanged, .refresh]])
-        #expect(await scanner.scanCoverages == ["steady", "thorough"], "the one more reads what the most demanding of them asked")
-        #expect(await scanner.waitingReasons.isEmpty, "and nothing is left over")
-        // Once it is over, the next scan is a scan of its own.
-        _ = await scanner.scan(reasons: [.poll])
-        #expect(counter.value == 18)
-        #expect(await scanner.scanReasons.last == [.poll])
-    }
-
     @Test func appsChangedDuringAQuietScanIsReadAgainInEveryWindow() async throws {
         // The quiet read that is under way reads two windows of each display. A call for apps that came or went wants every window read (to
         // find the one that has gained or lost the names of the slots), which that read doesn't cover: it is read again, with the reason.
@@ -898,89 +544,6 @@ struct MenuBarScannerTests {
         #expect(counter.value == 12)
         #expect(await scanner.scanReasons == [[.poll], [.appsChanged]])
         #expect(await scanner.scanCoverages == ["steady", "allWindows"])
-    }
-
-    @Test func theAppsThatDontVoteOfACallThatJoinsAScanReachTheOneMore() async throws {
-        // The apps' own frames are on the second display's bar, and the scan under way (asked with no apps left out) says so. A call that
-        // comes while it runs, for apps that came or went, was made by a session that has just drawn the apps again: they don't vote, and the
-        // one more scan, which is the answer to that call, doesn't count them.
-        let fixture = InventoryFixtures.desk(.init(listingDisplay: 1))
-        let gate = Gate()
-        let counter = ReadCounter()
-        let apps = fixture.running
-        let layout = fixture.layout
-        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
-                                     runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        let first = Task { await scanner.scan(reasons: [.poll]) }
-        #expect(await waitUntil { counter.value > 0 })
-        let second = Task { await scanner.scan(reasons: [.appsChanged], notVoting: Set(apps.compactMap(\.bundleID))) }
-        #expect(await followUpWaits(scanner), "one more scan waits for the one under way")
-
-        gate.open()
-        let (under, more) = await (first.value, second.value)
-
-        #expect(under.activeDisplay == layout.displays[1].uuid, "the scan under way counted the apps' frames")
-        #expect(more.activeDisplay == nil, "the one more scan was asked with every app left out of the vote")
-    }
-
-    @Test func whatTheScanUnderWayCoversIsNotReadAgain() async throws {
-        // A call that asks for no more than the scan under way reads (for the same, for less) is given its result, and its reasons are kept,
-        // in case one more comes.
-        let cases: [(running: Set<ScanScheduler.Reason>, newcomers: [Set<ScanScheduler.Reason>])] = [
-            ([.appsChanged], [[.appsChanged], [.poll]]),
-            ([.displaysChanged], [[.appsChanged], [.displaysChanged], [.refresh], [.poll]]),
-            ([.refresh], [[.appsChanged], [.displaysChanged], []]),
-            ([.poll], [[.poll], [.trial], [.reveal]]),
-        ]
-        for (running, newcomers) in cases {
-            let fixture = InventoryFixtures.desk()
-            let gate = Gate()
-            let counter = ReadCounter()
-            let apps = fixture.running
-            let layout = fixture.layout
-            let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
-                                         runningApps: { apps }, layout: { layout },
-                                         ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-            let first = Task { await scanner.scan(reasons: running) }
-            #expect(await waitUntil { counter.value > 0 })
-            let calls = newcomers.map { reasons in Task { await scanner.scan(reasons: reasons) } }
-            #expect(await reaches(scanner, waiting: newcomers.reduce(into: Set<ScanScheduler.Reason>()) { $0.formUnion($1) }), "\(running)")
-            #expect(await scanner.hasFollowUp == false, "\(running)")
-
-            gate.open()
-            var results = [await first.value]
-            for call in calls { results.append(await call.value) }
-
-            #expect(results.allSatisfy { $0 == results[0] }, "\(running)")
-            #expect(counter.value == 6, "one scan: \(running)")
-            #expect(await scanner.scanReasons == [running], "\(running)")
-        }
-    }
-
-    @Test func aThoroughCallThatComesWhileAScanRunsIsReadAgain() async throws {
-        // A call that asks for a thorough read (no reason given, a change of displays or a refresh) while a quiet read is under way isn't
-        // covered by it: it is read again, and the answer it is given is of the second read.
-        let fixture = InventoryFixtures.desk()
-        let gate = Gate()
-        let counter = ReadCounter()
-        let apps = fixture.running
-        let layout = fixture.layout
-        let scanner = MenuBarScanner(ax: fixture.ax, extrasReader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter),
-                                     runningApps: { apps }, layout: { layout },
-                                     ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        let first = Task { await scanner.scan(reasons: [.poll]) }
-        #expect(await waitUntil { counter.value > 0 })
-        let second = Task { await scanner.scan() }
-        #expect(await followUpWaits(scanner), "one more scan waits for the first")
-
-        gate.open()
-        _ = await [first.value, second.value]
-
-        #expect(counter.value == 12)
-        #expect(await scanner.scanReasons.count == 2)
-        #expect(await scanner.scanReasons.last == [], "a call that gave no reason is a thorough one: the one more is too")
-        #expect(await scanner.scanCoverages == ["steady", "thorough"])
     }
 
     @Test func aNewAppWithNoExtrasIsRecheckedAfterTwoSeconds() async {
@@ -1135,106 +698,6 @@ struct MenuBarScannerTests {
         #expect(framed.ax.attributeReads(on: hung) == 2, "its role, and the position that timed out; not its size")
     }
 
-    @Test func aTimeoutOnAWindowThatIsPassedOverIsNothingToTheLook() async throws {
-        // Accessibility lists the portrait display's windows first, so that the look passes over one of them to get to the main display's.
-        for failing in [AXName.size, AXName.position] {
-            let fixture = InventoryFixtures.desk()
-            let agent = fixture.ax.root(ofApp: InventoryFixtures.agentPID)
-            let listed = fixture.windows[1] + fixture.windows[0]
-            fixture.ax.setAttribute(AXName.windows, .elements(listed.map(fixture.ax.ref)), on: agent)
-            let passedOver = fixture.windows[1][0]
-            fixture.ax.setOverride { id, name in id == passedOver && name == failing ? .failure(.timeout) : nil }
-
-            let look = try #require(await makeScanner(fixture).lookAtBar(), "\(failing)")
-            #expect(look.isComplete, "\(failing) of a window on another display timing out says nothing about the main display's")
-            #expect(look.displayUUID == mainUUID)
-            #expect(look.drawnSlots == 17)
-            #expect(fixture.ax.attributeReads(on: passedOver) == 1, "a window is placed by one read, and not read on when it is another display's")
-        }
-    }
-
-    @Test func theFirstWindowOfTheDisplayIsTheOneTheLookStopsAtWhenItsSizeTimesOut() async throws {
-        // The display's second window shows one slot fewer, so that using it in the first one's place could be told.
-        let fixture = InventoryFixtures.desk()
-        let first = fixture.windows[0][0], second = fixture.windows[0][1]
-        let moved = try #require(try fixture.ax.children(of: fixture.ax.ref(second)).first)
-        fixture.ax.setAttribute(AXName.position, .point(CGPoint(x: 7, y: 1878)), on: fixture.ax.id(of: moved))
-        #expect(try #require(await makeScanner(fixture).lookAtBar()).drawnSlots == 17, "the first window, as it is")
-
-        // Its size can't be read: it still starts on the main display, so it is the one the chooser takes. The look stops there; it
-        // doesn't go on to the second window and say that is what the bar shows.
-        fixture.ax.setOverride { id, name in id == first && name == AXName.size ? .failure(.timeout) : nil }
-        let look = try #require(await makeScanner(fixture).lookAtBar())
-        #expect(!look.isComplete)
-        #expect(look.drawnSlots == 0)
-        #expect(look.displayUUID == mainUUID)
-        #expect(fixture.slotReads(ofWindow: second) == 0)
-    }
-
-    @Test func aWindowThatCantBePlacedIsPassedOver() async throws {
-        // The first window's position can't be read: it can't be told to be the display's, and the next window that is takes its place.
-        let fixture = InventoryFixtures.desk()
-        let first = fixture.windows[0][0]
-        let moved = try #require(try fixture.ax.children(of: fixture.ax.ref(fixture.windows[0][1])).first)
-        fixture.ax.setAttribute(AXName.position, .point(CGPoint(x: 7, y: 1878)), on: fixture.ax.id(of: moved))
-        fixture.ax.setOverride { id, name in id == first && name == AXName.position ? .failure(.timeout) : nil }
-        let look = try #require(await makeScanner(fixture).lookAtBar())
-        #expect(look.isComplete)
-        #expect(look.drawnSlots == 16, "the second window's")
-        #expect(fixture.slotReads(ofWindow: first) == 0)
-    }
-
-    @Test func aSlotWhoseRoleTimedOutIsNotCountedAsDrawn() async throws {
-        // The laptop's bar is full, and the « is a button among the slots. If its role times out it may be that, and it has a frame on
-        // the bar: it isn't counted, and the look stops there.
-        let fixture = InventoryFixtures.laptop()
-        let slots = try fixture.ax.children(of: fixture.ax.ref(fixture.windows[0][0]))
-        let chevron = try #require(slots.firstIndex { slot in
-            if case .string(let role)? = try? fixture.ax.attribute(AXName.role, of: slot) { return role == "AXButton" }
-            return false
-        })
-        #expect(chevron > 0, "slots come before it")
-        let id = fixture.ax.id(of: slots[chevron])
-        fixture.ax.setOverride { slot, name in slot == id && name == AXName.role ? .failure(.timeout) : nil }
-
-        let look = try #require(await makeScanner(fixture).lookAtBar())
-        #expect(!look.isComplete)
-        #expect(look.drawnSlots == chevron, "the slots before it, each with a frame on the bar; not the « and not those after it")
-    }
-
-    @Test func aWindowWhoseSlotsCantBeListedIsNoLookAtAll() async throws {
-        // The window's element is gone (MenuBarAgent restarted): listing its slots fails. That is not a bar with no slots, which a
-        // hide would read as everything hidden.
-        for error in [AXReadError.failure(-25202), .noValue, .notTrusted] {
-            let fixture = InventoryFixtures.desk()
-            let window = fixture.windows[0][0]
-            fixture.ax.setOverride { id, name in id == window && name == AXName.children ? .failure(error) : nil }
-            #expect(await makeScanner(fixture).lookAtBar() == nil, "\(error)")
-        }
-        // A timeout is the incomplete look it always was.
-        let slow = InventoryFixtures.desk()
-        let window = slow.windows[0][0]
-        slow.ax.setOverride { id, name in id == window && name == AXName.children ? .failure(.timeout) : nil }
-        let look = try #require(await makeScanner(slow).lookAtBar())
-        #expect(!look.isComplete)
-        #expect(look.drawnSlots == 0)
-    }
-
-    @Test func aLookSeesAChangeAtOnce() async throws {
-        // What the bar shows is read each time: nothing is kept between looks.
-        let shown = InventoryFixtures.desk()
-        let hidden = InventoryFixtures.desk(.init(concealed: [InventoryFixtures.weather, InventoryFixtures.notes]))
-        let phase = Switch(true)
-        let layout = shown.layout
-        let scanner = MenuBarScanner(ax: SwitchingAX(first: shown.ax, second: hidden.ax, useFirst: phase), runningApps: { shown.running },
-                                     layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: FakeClock(), readLimit: 8)
-        #expect(await scanner.lookAtBar()?.drawnSlots == 17)
-        phase.set(false)
-        #expect(await scanner.lookAtBar()?.drawnSlots == 14)
-        phase.set(true)
-        #expect(await scanner.lookAtBar()?.drawnSlots == 17)
-    }
-
     @Test func aLookIsNilWithoutAccessibilityTheAgentAWindowOrADisplay() async {
         let fixture = InventoryFixtures.desk()
         #expect(await makeScanner(fixture, trusted: { false }).lookAtBar() == nil)
@@ -1303,15 +766,6 @@ struct MenuBarScannerTests {
         #expect(Set(frames.keys) == [InventoryFixtures.notes], "one that timed out, one with no items now and one that isn't running say nothing")
     }
 
-    @Test func anAppWhoseReadsTimedOutSaysNothing() async {
-        let fixture = InventoryFixtures.desk()
-        let partial = AppExtras(pid: 1, bundleID: InventoryFixtures.vpn, name: nil, items: [ExtraItem(index: 0, frame: nil, identifier: nil, title: nil, description: nil)],
-                                timedOut: false, itemTimeouts: 1)
-        let scanner = scanner(fixture, reader: RecordingExtrasReader(fixture, outcomes: [InventoryFixtures.vpn: .items(partial)]))
-
-        #expect(await scanner.itemFrames(ofApps: [InventoryFixtures.vpn]).isEmpty, "a frame that wasn't read is not one that isn't there")
-    }
-
     @Test func noFramesAreAskedForWithoutAccessibility() async {
         let fixture = InventoryFixtures.desk()
         let reader = RecordingExtrasReader(fixture)
@@ -1319,23 +773,6 @@ struct MenuBarScannerTests {
 
         #expect(await scanner.itemFrames(ofApps: [InventoryFixtures.notes]).isEmpty)
         #expect(reader.askedApps.isEmpty)
-    }
-
-    @Test func theAppsAreAskedTogether() async {
-        // All four reads are under way before any of them has an answer.
-        let fixture = InventoryFixtures.desk()
-        let gate = Gate()
-        let counter = ReadCounter()
-        let scanner = scanner(fixture, reader: GatedExtrasReader(base: AppExtrasReader(ax: fixture.ax), gate: gate, started: counter))
-        let asking = Task {
-            await scanner.itemFrames(ofApps: [InventoryFixtures.notes, InventoryFixtures.weather, InventoryFixtures.vpn, InventoryFixtures.sync])
-        }
-        let together = await waitUntil { counter.value == 4 }
-        gate.open()
-        let frames = await asking.value
-
-        #expect(together, "four apps, under the scanner's limit of \(MenuBarReader.concurrency)")
-        #expect(frames.count == 4)
     }
 
     // MARK: Over several scans

@@ -10,7 +10,7 @@ import Synchronization
 // that presses it and the relauncher that opens an app again. Each notes what it was asked and does what the test says. None of them reaches
 // the real system: nothing is posted, no pointer moves, no Accessibility tree is read, no app is asked to quit.
 
-/// A poster that posts nothing. `onClick` and `onKey` are where a test says what a click does in the fake world (a menu opens, a record is
+/// A poster that posts nothing. `onClick` is where a test says what a click does in the fake world (a menu opens, a record is
 /// written).
 final class FakeClickPoster: ClickPosting {
     struct Click: Equatable, Sendable {
@@ -18,28 +18,19 @@ final class FakeClickPoster: ClickPosting {
         let point: CGPoint
     }
 
-    struct Key: Equatable, Sendable {
-        let code: UInt16
-        let flags: CGEventFlags
-    }
-
     private struct State {
         var clicks: [Click] = []
-        var keys: [Key] = []
         var failure: ClickPostError?
         var onClick: (@Sendable (ClickKind, CGPoint) -> Void)?
-        var onKey: (@Sendable (UInt16, CGEventFlags) -> Void)?
     }
 
     private let state = Mutex(State())
 
     var clicks: [Click] { state.withLock { $0.clicks } }
-    var keys: [Key] { state.withLock { $0.keys } }
 
-    /// Every click and key fails with this from now on (nil: they work).
+    /// Every click fails with this from now on (nil: they work).
     func fail(with error: ClickPostError?) { state.withLock { $0.failure = error } }
     func onClick(_ body: (@Sendable (ClickKind, CGPoint) -> Void)?) { state.withLock { $0.onClick = body } }
-    func onKey(_ body: (@Sendable (UInt16, CGEventFlags) -> Void)?) { state.withLock { $0.onKey = body } }
 
     func click(_ kind: ClickKind, at point: CGPoint) throws(ClickPostError) {
         let outcome = state.withLock { state -> (failure: ClickPostError?, hook: (@Sendable (ClickKind, CGPoint) -> Void)?) in
@@ -48,15 +39,6 @@ final class FakeClickPoster: ClickPosting {
         }
         if let failure = outcome.failure { throw failure }
         outcome.hook?(kind, point)
-    }
-
-    func key(_ keyCode: UInt16, flags: CGEventFlags) throws(ClickPostError) {
-        let outcome = state.withLock { state -> (failure: ClickPostError?, hook: (@Sendable (UInt16, CGEventFlags) -> Void)?) in
-            if state.failure == nil { state.keys.append(Key(code: keyCode, flags: flags)) }
-            return (state.failure, state.onKey)
-        }
-        if let failure = outcome.failure { throw failure }
-        outcome.hook?(keyCode, flags)
     }
 }
 
@@ -80,10 +62,8 @@ final class FakeItemLocator: ItemLocating {
         var snapshotCalls: [String?] = []
         var calls: [Call] = []
         var answers: [ItemID: Answer] = [:]
-        var concealedApps: Set<String> = []
         var onSnapshot: (@Sendable () async -> Void)?
         var onLocate: (@Sendable (ItemID, Int) async -> Void)?
-        var snapshotAnswer: (@Sendable (Int) -> SlotSnapshot?)?
         var baselines: [SlotSnapshot?] = []
     }
 
@@ -93,15 +73,11 @@ final class FakeItemLocator: ItemLocating {
     func setSnapshot(_ snapshot: SlotSnapshot?) { state.withLock { $0.snapshot = snapshot } }
     /// What `slotSnapshot` answers for a display that is asked for by name (over `setSnapshot`'s).
     func setSnapshot(_ snapshot: SlotSnapshot, on display: String) { state.withLock { $0.snapshotsByDisplay[display] = snapshot } }
-    /// What `slotSnapshot` answers, by the number of the call (counted from 1), over `setSnapshot`'s.
-    func answerSnapshots(_ body: (@Sendable (Int) -> SlotSnapshot?)?) { state.withLock { $0.snapshotAnswer = body } }
     /// Run as a snapshot is taken (a test looks at the world then).
     func onSnapshot(_ body: (@Sendable () async -> Void)?) { state.withLock { $0.onSnapshot = body } }
     /// Run as a look at an item is answered, after the answer is told and before it is given (the bar changes during the look): with the item
     /// and the number of the call.
     func onLocate(_ body: (@Sendable (ItemID, Int) async -> Void)?) { state.withLock { $0.onLocate = body } }
-    /// The apps the scanner would have among the concealed: as the scanner does, `locate` gives a bare tie of one of them as nothing.
-    func setConcealedApps(_ apps: Set<String>) { state.withLock { $0.concealedApps = apps } }
     /// The baseline each call of `locate` was given, in order.
     var baselines: [SlotSnapshot?] { state.withLock { $0.baselines } }
     /// What `locate` answers for the item, by the number of the call.
@@ -122,7 +98,6 @@ final class FakeItemLocator: ItemLocating {
     func slotSnapshot(on display: String?) async -> SlotSnapshot? {
         let taken = state.withLock { state -> (snapshot: SlotSnapshot?, hook: (@Sendable () async -> Void)?) in
             state.snapshotCalls.append(display)
-            if let answer = state.snapshotAnswer { return (answer(state.snapshotCalls.count), state.onSnapshot) }
             return (display.flatMap { state.snapshotsByDisplay[$0] } ?? state.snapshot, state.onSnapshot)
         }
         await taken.hook?()
@@ -130,16 +105,15 @@ final class FakeItemLocator: ItemLocating {
     }
 
     func locate(_ item: ItemID, on display: String?, since baseline: SlotSnapshot?) async -> ItemLocation? {
-        let decided = state.withLock { state -> (answer: Answer?, number: Int, concealed: Bool, hook: (@Sendable (ItemID, Int) async -> Void)?) in
+        let decided = state.withLock { state -> (answer: Answer?, number: Int, hook: (@Sendable (ItemID, Int) async -> Void)?) in
             let number = state.calls.filter { $0.item == item }.count + 1
             state.calls.append(Call(item: item, display: display, hadBaseline: baseline != nil, number: number))
             state.baselines.append(baseline)
-            return (state.answers[item], number, state.concealedApps.contains(item.bundleID), state.onLocate)
+            return (state.answers[item], number, state.onLocate)
         }
         let told = decided.answer?(decided.number)
         await decided.hook?(item, decided.number)
         guard let location = told else { return nil }
-        if decided.concealed, location.tiedBy == .tie { return nil }
         // An item is on the display its slot is on, and nowhere on another.
         if let display, display != location.displayUUID { return nil }
         return location

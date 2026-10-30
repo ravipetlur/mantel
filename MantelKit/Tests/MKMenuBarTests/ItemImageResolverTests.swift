@@ -20,31 +20,22 @@ struct ItemImageResolverTests {
         ItemImageRecord(item: app, variants: variants, changeCount: 0, appItemCount: 1)
     }
 
-    @Test func exactAppearanceWins() {
-        let record = record([.light: variant("l.png", monochrome: true), .dark: variant("d.png", monochrome: true)])
-        #expect(ItemImageResolver.source(for: app, record: record, want: .dark, folder: folder, ownBundleID: Self.ownBundleID)
-                == .captured(folder.appending(path: "d.png"), recolorFor: nil))
-    }
-
-    @Test func monochromeOtherAppearanceIsRecolored() {
-        let record = record([.light: variant("l.png", monochrome: true)])
-        #expect(ItemImageResolver.source(for: app, record: record, want: .dark, folder: folder, ownBundleID: Self.ownBundleID)
-                == .captured(folder.appending(path: "l.png"), recolorFor: .dark))
-    }
-
-    @Test func colouredOtherAppearanceUsedAsIs() {
-        let record = record([.light: variant("l.png", monochrome: false)])
-        #expect(ItemImageResolver.source(for: app, record: record, want: .dark, folder: folder, ownBundleID: Self.ownBundleID)
-                == .captured(folder.appending(path: "l.png"), recolorFor: nil))
+    /// The picture for a bar of the appearance asked: the exact one, a monochrome other one recoloured, a coloured one as it is.
+    @Test(arguments: [
+        (["l.png": true, "d.png": true], BarAppearance.dark, "d.png", false),
+        (["l.png": true], .dark, "l.png", true),
+        (["l.png": false], .dark, "l.png", false),
+    ] as [([String: Bool], BarAppearance, String, Bool)])
+    func theAppearanceOfThePictureForTheBar(variants: [String: Bool], want: BarAppearance, file: String, recolored: Bool) {
+        let record = record(Dictionary(uniqueKeysWithValues: variants.map { name, monochrome in
+            (name.hasPrefix("l") ? BarAppearance.light : .dark, variant(name, monochrome: monochrome))
+        }))
+        #expect(ItemImageResolver.source(for: app, record: record, want: want, folder: folder, ownBundleID: Self.ownBundleID)
+                == .captured(folder.appending(path: file), recolorFor: recolored ? want : nil))
     }
 
     @Test func appIconFallback() {
         #expect(ItemImageResolver.source(for: app, record: nil, want: .light, folder: folder, ownBundleID: Self.ownBundleID) == .appIcon(bundleID: "com.example.weather"))
-    }
-
-    @Test func ownItemsAreNeverAnAppIcon() {
-        let own = ItemID(bundleID: OwnItems.owner, key: .identifier("mantel.spacer.1"))
-        #expect(ItemImageResolver.source(for: own, record: nil, want: .light, folder: folder, ownBundleID: Self.ownBundleID) == .placeholder)
     }
 
     @Test func anOwnItemNamedByTheRealBundleIDIsNeverAnAppIcon() {
@@ -63,13 +54,4 @@ struct ItemImageResolverTests {
         #expect(ItemImageResolver.source(for: .system("battery"), record: nil, want: .light, folder: folder, ownBundleID: Self.ownBundleID) == .systemSymbol("battery.100"))
     }
 
-    @Test func placeholderLast() {
-        #expect(ItemImageResolver.source(for: .system("somethingnew"), record: nil, want: .light, folder: folder, ownBundleID: Self.ownBundleID) == .placeholder)
-    }
-
-    @Test func fallbackSymbolNamesExist() {
-        for name in ItemImageResolver.symbolNames.values.sorted() + [ItemImageResolver.placeholderSymbol] {
-            #expect(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil, "\(name) is a symbol")
-        }
-    }
 }

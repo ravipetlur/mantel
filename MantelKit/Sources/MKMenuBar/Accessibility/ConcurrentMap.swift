@@ -24,9 +24,15 @@ enum ReadConcurrency {
 /// A limit on how many reads that block, shared by every caller that is given it: a scan and a look at one item that run
 /// together (a reveal is read while the session scans) take turns, and don't each take eight of the threads the system has.
 final class ReadGate: Sendable {
+    private struct Waiter {
+        let id: UInt64
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private struct State {
         var running = 0
-        var waiters: [CheckedContinuation<Void, Never>] = []
+        var nextID: UInt64 = 0
+        var waiters: [Waiter] = []
     }
 
     let limit: Int
@@ -43,23 +49,42 @@ final class ReadGate: Sendable {
     /// Runs `body` once fewer than `limit` reads are running, in the order the callers came.
     ///
     /// The time a read of a scope that excuses it (`AXReadScope`) waits for its turn doesn't count against that scope's deadline.
-    func run<T: Sendable>(_ body: @Sendable () async -> T) async -> T {
+    ///
+    /// A read that is cancelled while it waits for its turn leaves the queue and gives nil, without running `body`: the caller no longer
+    /// wants the answer, and the reads in front of it may be held for as long as the limit allows. A read that already has its turn
+    /// (or finds one free) runs, cancelled or not.
+    func run<T: Sendable>(_ body: @Sendable () async -> T) async -> T? {
         let scope = AXReadScope.current
         let queued = scope?.gateWaitBegan()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let ready = state.withLock { state -> Bool in
-                if state.running < limit {
-                    state.running += 1
-                    return true
-                }
-                state.waiters.append(continuation)
-                return false
-            }
-            if ready { continuation.resume() }
+        let id = state.withLock { state -> UInt64 in
+            state.nextID += 1
+            return state.nextID
         }
+        let hasTurn = await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                let turn = state.withLock { state -> Bool? in
+                    if state.running < limit {
+                        state.running += 1
+                        return true
+                    }
+                    // Looked at inside the lock, so that a cancel can't come between the check and the waiting.
+                    if Task.isCancelled { return false }
+                    state.waiters.append(Waiter(id: id, continuation: continuation))
+                    return nil
+                }
+                if let turn { continuation.resume(returning: turn) }
+            }
+        } onCancel: {
+            let waiter = state.withLock { state -> Waiter? in
+                guard let index = state.waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                return state.waiters.remove(at: index)
+            }
+            waiter?.continuation.resume(returning: false)
+        }
+        guard hasTurn else { return nil }
         scope?.gateWaitEnded(since: queued)
         let result = await body()
-        let next = state.withLock { state -> CheckedContinuation<Void, Never>? in
+        let next = state.withLock { state -> Waiter? in
             if state.waiters.isEmpty {
                 state.running -= 1
                 return nil
@@ -67,8 +92,13 @@ final class ReadGate: Sendable {
             // The slot goes to the one that waited longest, and is still counted.
             return state.waiters.removeFirst()
         }
-        next?.resume()
+        next?.continuation.resume(returning: true)
         return result
+    }
+
+    /// `run`, giving `fallback` for a read that is cancelled while it waits for its turn.
+    func run<T: Sendable>(ifCancelled fallback: T, _ body: @Sendable () async -> T) async -> T {
+        await run(body) ?? fallback
     }
 }
 
@@ -76,11 +106,12 @@ final class ReadGate: Sendable {
 enum ConcurrentMap {
     /// `transform` for each item, at most `limit` at a time, results in the order of the items. The work of the reads this is for
     /// blocks (it is Accessibility calls), so the limit keeps it from taking every thread the system has. With a `gate`, every call that
-    /// shares it is held to the gate's limit together.
+    /// shares it is held to the gate's limit together. An item whose turn at the gate is given up because the caller was cancelled has
+    /// no result, so the results of a cancelled call may be fewer than its items.
     static func map<Item: Sendable, Result: Sendable>(
         _ items: [Item], limit: Int, gate: ReadGate? = nil, _ transform: @escaping @Sendable (Item) async -> Result
     ) async -> [Result] {
-        await withTaskGroup(of: (Int, Result).self) { group in
+        await withTaskGroup(of: (Int, Result?).self) { group in
             var results: [Result?] = Array(repeating: nil, count: items.count)
             var next = 0
             func addNext() {
