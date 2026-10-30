@@ -31,6 +31,10 @@ Mantel has to run from `/Applications`. It asks for Device control and data acce
 
 To sign with your own identity, copy `Config/Local.example.xcconfig` to `Config/Local.xcconfig` and fill it in.
 
+## Releases
+
+Push a tag like `v1.2.0` and GitHub builds, signs and notarizes the DMG and publishes it as a release. Write what's new in `release-notes/1.2.0.md` first.
+
 ## License
 
 Apache 2.0
