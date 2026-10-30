@@ -76,7 +76,7 @@ jobs:
   release:
     name: ${{ github.event_name == 'push' && 'Publish' || 'Dry run' }}
     needs: gate
-    # The same hosted xcode-27 image as CI (macOS 27.0.1, Xcode 27.1, arm64).
+    # The same hosted xcode-27 image as CI (macOS 27.0.1, Xcode 27.2, arm64).
     runs-on: xcode-27
     timeout-minutes: 90
     environment:
@@ -126,17 +126,17 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Mantel $version (build $GITHUB_RUN_NUMBER), pre-release: $prerelease"
 
-      - name: Select Xcode 27.1
+      - name: Select Xcode 27.2
         run: |
-          is_27_1() { [[ $("$1" -version 2> /dev/null | sed -n 1p) =~ ^Xcode\ 27\.1(\.[0-9]+)?$ ]]; }
-          for candidate in /Applications/Xcode_27.1.app /Applications/Xcode_27.app; do
-            if [ -d "$candidate" ] && is_27_1 "$candidate/Contents/Developer/usr/bin/xcodebuild"; then
+          is_27_2() { [[ $("$1" -version 2> /dev/null | sed -n 1p) =~ ^Xcode\ 27\.2(\.[0-9]+)?$ ]]; }
+          for candidate in /Applications/Xcode_27.2.app /Applications/Xcode_27.2.0.app /Applications/Xcode_27.2_Release_Candidate.app; do
+            if [ -d "$candidate" ] && is_27_2 "$candidate/Contents/Developer/usr/bin/xcodebuild"; then
               sudo xcode-select --switch "$candidate/Contents/Developer"
               break
             fi
           done
-          if ! is_27_1 xcodebuild; then
-            echo "::error::Xcode 27.1 isn't installed on this runner."
+          if ! is_27_2 xcodebuild; then
+            echo "::error::Xcode 27.2 isn't installed on this runner."
             ls -d /Applications/Xcode*.app
             exit 1
           fi

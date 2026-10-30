@@ -44,18 +44,20 @@ jobs:
         with:
           persist-credentials: false
 
-      # Xcode 27.1 by version, not whatever the image's default becomes: the toolchain the project is checked with.
-      - name: Select Xcode 27.1
+      # Xcode 27.2 by version, not whatever the image's default becomes: the toolchain the project is checked with.
+      # 27.2, the Xcode the app is developed with: the tests' timing among actors and tasks follows the compiler, and a run built by
+      # 27.1 hung where 27.2's passes.
+      - name: Select Xcode 27.2
         run: |
-          is_27_1() { [[ $("$1" -version 2> /dev/null | sed -n 1p) =~ ^Xcode\ 27\.1(\.[0-9]+)?$ ]]; }
-          for candidate in /Applications/Xcode_27.1.app /Applications/Xcode_27.app; do
-            if [ -d "$candidate" ] && is_27_1 "$candidate/Contents/Developer/usr/bin/xcodebuild"; then
+          is_27_2() { [[ $("$1" -version 2> /dev/null | sed -n 1p) =~ ^Xcode\ 27\.2(\.[0-9]+)?$ ]]; }
+          for candidate in /Applications/Xcode_27.2.app /Applications/Xcode_27.2.0.app /Applications/Xcode_27.2_Release_Candidate.app; do
+            if [ -d "$candidate" ] && is_27_2 "$candidate/Contents/Developer/usr/bin/xcodebuild"; then
               sudo xcode-select --switch "$candidate/Contents/Developer"
               break
             fi
           done
-          if ! is_27_1 xcodebuild; then
-            echo "::error::Xcode 27.1 isn't installed on this runner."
+          if ! is_27_2 xcodebuild; then
+            echo "::error::Xcode 27.2 isn't installed on this runner."
             ls -d /Applications/Xcode*.app
             exit 1
           fi
@@ -94,10 +96,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: MantelKit/.build
-          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('MantelKit/Package.swift') }}-${{ github.sha }}
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-${{ hashFiles('MantelKit/Package.swift') }}-${{ github.sha }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-${{ hashFiles('MantelKit/Package.swift') }}-
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.1-
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-${{ hashFiles('MantelKit/Package.swift') }}-
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-
 
       # make build runs xcodebuild -quiet, which prints only problems: any warning: or error: line fails the job. It
       # builds the app and the test item, Debug, signed ad hoc with the placeholder bundle identifier of
@@ -118,7 +120,8 @@ jobs:
       - name: Test MantelKit
         run: |
           log=$RUNNER_TEMP/tests.log
-          swift test --package-path MantelKit --no-parallel > "$log" 2>&1 &
+          # In a pseudo-terminal, so that the output is written line by line and the last line in the log is the last thing the tests said.
+          script -q /dev/null swift test --package-path MantelKit --no-parallel > "$log" 2>&1 &
           tests=$!
           tail -f "$log" &
           follower=$!
@@ -135,6 +138,10 @@ jobs:
               for helper in $(pgrep -f swiftpm-testing-helper); do
                 echo "::group::Threads of the test process $helper"
                 /usr/bin/sample "$helper" 3 -mayDie 2>&1 | head -2000
+                echo "::endgroup::"
+                # The suspended tasks, and what each awaits: a hang of async code holds no thread, so only this shows it.
+                echo "::group::Async tasks of the test process $helper"
+                sudo -n swift-inspect dump-concurrency "$helper" 2>&1 | head -3000 || swift-inspect dump-concurrency "$helper" 2>&1 | head -3000 || true
                 echo "::endgroup::"
               done
               kill "$tests" 2> /dev/null || true
