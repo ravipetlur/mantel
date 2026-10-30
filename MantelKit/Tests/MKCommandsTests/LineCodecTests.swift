@@ -2,7 +2,7 @@ import Foundation
 import MKCommands
 import Testing
 
-@Suite("Line codec")
+@Suite("Line codec", .timeLimit(.minutes(2)))
 struct LineCodecTests {
     private func lines(_ outputs: [LineCodecOutput]) -> [String] {
         outputs.map {

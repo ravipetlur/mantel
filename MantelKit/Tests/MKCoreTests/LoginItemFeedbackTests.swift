@@ -4,7 +4,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("LoginItemFeedback")
+@Suite("LoginItemFeedback", .timeLimit(.minutes(2)))
 struct LoginItemFeedbackTests {
     private func error(_ code: Int) -> NSError {
         NSError(domain: "SMAppServiceErrorDomain", code: code)

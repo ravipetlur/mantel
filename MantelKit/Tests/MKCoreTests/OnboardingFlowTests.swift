@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("OnboardingFlow")
+@Suite("OnboardingFlow", .timeLimit(.minutes(2)))
 struct OnboardingFlowTests {
     private var satisfied: OnboardingInputs {
         OnboardingInputs(accessibilityGranted: true, install: .applications)

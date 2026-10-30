@@ -5,7 +5,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("FileLogSink")
+@Suite("FileLogSink", .timeLimit(.minutes(2)))
 struct FileLogSinkTests {
     /// Held by the suite for the whole test: the folder is deleted when the test is over.
     let folder = TemporaryFolder(prefix: "mantel-log")

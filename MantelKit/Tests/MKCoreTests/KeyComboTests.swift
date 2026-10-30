@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("KeyCombo")
+@Suite("KeyCombo", .timeLimit(.minutes(2)))
 struct KeyComboTests {
     @Test func withoutFunctionDropsOnlyFn() {
         let combo = KeyCombo(keyCode: KeyCode.k, modifiers: [.command, .function])

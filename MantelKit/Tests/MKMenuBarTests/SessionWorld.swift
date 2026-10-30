@@ -545,7 +545,7 @@ struct SessionRig {
                                      ownBundleID: SessionWorld.own, isTrusted: {
             events.add("scan")
             return trusted.isOn
-        }, clock: clock)
+        }, clock: clock, readLimit: 8)
         let saved = SavedSections()
         let turnedOff = TurnedOffBox()
         let session = MenuBarSession(scanner: scanner, hiding: hiding, runningApps: { world.sessionApps },

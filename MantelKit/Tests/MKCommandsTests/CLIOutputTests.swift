@@ -2,7 +2,7 @@ import Foundation
 import MKCommands
 import Testing
 
-@Suite("Command-line output")
+@Suite("Command-line output", .timeLimit(.minutes(2)))
 struct CLIOutputTests {
     // MARK: Answers
 

@@ -4,7 +4,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Notch coordinates")
+@Suite("Notch coordinates", .timeLimit(.minutes(2)))
 struct NotchCoordinatesTests {
     private func screen(origin: CGPoint, leftX: CGFloat, rightX: CGFloat, notched: Bool = true) -> ScreenFacts {
         ScreenFacts(uuid: "7B0E1E64-5D0F-4F5B-9A53-1C2D3E4F5A6B", frame: CGRect(origin: origin, size: CGSize(width: 1512, height: 982)),

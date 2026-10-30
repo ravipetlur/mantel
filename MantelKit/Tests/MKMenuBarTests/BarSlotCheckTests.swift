@@ -8,7 +8,7 @@ import Testing
 @testable import MKMenuBar
 
 /// The bar is the one a read was of when the whole ordered list of its slots is the list the read had.
-@Suite("Bar slot check")
+@Suite("Bar slot check", .timeLimit(.minutes(2)))
 struct BarSlotCheckTests {
     private func slot(_ x: CGFloat, width: CGFloat = 30, name: String? = nil) -> BarSlot {
         BarSlot(frame: CGRect(x: x, y: 0, width: width, height: 30), name: name)

@@ -3,7 +3,7 @@ import MKCommands
 import MKCore
 import Testing
 
-@Suite("Commands and results as JSON")
+@Suite("Commands and results as JSON", .timeLimit(.minutes(2)))
 struct CommandCodableTests {
     static let commands: [MantelCommand] = {
         var all: [MantelCommand] = [.ping, .version, .openSettings(nil), .diagnostics, .refresh, .reset, .engine]

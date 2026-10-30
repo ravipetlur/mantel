@@ -1,7 +1,7 @@
 @testable import MKCommands
 import Testing
 
-@Suite("Peer policy")
+@Suite("Peer policy", .timeLimit(.minutes(2)))
 struct PeerPolicyTests {
     static let team = "ABCDE12345"
     static let teamBuild = OwnSigning(bundleIdentifier: "com.example.mantel", teamIdentifier: team,

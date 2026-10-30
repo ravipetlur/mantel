@@ -107,7 +107,7 @@ private struct World {
         return MenuBarScanner(ax: ax, runningApps: {
             [.fake(agentPID, MenuBarReader.menuBarAgentBundleID, "MenuBarAgent"), .fake(process.current, weather, "Weather"),
              .fake(notesPID, notes, "Notes")]
-        }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { trusted }, clock: FakeClock())
+        }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { trusted }, clock: FakeClock(), readLimit: 8)
     }
 
     /// The weather app is started again as another process, with the same two items (their frames are where macOS parks icons).
@@ -224,7 +224,7 @@ struct ItemLocatorTests {
         ax.addApp(pid: weatherPID, extras: [.init(title: "B", frame: right.insetBy(dx: 6, dy: 1)), .init(title: "A", frame: left.insetBy(dx: 6, dy: 1))])
         let running: [RunningApp] = [.fake(agentPID, MenuBarReader.menuBarAgentBundleID), .fake(weatherPID, weather)]
         let scanner = MenuBarScanner(ax: ax, runningApps: { running }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         // As the scans name them: an item with no name is what they saw it be.
         let scanned = await scanner.scan()
         #expect(scanned.items(ofApp: weather).map(\.id.string) == ["\(weather)#0", "\(weather)#1"])
@@ -1275,7 +1275,7 @@ struct ItemLocatorTests {
         let idle = world.ax.addApp(pid: 1004, extras: [.init(title: "Idle", identifier: "idle.main", frame: parked)])[0]
         let running = world.running + [.fake(1003, "com.example.other", "Other"), .fake(1004, "com.example.idle", "Idle")]
         let scanner = MenuBarScanner(ax: world.ax, runningApps: { running }, layout: { desk }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         _ = await scanner.scan(concealed: ["com.example.other"])
         let notesBefore = world.ax.attributeReads(on: world.notesItem)
         let otherBefore = world.ax.attributeReads(on: other)

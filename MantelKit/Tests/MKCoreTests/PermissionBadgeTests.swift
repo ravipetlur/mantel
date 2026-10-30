@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("PermissionBadge")
+@Suite("PermissionBadge", .timeLimit(.minutes(2)))
 struct PermissionBadgeTests {
     /// Where macOS only says whether access is on, so "off" is "not decided" (see `PermissionState`).
     private static let onOffOnly: [PermissionKind] = [.accessibility, .screenRecording, .inputMonitoring]

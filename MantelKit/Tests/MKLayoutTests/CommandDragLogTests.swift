@@ -4,7 +4,7 @@ import Testing
 @testable import MKLayout
 
 /// What the log says of a ⌘-drag, in its words.
-@Suite("Command drag log")
+@Suite("Command drag log", .timeLimit(.minutes(2)))
 struct CommandDragLogTests {
     @Test func theSettingIsTheFirstReasonThenTheRevealThenAnEarlierDrag() {
         typealias S = CommandDragLog.ShowAll

@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Hotkey registration plan")
+@Suite("Hotkey registration plan", .timeLimit(.minutes(2)))
 struct HotkeyRegistrationPlanTests {
     private let combo = KeyCombo(keyCode: KeyCode.k, modifiers: [.control, .option, .command])
     private let other = KeyCombo(keyCode: KeyCode.k + 1, modifiers: [.control, .option, .command])

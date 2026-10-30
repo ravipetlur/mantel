@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Starting a modal alert from the run loop")
+@Suite("Starting a modal alert from the run loop", .timeLimit(.minutes(2)))
 @MainActor
 struct ModalHandoffTests {
     /// A schedule that keeps what it is asked to serve, for the test to serve when it chooses.

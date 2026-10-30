@@ -5,7 +5,7 @@ import Testing
 @testable import MKMenuBar
 
 /// Which apps are offered for a relaunch. Apps and bundle IDs are made up (`com.example.*`) or Apple's own.
-@Suite("Relaunch plan")
+@Suite("Relaunch plan", .timeLimit(.minutes(2)))
 struct RelaunchPlanTests {
     private let own = "com.example.mantel"
 

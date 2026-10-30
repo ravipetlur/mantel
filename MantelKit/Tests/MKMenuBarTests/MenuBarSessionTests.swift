@@ -558,7 +558,7 @@ struct MenuBarSessionTests {
         let engine = FakeEngine(.allowlist, log: CallLog())
         let hiding = HidingController(engines: [.allowlist: engine], clock: clock, confirm: { _ in .seen })
         let scanner = MenuBarScanner(ax: world.ax, extrasReader: HoldableExtras(world: world), runningApps: { world.scannerApps },
-                                     layout: { world.layout }, ownBundleID: own, isTrusted: { true }, clock: clock)
+                                     layout: { world.layout }, ownBundleID: own, isTrusted: { true }, clock: clock, readLimit: 8)
         let session = MenuBarSession(
             scanner: scanner, hiding: hiding, runningApps: { world.sessionApps },
             loadSections: { await store.load(ProfilesDocument.self).active },

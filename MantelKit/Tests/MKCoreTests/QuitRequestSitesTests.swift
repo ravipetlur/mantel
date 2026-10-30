@@ -5,7 +5,7 @@ import Testing
 /// "later", AppKit waits for the reply in a nested run loop inside that block, and nothing else queued on the main queue (the cleanup, the
 /// quit timer that answers) runs until it returns. So every place in the app that quits goes through `AppQuit.request()`, which asks from
 /// the run loop. This reads the app's sources and fails for any call that doesn't.
-@Suite("Quit requests in the app")
+@Suite("Quit requests in the app", .timeLimit(.minutes(2)))
 struct QuitRequestSitesTests {
     /// A direct call, however it is spelled (`NSApp.terminate(…)`, `NSApplication.shared.terminate(…)`, an optional chain), but not the
     /// selector `#selector(NSApplication.terminate(_:))` that the helper and the menus use.

@@ -3,7 +3,7 @@ import Foundation
 import MKCore
 import Testing
 
-@Suite("PlistValue")
+@Suite("PlistValue", .timeLimit(.minutes(2)))
 struct PlistValueTests {
     /// Whole seconds, so that the XML property list format (which writes dates to the second) keeps them.
     private static let someDate = Date(timeIntervalSince1970: 1_700_000_000)

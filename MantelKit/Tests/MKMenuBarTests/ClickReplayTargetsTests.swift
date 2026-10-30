@@ -30,7 +30,7 @@ struct ClickReplayTargetsTests {
         let layout = fixture.layout
         let running = fixture.running
         let scanner = MenuBarScanner(ax: fixture.ax, runningApps: { running }, layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         return await scanner.scan()
     }
 
@@ -85,7 +85,7 @@ struct ClickReplayTargetsTests {
         let layout = DisplayLayout(displays: [DisplayFixtures.deskMain])
         let running = fixture.running
         let scanner = MenuBarScanner(ax: fixture.ax, runningApps: { running }, layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let after = await scanner.scan()
 
         let rects = ClickReplayTargets.rects(in: after)

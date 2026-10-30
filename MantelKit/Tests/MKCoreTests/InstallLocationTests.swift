@@ -4,7 +4,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("InstallLocation")
+@Suite("InstallLocation", .timeLimit(.minutes(2)))
 struct InstallLocationTests {
     private let home = URL(filePath: "/Users/x", directoryHint: .isDirectory)
 

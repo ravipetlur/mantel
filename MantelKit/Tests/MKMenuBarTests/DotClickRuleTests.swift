@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Dot click rule")
+@Suite("Dot click rule", .timeLimit(.minutes(2)))
 struct DotClickRuleTests {
     @Test func aRightClickOpensTheMenuAndNothingElseDoes() {
         #expect(DotClickRule.action(for: .rightMouseUp) == .openMenu)

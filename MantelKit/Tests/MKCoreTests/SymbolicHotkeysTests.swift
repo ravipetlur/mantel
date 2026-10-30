@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("SymbolicHotkeys")
+@Suite("SymbolicHotkeys", .timeLimit(.minutes(2)))
 struct SymbolicHotkeysTests {
     /// What the plist says on its own, without macOS's defaults for the ids it leaves out (those have tests of their own).
     private func parseAlone(_ plist: [String: Any]) -> [SymbolicHotkey] {

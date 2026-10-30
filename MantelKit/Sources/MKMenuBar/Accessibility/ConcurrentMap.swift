@@ -6,14 +6,16 @@ import Synchronization
 /// A blocked read holds one of the threads Swift's tasks run on, and there are as many of those as the Mac has processors. A read that
 /// waits longer for a busy Mac (`PatientAX`) holds its thread longer; if the reads took every thread, nothing else that has to run (the
 /// quit's timer, the teardown, the next click) would have one until they gave theirs back. So the reads leave four of them free, and
-/// are never fewer than four or more than eight.
+/// are never fewer than four or more than eight, on a Mac with eight processors or more (every Mac that runs macOS 27). A machine with
+/// fewer (a virtual machine, a build server) gets half of them, at least one, so that the reads never take every thread.
 enum ReadConcurrency {
     static let minimum = 4
     static let maximum = 8
     static let threadsLeftFree = 4
 
     static func limit(processors: Int) -> Int {
-        max(minimum, min(maximum, processors - threadsLeftFree))
+        guard processors >= minimum + threadsLeftFree else { return max(1, processors / 2) }
+        return max(minimum, min(maximum, processors - threadsLeftFree))
     }
 
     static var current: Int { limit(processors: ProcessInfo.processInfo.activeProcessorCount) }

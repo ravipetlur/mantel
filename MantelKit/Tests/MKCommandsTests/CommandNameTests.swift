@@ -2,7 +2,7 @@ import MKCommands
 import MKCore
 import Testing
 
-@Suite("Command names")
+@Suite("Command names", .timeLimit(.minutes(2)))
 struct CommandNameTests {
     @Test func theIconCommandsNameThemselvesForTheLog() {
         #expect(MantelCommand.icons(.hidden).name == "icons")

@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("LaunchSequence")
+@Suite("LaunchSequence", .timeLimit(.minutes(2)))
 struct LaunchSequenceTests {
     @Test func theFoldersComeBeforeTheSocket() {
         #expect(LaunchSequence.beforeSocket == [.createFolders])

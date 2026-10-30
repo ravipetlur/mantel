@@ -1,0 +1,153 @@
+# Builds the app, which must stay warning-free, and runs MantelKit's tests, on every push to main and every pull
+# request. The release workflow calls it too (workflow_call), so a release passes the same gate.
+#
+# Third-party actions are pinned to full commit SHAs, with the version in a comment; Dependabot keeps them current.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the run still going. The workflow's name is in the group
+# because the release workflow runs this one as its gate, and a called workflow sees the caller's context: without it,
+# a release dry run on main and a push to main would share a group and one would cancel the other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Explicit bash runs with -e and -o pipefail.
+    shell: bash
+
+jobs:
+  build:
+    # The required status check on main is this name.
+    name: Build and test
+    # GitHub's hosted xcode-27 image (arm64): macOS 27.0.1 with Xcode 27.1 as its default, plus Xcode 27.2, and the
+    # macosx27.0 SDK. Homebrew is installed; XcodeGen isn't. Hosted macOS runners are free for public repositories.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      # The XcodeGen release the project is generated with, and its zip's SHA-256 (as GitHub lists it for the asset).
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Xcode 27.2 by version, not whatever the image's default becomes: the toolchain the project is checked with.
+      # 27.2, the Xcode the app is developed with: the tests' timing among actors and tasks follows the compiler, and a run built by
+      # 27.1 hung where 27.2's passes.
+      - name: Select Xcode 27.2
+        run: |
+          is_27_2() { [[ $("$1" -version 2> /dev/null | sed -n 1p) =~ ^Xcode\ 27\.2(\.[0-9]+)?$ ]]; }
+          for candidate in /Applications/Xcode_27.2.app /Applications/Xcode_27.2.0.app /Applications/Xcode_27.2_Release_Candidate.app; do
+            if [ -d "$candidate" ] && is_27_2 "$candidate/Contents/Developer/usr/bin/xcodebuild"; then
+              sudo xcode-select --switch "$candidate/Contents/Developer"
+              break
+            fi
+          done
+          if ! is_27_2 xcodebuild; then
+            echo "::error::Xcode 27.2 isn't installed on this runner."
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          xcodebuild -version
+          swift --version
+          sw_vers
+
+      - name: Restore XcodeGen
+        id: xcodegen-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/xcodegen-${{ env.XCODEGEN_VERSION }}
+          key: xcodegen-${{ env.XCODEGEN_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      # The pinned release, checked against its SHA-256, rather than whichever version Homebrew has.
+      - name: Install XcodeGen
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check --strict
+          mkdir -p ~/"xcodegen-$XCODEGEN_VERSION"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/"xcodegen-$XCODEGEN_VERSION"
+          rm "$RUNNER_TEMP/xcodegen.zip"
+
+      - name: Put XcodeGen on the PATH
+        run: |
+          echo "$HOME/xcodegen-$XCODEGEN_VERSION/xcodegen/bin" >> "$GITHUB_PATH"
+          "$HOME/xcodegen-$XCODEGEN_VERSION/xcodegen/bin/xcodegen" --version
+
+      # MantelKit's own build folder. Mantel has no third-party packages, so there are no checkouts or pins to cache.
+      # The key names the package manifest, the toolchain and the commit, so every run saves a fresh cache (a cache is
+      # never rewritten under its key); a run restores the newest one saved for the same manifest and toolchain, or,
+      # when the manifest changed, the newest for the toolchain.
+      - name: Cache MantelKit's build folder
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: MantelKit/.build
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-${{ hashFiles('MantelKit/Package.swift') }}-${{ github.sha }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-${{ hashFiles('MantelKit/Package.swift') }}-
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-
+
+      # make build runs xcodebuild -quiet, which prints only problems: any warning: or error: line fails the job. It
+      # builds the app and the test item, Debug, signed ad hoc with the placeholder bundle identifier of
+      # Config/Defaults.xcconfig (there is no Config/Local.xcconfig here).
+      - name: Build the app (warning-free)
+        run: |
+          make build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          if grep -E 'warning:|error:' "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/problems.log"; then
+            echo "::error title=Build not warning-free::xcodebuild printed $(wc -l < "$RUNNER_TEMP/problems.log" | tr -d ' ') warning or error lines; the build must stay warning-free."
+            cat "$RUNNER_TEMP/problems.log"
+            exit 1
+          fi
+
+      # One test at a time: the hosted runner has three cores, so Swift's thread pool has three threads, and tests whose fakes hold a
+      # thread starve the rest when they run together. A watchdog stops a run that has printed nothing for five minutes: it takes a
+      # stack sample of every thread of the test process (macOS's `sample`), prints it, and fails, so a hang shows where it is instead
+      # of using up the job's hour.
+      - name: Test MantelKit
+        run: |
+          log=$RUNNER_TEMP/tests.log
+          # In a pseudo-terminal, so that the output is written line by line and the last line in the log is the last thing the tests said.
+          script -q /dev/null swift test --package-path MantelKit --no-parallel > "$log" 2>&1 &
+          tests=$!
+          tail -f "$log" &
+          follower=$!
+          last=-1
+          idle=0
+          while kill -0 "$tests" 2> /dev/null; do
+            sleep 15
+            size=$(wc -c < "$log")
+            if [ "$size" -eq "$last" ]; then idle=$((idle + 15)); else idle=0; last=$size; fi
+            if [ "$idle" -ge 300 ]; then
+              kill "$follower" 2> /dev/null || true
+              echo "::error::The tests printed nothing for five minutes. The last test started is the one that hangs; its threads follow."
+              grep -E "started\.$" "$log" | tail -3 || true
+              for helper in $(pgrep -f swiftpm-testing-helper); do
+                echo "::group::Threads of the test process $helper"
+                /usr/bin/sample "$helper" 3 -mayDie 2>&1 | head -2000
+                echo "::endgroup::"
+                # The suspended tasks, and what each awaits: a hang of async code holds no thread, so only this shows it.
+                echo "::group::Async tasks of the test process $helper"
+                sudo -n swift-inspect dump-concurrency "$helper" 2>&1 | head -3000 || swift-inspect dump-concurrency "$helper" 2>&1 | head -3000 || true
+                echo "::endgroup::"
+              done
+              kill "$tests" 2> /dev/null || true
+              pkill -f swiftpm-testing-helper || true
+              exit 1
+            fi
+          done
+          kill "$follower" 2> /dev/null || true
+          wait "$tests"

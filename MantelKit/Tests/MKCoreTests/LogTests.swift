@@ -7,7 +7,7 @@ import Testing
 
 /// `Log` itself holds the one sink the app installs, and tests must not share that. These tests use a `LogRouter`, the
 /// type behind `Log`, of their own.
-@Suite("Log")
+@Suite("Log", .timeLimit(.minutes(2)))
 struct LogTests {
     let folder = TemporaryFolder(prefix: "mantel-log")
 

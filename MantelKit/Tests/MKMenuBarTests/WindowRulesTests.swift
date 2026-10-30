@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Window rules")
+@Suite("Window rules", .timeLimit(.minutes(2)))
 struct WindowRulesTests {
     private func window(layer: Int, alpha: Double = 1, owner: String? = "com.example.weather") -> WindowInfo {
         WindowInfo(number: 1, ownerPID: 100, ownerBundleID: owner, layer: layer, bounds: CGRect(x: 3000, y: 30, width: 240, height: 300), alpha: alpha)

@@ -250,7 +250,7 @@ struct OwnProcessAccessTests {
                                   access: OwnProcessAccess(belongsToThisApp: { ids.contains(ax.id(of: $0)) }, runOnMainThread: hops.runner))
         let layout = fixture.layout
         let scanner = MenuBarScanner(ax: reader, runningApps: { fixture.running }, layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID,
-                                     isTrusted: { true }, clock: FakeClock())
+                                     isTrusted: { true }, clock: FakeClock(), readLimit: 8)
         let inventory = await scanner.scan()
 
         #expect(inventory.items(ofApp: InventoryFixtures.ownBundleID).count == 2, "Mantel's items are still read")

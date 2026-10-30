@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("SystemSettingsLinks")
+@Suite("SystemSettingsLinks", .timeLimit(.minutes(2)))
 struct SystemSettingsLinksTests {
     private static let privacyPane = "x-apple.systempreferences:com.apple.preference.security?"
 

@@ -4,7 +4,7 @@ import Testing
 @testable import MKCore
 
 /// What the recorder does with a key pressed while it listens. The view and its event monitor are checked by hand.
-@Suite("Hotkey recorder")
+@Suite("Hotkey recorder", .timeLimit(.minutes(2)))
 struct HotkeyRecorderTests {
     private let command: UInt = 1 << 20
     private let control: UInt = 1 << 18
@@ -62,7 +62,7 @@ struct HotkeyRecorderTests {
 }
 
 /// What the recorder says while it listens.
-@Suite("Recorder copy")
+@Suite("Recorder copy", .timeLimit(.minutes(2)))
 struct RecorderCopyTests {
     @Test func theAnnouncementNamesTheActionAndTheKeys() {
         let text = RecorderCopy.announcement(for: "Show hidden icons")
@@ -83,7 +83,7 @@ struct RecorderCopyTests {
 }
 
 /// When the hotkeys are put aside for a recording.
-@Suite("Recording start")
+@Suite("Recording start", .timeLimit(.minutes(2)))
 struct RecordingStartTests {
     @Test func theHotkeysAreAsideAtOnceWhenMantelIsActive() {
         var start = RecordingStart()

@@ -2,7 +2,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("SingleInstancePolicy")
+@Suite("SingleInstancePolicy", .timeLimit(.minutes(2)))
 struct SingleInstancePolicyTests {
     @Test func handsOffToAnotherLiveCopy() {
         let running = [RunningInstance(pid: 10, isTerminated: false), RunningInstance(pid: 20, isTerminated: false)]

@@ -1,0 +1,461 @@
+# Publishes a GitHub Release when a version tag is pushed:
+#
+#   git tag v1.2.0 && git push origin v1.2.0      (a tag such as v1.2.0-beta.1 publishes a pre-release)
+#
+# It runs CI's build and test gate, builds the Release app as version 1.2.0 with this workflow's run number as its build
+# number, packs Mantel-1.2.0.dmg with scripts/make-dmg.sh (what `make dmg` runs locally), writes the DMG's SHA-256,
+# attests its build provenance, and publishes the release with its notes, the DMG and its checksum.
+#
+# The notes open with a "What's new" section, which is release-notes/1.2.0.md (write it before pushing the tag; without
+# the file the section is a one-line default), then the install and verify sections, then GitHub's generated list of
+# changes. Mantel has no updater: a new version is a new download.
+#
+# Run it by hand (Actions › Release › Run workflow) with a version for a dry run: the same build, signing and DMG,
+# uploaded as a workflow artifact. A dry run attests nothing and publishes nothing.
+#
+# The release job runs in the "release" environment, which must exist and holds the signing secrets. With an approval
+# required there, every run, dry runs included, waits for it once the gate has passed.
+#
+# SIGNING
+# With none of the secrets below, the app is signed ad hoc with the hardened runtime and no team, as a local build is
+# (Config/Defaults.xcconfig), and the release notes say the build is unsigned. With all six, set as secrets of the
+# release environment, the app and the command-line tool inside it (Contents/Helpers/mantel) are signed with a
+# Developer ID (hardened runtime, secure timestamp), and the app is notarized and stapled, so its first launch needs no
+# network; then it is packed, and the DMG is signed, notarized and stapled too (each notarization's time is in the log
+# and the run's summary, from scripts/notarize.sh). Gatekeeper must accept the app and the DMG before anything is
+# published. Some but not all of the secrets fails the run, rather than publish a build that is half set up.
+#
+#   MACOS_CERTIFICATE_P12_BASE64  the Developer ID Application certificate with its private key, exported from Keychain
+#                                 Access as a .p12 and base64-encoded
+#   MACOS_CERTIFICATE_PASSWORD    the .p12's password
+#   MACOS_TEAM_ID                 the Apple developer team ID (ten characters)
+#   NOTARY_KEY_P8_BASE64          an App Store Connect API key for notarytool (Users and Access › Integrations › Team
+#                                 Keys, Developer access): the downloaded .p8, base64-encoded
+#   NOTARY_KEY_ID                 that key's ID
+#   NOTARY_ISSUER_ID              the issuer ID shown above the team keys
+#
+# The signing identity isn't a secret of its own: it's read from the imported certificate (`security find-identity`),
+# so it can't disagree with it, and it must belong to MACOS_TEAM_ID. The repository variable RELEASE_BUNDLE_ID sets the
+# signed build's bundle identifier (com.example.mantel when unset); an unsigned build always keeps com.example.mantel.
+# macOS keys the app's permissions and preferences to the bundle identifier, so changing RELEASE_BUNDLE_ID or the
+# signing team asks everyone who installed an earlier release to grant them again.
+#
+# The secrets reach only the steps that need them, through env, and are never printed. The files made from them (the
+# .p12, the .p8, the temporary keychain, Config/Local.xcconfig, the app's zip) are deleted at the end however the run
+# ends.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for the dry run, without the v: 1.2.0, or 1.2.0-beta.1'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Explicit bash runs with -e and -o pipefail. macOS's /bin/bash is 3.2, so the scripts stay within it.
+    shell: bash
+
+jobs:
+  gate:
+    name: Gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    name: ${{ github.event_name == 'push' && 'Publish' || 'Dry run' }}
+    needs: gate
+    # The same hosted xcode-27 image as CI (macOS 27.0.1, Xcode 27.2, arm64).
+    runs-on: xcode-27
+    timeout-minutes: 90
+    environment:
+      name: release
+      url: ${{ steps.publish.outputs.url }}
+    permissions:
+      contents: write # create the release and upload its files
+      id-token: write # the OIDC token the provenance attestation is signed with (Sigstore)
+      attestations: write # store the attestation
+    env:
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      APP: build/DerivedData/Build/Products/Release/Mantel.app
+      # The command-line tool the app carries: signed with the app's identity, as the app only trusts a program signed
+      # that way over its control socket.
+      HELPER: build/DerivedData/Build/Products/Release/Mantel.app/Contents/Helpers/mantel
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=$INPUT_VERSION
+          fi
+          # Three numbers and an optional pre-release part: the DMG's name, and (its numbers) the app's version.
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::The version must look like 1.2.0 or 1.2.0-beta.1 (a tag: v1.2.0)."
+            exit 1
+          fi
+          if [[ $version == *-* ]]; then
+            prerelease=true
+          else
+            prerelease=false
+          fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "dmg=build/Mantel-$version.dmg"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mantel $version (build $GITHUB_RUN_NUMBER), pre-release: $prerelease"
+
+      - name: Select Xcode 27.2
+        run: |
+          is_27_2() { [[ $("$1" -version 2> /dev/null | sed -n 1p) =~ ^Xcode\ 27\.2(\.[0-9]+)?$ ]]; }
+          for candidate in /Applications/Xcode_27.2.app /Applications/Xcode_27.2.0.app /Applications/Xcode_27.2_Release_Candidate.app; do
+            if [ -d "$candidate" ] && is_27_2 "$candidate/Contents/Developer/usr/bin/xcodebuild"; then
+              sudo xcode-select --switch "$candidate/Contents/Developer"
+              break
+            fi
+          done
+          if ! is_27_2 xcodebuild; then
+            echo "::error::Xcode 27.2 isn't installed on this runner."
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          xcodebuild -version
+
+      # Not from a cache: a release is built from nothing a cache could have changed.
+      - name: Install XcodeGen
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check --strict
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Check the signing secrets
+        id: signing
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          count=0
+          for name in CERTIFICATE CERTIFICATE_PASSWORD TEAM_ID NOTARY_KEY NOTARY_KEY_ID NOTARY_ISSUER_ID; do
+            if [ -n "${!name}" ]; then count=$((count + 1)); fi
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "developer-id=false" >> "$GITHUB_OUTPUT"
+            echo "No signing secrets: the app is signed ad hoc, and the release notes say it's unsigned."
+          elif [ "$count" -eq 6 ]; then
+            echo "developer-id=true" >> "$GITHUB_OUTPUT"
+            echo "Signing with a Developer ID and notarizing."
+          else
+            echo "::error::Only $count of the 6 signing secrets are set in the release environment; set all six (see the top of release.yml) or none."
+            exit 1
+          fi
+
+      - name: Import the Developer ID certificate
+        id: identity
+        if: steps.signing.outputs.developer-id == 'true'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          BUNDLE_ID: ${{ vars.RELEASE_BUNDLE_ID || 'com.example.mantel' }}
+        run: |
+          # The temporary keychain's path, for the signing steps and the clean-up.
+          echo "KEYCHAIN=$RUNNER_TEMP/signing.keychain-db" >> "$GITHUB_ENV"
+          KEYCHAIN=$RUNNER_TEMP/signing.keychain-db
+          if ! [[ $BUNDLE_ID =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
+            echo "::error::RELEASE_BUNDLE_ID isn't a bundle identifier (reverse-DNS: letters, digits, hyphens and dots)."
+            exit 1
+          fi
+          # A keychain of this run's own, with a random password, unlocked for the run.
+          keychain_password=$(uuidgen)
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$KEYCHAIN"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -f pkcs12 -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign > /dev/null
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # codesign may use the key without a prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN" > /dev/null
+          # The keychain joins the search list, so Xcode and codesign find the identity in it.
+          existing=$(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+          IFS=$'\n'
+          # shellcheck disable=SC2086 # one keychain path per line
+          security list-keychains -d user -s "$KEYCHAIN" $existing
+          unset IFS
+
+          # The identity is the certificate's only Developer ID Application identity, and it must be the team's.
+          identities=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep '"Developer ID Application: ' || true)
+          if [ "$(printf '%s' "$identities" | grep -c '^')" -ne 1 ]; then
+            echo "::error::The certificate must hold exactly one Developer ID Application identity."
+            # What it holds instead, by kind and validity only: the names would put the holder's name in a public log.
+            echo "The .p12 holds these code-signing identities (kind, and why macOS rejects it, if it does):"
+            security find-identity -p codesigning "$KEYCHAIN" |
+              awk '/Valid identities only/ { exit } /^ *[0-9]+\) / { print }' |
+              sed -E 's/^ *[0-9]+\) [0-9A-F]+ "([^:"]*)[^"]*"(.*)$/\1\2/' | sort | uniq -c || true
+            exit 1
+          fi
+          hash=$(printf '%s\n' "$identities" | awk '{ print $2 }')
+          identity=$(printf '%s\n' "$identities" | sed -E 's/^[^"]*"(.*)"[^"]*$/\1/')
+          if [[ $identity != *"($TEAM_ID)" ]]; then
+            echo "::error::The certificate's identity isn't for the team in MACOS_TEAM_ID."
+            exit 1
+          fi
+
+          # The build's identity goes in Config/Local.xcconfig (git-ignored), the project's hook for a build identity:
+          # its values override Config/Defaults.xcconfig's ad hoc ones. project.yml adds --options=runtime (the hardened
+          # runtime) to OTHER_CODE_SIGN_FLAGS; --timestamp asks for the secure timestamp notarization needs. Xcode signs
+          # the command-line tool again as it embeds it in the app, with the same identity and flags.
+          {
+            echo "PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID"
+            echo "CODE_SIGN_IDENTITY = $identity"
+            echo "DEVELOPMENT_TEAM = $TEAM_ID"
+            echo "OTHER_CODE_SIGN_FLAGS = --timestamp --keychain $KEYCHAIN"
+          } > Config/Local.xcconfig
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "Signing as $identity, bundle identifier $BUNDLE_ID."
+
+      - name: Build the Release app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: make build-release VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER"
+
+      # The app and the tool inside it are each checked, and the app's Gatekeeper-relevant seal covers both.
+      - name: Check the app's signature and version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          DEVELOPER_ID: ${{ steps.signing.outputs.developer-id }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          codesign --verify --strict --deep --verbose=2 "$APP"
+          [ -f "$HELPER" ] || fail "The app doesn't carry its command-line tool at Contents/Helpers/mantel."
+          codesign --verify --strict --deep --verbose=2 "$HELPER"
+          team_of() { sed -n 's/^TeamIdentifier=//p' <<< "$1"; }
+          for code in "$APP" "$HELPER"; do
+            name=${code##*/}
+            details=$(codesign -dvv "$code" 2>&1)
+            echo "$details"
+            grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([a-z,]*runtime' <<< "$details" || fail "$name isn't signed with the hardened runtime."
+            if [ "$DEVELOPER_ID" = true ]; then
+              grep -q '^Authority=Developer ID Application: ' <<< "$details" || fail "$name isn't signed with the Developer ID."
+              grep -q '^Timestamp=' <<< "$details" || fail "$name's signature has no secure timestamp."
+            else
+              grep -q '^Signature=adhoc' <<< "$details" || fail "The unsigned $name isn't signed ad hoc."
+            fi
+            entitlements=$(codesign -d --entitlements - --xml "$code" 2> /dev/null)
+            if grep -q 'get-task-allow' <<< "$entitlements"; then
+              fail "$name has the get-task-allow entitlement."
+            fi
+            if [ "$name" = Mantel.app ]; then app_details=$details; else helper_details=$details; fi
+          done
+          [ "$(team_of "$app_details")" = "$(team_of "$helper_details")" ] || fail "The app and its command-line tool are signed by different teams."
+          info="$APP/Contents/Info.plist"
+          bundle_id=$(plutil -extract CFBundleIdentifier raw "$info")
+          grep -q "^Identifier=$bundle_id\.cli\$" <<< "$helper_details" || fail "The command-line tool's identifier isn't $bundle_id.cli."
+          short=$(plutil -extract CFBundleShortVersionString raw "$info")
+          build=$(plutil -extract CFBundleVersion raw "$info")
+          echo "$bundle_id $short ($build)"
+          [ "$short" = "${VERSION%%-*}" ] || fail "CFBundleShortVersionString is $short, not ${VERSION%%-*}."
+          [ "$build" = "$BUILD_NUMBER" ] || fail "CFBundleVersion is $build, not $BUILD_NUMBER."
+
+      - name: Write the notary key
+        if: steps.signing.outputs.developer-id == 'true'
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+        run: |
+          key="$RUNNER_TEMP/notary-key.p8"
+          (umask 077 && printf '%s' "$NOTARY_KEY" | base64 --decode > "$key")
+          echo "NOTARY_KEY_FILE=$key" >> "$GITHUB_ENV"
+
+      # The app is notarized and stapled on its own before it's packed, so a copy dragged out of the DMG carries its
+      # ticket and its first launch needs no network.
+      - name: Notarize and staple the app
+        if: steps.signing.outputs.developer-id == 'true'
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          zip="$RUNNER_TEMP/Mantel.zip"
+          ditto -c -k --keepParent "$APP" "$zip"
+          scripts/notarize.sh "$zip"
+          rm -f "$zip"
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl -a -vvv "$APP"
+
+      - name: Pack the DMG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/make-dmg.sh "$APP" "$VERSION" build
+
+      # The app inside is signed, notarized and stapled already; the image is signed too, then notarized and stapled,
+      # so Gatekeeper can check it offline.
+      - name: Sign the DMG
+        if: steps.signing.outputs.developer-id == 'true'
+        env:
+          DMG: ${{ steps.version.outputs.dmg }}
+          IDENTITY_HASH: ${{ steps.identity.outputs.hash }}
+        run: |
+          codesign --sign "$IDENTITY_HASH" --keychain "$KEYCHAIN" --timestamp "$DMG"
+          codesign --verify --strict --verbose=2 "$DMG"
+
+      - name: Notarize and staple the DMG
+        if: steps.signing.outputs.developer-id == 'true'
+        env:
+          DMG: ${{ steps.version.outputs.dmg }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          scripts/notarize.sh "$DMG"
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: Check that Gatekeeper accepts the DMG and the app
+        if: steps.signing.outputs.developer-id == 'true'
+        env:
+          DMG: ${{ steps.version.outputs.dmg }}
+        run: |
+          spctl -a -vvv -t install "$DMG"
+          mount=$(mktemp -d "$RUNNER_TEMP/dmg.XXXXXX")
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "$DMG" > /dev/null
+          trap 'hdiutil detach "$mount" > /dev/null || true' EXIT
+          spctl -a -vvv "$mount/Mantel.app"
+          # The app's own ticket made it into the image.
+          xcrun stapler validate "$mount/Mantel.app"
+          codesign --verify --strict --deep "$mount/Mantel.app"
+
+      - name: Verify the DMG and write its checksum
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: build
+        run: |
+          hdiutil verify "Mantel-$VERSION.dmg"
+          # The file name alone, so `shasum -a 256 -c` works in the folder the two are downloaded to.
+          shasum -a 256 "Mantel-$VERSION.dmg" | tee "Mantel-$VERSION.dmg.sha256"
+
+      - name: Attest the DMG's build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.version.outputs.dmg }}
+
+      - name: Upload the dry run's DMG
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Mantel-${{ steps.version.outputs.version }}-dry-run
+          path: |
+            ${{ steps.version.outputs.dmg }}
+            ${{ steps.version.outputs.dmg }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+          # A DMG is compressed already.
+          compression-level: 0
+
+      - name: Write the release notes
+        if: github.event_name == 'push'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DEVELOPER_ID: ${{ steps.signing.outputs.developer-id }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          # "What's new" comes first. It is this version's file in release-notes/, if there is one.
+          whats_new="release-notes/$VERSION.md"
+          if [ ! -s "$whats_new" ]; then
+            echo "::warning::There is no $whats_new, so the release says only 'Bug fixes and improvements.' under What's new."
+          fi
+          {
+            echo "## What's new"
+            echo
+            if [ -s "$whats_new" ]; then cat "$whats_new"; else echo "Bug fixes and improvements."; fi
+            echo
+          } > "$notes"
+          if [ "$DEVELOPER_ID" = true ]; then
+            cat >> "$notes" <<'EOF'
+          ## Install
+
+          Mantel needs macOS 27 on Apple Silicon. Download `Mantel-@VERSION@.dmg` below, open it and drag Mantel to Applications. Mantel has to run from there.
+
+          This build is signed with a Developer ID and notarized by Apple, so it opens like any other app.
+          EOF
+          else
+            cat >> "$notes" <<'EOF'
+          ## Install
+
+          Mantel needs macOS 27 on Apple Silicon. Download `Mantel-@VERSION@.dmg` below, open it and drag Mantel to Applications. Mantel has to run from there.
+
+          **This build is unsigned:** it is signed ad hoc, without an Apple Developer ID, and isn't notarized, so macOS won't open it at first.
+
+          1. Open Mantel from Applications. macOS says it can't be opened; click Done.
+          2. Open System Settings › Privacy & Security, scroll down to Security, click **Open Anyway** beside the message about Mantel, and confirm with your password or Touch ID.
+          3. Mantel opens, and from then on opens normally.
+
+          Or, in Terminal, remove the quarantine flag instead: `xattr -dr com.apple.quarantine /Applications/Mantel.app`. Either way you skip Gatekeeper's check for this copy, so verify the download first (below).
+
+          macOS ties Device control and data access, Screen Recording and Mantel's other permissions to the app's code signature, and an ad hoc signature changes with every build, so after installing a new version, grant them again. If System Settings lists Mantel twice, remove the old entry.
+          EOF
+          fi
+          cat >> "$notes" <<'EOF'
+
+          ## Verify the download
+
+          In the folder you downloaded both files to:
+
+              shasum -a 256 -c Mantel-@VERSION@.dmg.sha256
+              gh attestation verify Mantel-@VERSION@.dmg --repo @REPOSITORY@
+
+          The first checks the DMG against the checksum published here; the second (with the [GitHub CLI](https://cli.github.com)) checks that this repository's release workflow built it.
+          EOF
+          sed -i '' -e "s|@VERSION@|$VERSION|g" -e "s|@REPOSITORY@|$GITHUB_REPOSITORY|g" "$notes"
+          cat "$notes"
+
+      - name: Publish the release
+        id: publish
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DMG: ${{ steps.version.outputs.dmg }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          gh release create "$TAG" "$DMG" "$DMG.sha256" --verify-tag --title "Mantel $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --prerelease="$PRERELEASE"
+          echo "url=$(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+
+      - name: Delete the signing files
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ] && [ -f "$KEYCHAIN" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          rm -f "${KEYCHAIN:-}" "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/Mantel.zip" \
+            Config/Local.xcconfig

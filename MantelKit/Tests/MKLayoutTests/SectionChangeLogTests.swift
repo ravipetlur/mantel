@@ -4,7 +4,7 @@ import Testing
 @testable import MKLayout
 
 /// The line the log has when the sections are saved: what changed and who changed it, in bundle IDs, section names and counts.
-@Suite("Section change log")
+@Suite("Section change log", .timeLimit(.minutes(2)))
 struct SectionChangeLogTests {
     private let a = "com.example.a"
     private let b = "com.example.b"

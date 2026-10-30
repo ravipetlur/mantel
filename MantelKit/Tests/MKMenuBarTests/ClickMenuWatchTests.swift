@@ -14,7 +14,7 @@ private func poll(_ watch: inout ClickMenuWatch, menuOfApp: Bool = false, anyMen
 }
 
 /// Where a click's menu is in its life, from what the window list says.
-@Suite("Click menu watch")
+@Suite("Click menu watch", .timeLimit(.minutes(2)))
 struct ClickMenuWatchTests {
     @Test func opensThenCloses() {
         var watch = ClickMenuWatch(startedAt: start, menusAreSeen: true)

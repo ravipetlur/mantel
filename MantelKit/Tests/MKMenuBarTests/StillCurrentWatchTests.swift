@@ -4,7 +4,7 @@ import Testing
 @testable import MKMenuBar
 
 /// When a look or an app doesn't answer, the bar is asked again; only a difference that was answered throws pictures away.
-@Suite("Still current watch")
+@Suite("Still current watch", .timeLimit(.minutes(2)))
 struct StillCurrentWatchTests {
     private let weather = "com.example.weather"
     private let notes = "com.example.notes"

@@ -4,7 +4,7 @@ import Testing
 @testable import MKMenuBar
 
 /// When an icon can't be shown, and what is said of it.
-@Suite("Icon show check")
+@Suite("Icon show check", .timeLimit(.minutes(2)))
 struct IconShowCheckTests {
     private let app = ItemID(bundleID: "com.example.notes", key: .identifier("main"))
     private let system = ItemID.system("nowplaying")

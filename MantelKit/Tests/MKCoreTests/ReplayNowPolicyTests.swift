@@ -4,7 +4,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("Replay now policy")
+@Suite("Replay now policy", .timeLimit(.minutes(2)))
 struct ReplayNowPolicyTests {
     /// Held by the suite, and so for the whole test.
     let folder = TemporaryFolder(prefix: "mantel-replay-now")

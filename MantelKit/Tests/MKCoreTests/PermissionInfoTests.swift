@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("PermissionInfo")
+@Suite("PermissionInfo", .timeLimit(.minutes(2)))
 struct PermissionInfoTests {
     /// The copy of the permissions table, word for word.
     private static let reasons: [PermissionKind: String] = [

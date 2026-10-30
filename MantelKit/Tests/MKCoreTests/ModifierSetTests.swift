@@ -3,7 +3,7 @@ import Testing
 
 @testable import MKCore
 
-@Suite("ModifierSet")
+@Suite("ModifierSet", .timeLimit(.minutes(2)))
 struct ModifierSetTests {
     /// The four modifiers Carbon can register: each with its `NSEvent.ModifierFlags` raw value and its Carbon mask
     /// (`shiftKey` 512, `cmdKey` 256, `optionKey` 2048, `controlKey` 4096).

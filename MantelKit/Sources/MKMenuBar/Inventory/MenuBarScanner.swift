@@ -143,11 +143,14 @@ public actor MenuBarScanner {
     ///   - layout: the displays as they are now.
     ///   - ownBundleID: Mantel's, so that its own items are marked.
     ///   - isTrusted: whether Accessibility is granted now. It is asked on every scan.
+    ///   - readLimit: how many blocking reads run at once: when nil, as many as this Mac's processors allow (`ReadConcurrency`). A test
+    ///     gives its own, so that what it asserts doesn't depend on the machine that runs it.
     public init(ax: any AXReading, runningApps: @escaping @Sendable () -> [RunningApp], layout: @escaping @Sendable () -> DisplayLayout,
-                ownBundleID: String, isTrusted: @escaping @Sendable () -> Bool, clock: any Clock = SystemClock()) {
+                ownBundleID: String, isTrusted: @escaping @Sendable () -> Bool, clock: any Clock = SystemClock(),
+                readLimit: Int? = nil) {
         let reader = AppExtrasReader(ax: ax)
         self.init(ax: ax, extrasReader: AXAppExtrasReader(reader: reader), elementReader: reader, runningApps: runningApps, layout: layout,
-                  ownBundleID: ownBundleID, isTrusted: isTrusted, clock: clock)
+                  ownBundleID: ownBundleID, isTrusted: isTrusted, clock: clock, readLimit: readLimit ?? MenuBarReader.concurrency)
     }
 
     init(ax: any AXReading, extrasReader: any AppExtrasReading, elementReader: AppExtrasReader? = nil,

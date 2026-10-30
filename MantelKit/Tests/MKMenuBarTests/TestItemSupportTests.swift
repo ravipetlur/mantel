@@ -6,7 +6,7 @@ import Testing
 
 @testable import MKMenuBar
 
-@Suite("Test item support")
+@Suite("Test item support", .timeLimit(.minutes(2)))
 struct TestItemSupportTests {
     // MARK: Names
 
