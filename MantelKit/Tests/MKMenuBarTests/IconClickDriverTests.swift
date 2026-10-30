@@ -165,11 +165,14 @@ private struct Rig {
     }
 
     /// Moves the driver's clock on by 50 ms each time something sleeps on it, until `done` is on. The session's clock goes on with it: a plan
-    /// that is applied is drawn some time later, on the one clock a real click has.
+    /// that is applied is drawn some time later, on the one clock a real click has. The driver's other tasks are given their turns before each
+    /// step: on a slow machine the clock would otherwise move past a wait (the time a press is given) before a task that was ready to answer
+    /// (the watch for a menu) had run.
     func pump(until done: Switch, sessionMoves: Bool = true) async -> Bool? {
         let clock = clock, sessionClock = world.clock
         return await withinTimeLimit(.seconds(10)) {
             while !done.isOn, !Task.isCancelled {
+                await letTasksRun(turns: 100)
                 if await clock.waitForSleepers(1, within: .milliseconds(5)) {
                     clock.advance(by: .milliseconds(50))
                     if sessionMoves { sessionClock.advance(by: .milliseconds(50)) }
