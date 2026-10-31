@@ -72,6 +72,19 @@ struct MenuBarSessionLifecycleTests {
         return (rig, engine, log)
     }
 
+    /// Runs `body` while the clock is moved on 100 ms every time the session is waiting on it, until `body` is done.
+    private func driven(_ rig: SessionRig, _ body: @escaping @Sendable () async -> Void) async -> Bool {
+        let finished = Switch(false)
+        let work = Task {
+            await body()
+            finished.set(true)
+        }
+        let ended = await rig.driveClock { finished.isOn }
+        // A body that isn't done after the clock's time is a failure, not a wait for ever.
+        if ended { await work.value }
+        return ended
+    }
+
     // MARK: Reset
 
     @Test func resetTearsDownReplaysRestartsAndReapplies() async throws {
@@ -128,6 +141,23 @@ struct MenuBarSessionLifecycleTests {
         await rig.session.refresh()
         #expect(rig.world.concealed == [weather, notes])
         #expect(allowlist.live == 1)
+    }
+
+    @Test func resetGoesOnWhenTheAgentStaysSilentForFiveSeconds() async throws {
+        let (rig, engine, log) = await started()
+        let applied = engine.applied.count
+        let restarter = FakeRestarter(log: log)
+        restarter.whileRestarting { rig.world.setAgentRunning(false) }
+        let began = rig.clock.now()
+
+        let done = await driven(rig) {
+            try? await rig.session.reset(restarter: restarter, replayJournal: {})
+        }
+
+        #expect(done)
+        #expect(rig.clock.now().timeIntervalSince(began) >= 5, "five seconds of waiting, at the least")
+        #expect(engine.applied.count > applied, "hiding is tried anyway")
+        #expect(await rig.session.isResetting == false)
     }
 
     // MARK: A reset that a refresh could undo

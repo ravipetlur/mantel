@@ -146,4 +146,27 @@ struct PatientAXTests {
     }
 
     // MARK: A scope's time
+
+    @Test func theTimeAGateTurnTakesIsNotChargedToAReadThatExcusesIt() {
+        let clock = FakeClock()
+        let excusing = AXReadScope(budget: 4, perAppBudget: 4, clock: clock, excusesGateWait: true)
+        let counting = AXReadScope(budget: 4, perAppBudget: 4, clock: clock)
+        let queuedA = excusing.gateWaitBegan()
+        let queuedB = counting.gateWaitBegan()
+        clock.advance(by: .seconds(3))
+        excusing.gateWaitEnded(since: queuedA)
+        counting.gateWaitEnded(since: queuedB)
+
+        #expect(abs(excusing.timeLeft - 4) < 0.001, "its time starts when it gets its turn")
+        #expect(abs(counting.timeLeft - 1) < 0.001, "a scan's time is all of it")
+    }
+
+    @Test func readsLeaveThreadsFreeForWhatMustRun() {
+        #expect(ReadConcurrency.limit(processors: 8) == 4)
+        #expect(ReadConcurrency.limit(processors: 12) == 8)
+        #expect(ReadConcurrency.limit(processors: 4) == 2, "a small machine: half, so that the reads never take every thread")
+        #expect(ReadConcurrency.limit(processors: 3) == 1)
+        #expect(ReadConcurrency.limit(processors: 1) == 1, "at least one")
+        #expect(ReadConcurrency.limit(processors: 32) == 8, "never more than eight")
+    }
 }

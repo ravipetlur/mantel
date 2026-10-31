@@ -233,6 +233,61 @@ struct MenuBarSessionLayoutTests {
         #expect(world.phases.count == 0)
     }
 
+    @Test func newAppsWhileRunningAtPlacedMarkerRequestWrite() async throws {
+        var model = sections(shown: [weather, notes, vpn, sync])
+        model.setNewItemsMarker(section: .shown, index: 1)
+        let world = await started(sections: model)
+        #expect(world.writer.writeCount == 0)
+
+        // An app that starts while Mantel runs appears in a read.
+        world.world.setTestItemRunning(true)
+        await world.session.refresh()
+        #expect(await world.sections().apps[testItem] != nil)
+        #expect(await world.settled())
+        #expect(world.writer.writeCount == 1)
+    }
+
+    @Test func newAppsWithoutPlacedMarkerRequestNoWrite() async throws {
+        let world = await started()
+        #expect(await world.sections().newItemsIndex == nil)
+        world.world.setTestItemRunning(true)
+        await world.session.refresh()
+        #expect(await world.sections().apps[testItem] != nil, "it was placed")
+        #expect(await world.applier.status().isPending == false, "no write was asked for")
+        #expect(await world.session.layoutIsPending == false)
+        for _ in 0..<20 { world.rig.clock.advance(by: .milliseconds(250)) }
+        #expect(world.writer.writeCount == 0)
+        #expect(world.phases.count == 0)
+    }
+
+    @Test func aChangeOfTheDotsPlacementOrTheDividerRequestsAWrite() async throws {
+        // No wait for the bar: this is about what asks for a write, and a bar that still shows the old order would be written again.
+        var offered = F.rules(.autosaveIndex(prefix: "Item-"), wait: .zero)
+        offered.dotsPlacementOffered = true
+        let world = await started(rules: offered)
+        world.writer.table = fullTable()
+        var settings = LayoutSettings()
+        settings.dotsPlacement = .besideClock
+        await world.session.setLayout(world.applier, rules: offered, settings: settings, dots: DotSettings())
+        #expect(await world.settled())
+        #expect(world.writer.writeCount == 1)
+        #expect(world.writer.writes[0].arrangement.tokens.last == .dot(.hidden), "beside the clock: the dots are last")
+
+        var dots = DotSettings()
+        dots.showsDivider = true
+        await world.session.setLayout(world.applier, rules: offered, settings: settings, dots: dots)
+        #expect(await world.settled())
+        #expect(world.writer.writeCount == 2)
+        #expect(world.writer.writes[1].arrangement.tokens.contains(.divider))
+
+        // The same settings again, and a dots' setting that only hides them, are not changes of the arrangement.
+        var hidden = dots
+        hidden.hideBothDots = true
+        await world.session.setLayout(world.applier, rules: offered, settings: settings, dots: hidden)
+        for _ in 0..<20 { world.rig.clock.advance(by: .milliseconds(250)) }
+        #expect(world.writer.writeCount == 2)
+    }
+
     // MARK: ⌘-drags
 
     /// The notes app dragged from the right of • to its left (Hidden's side), as macOS draws it.
@@ -477,6 +532,41 @@ struct MenuBarSessionLayoutTests {
         await flushing.value
         #expect(flushed.withLock { $0 }, "the quit goes on at the limit: the change is dropped and logged")
         #expect(MenuBarSession.quitLayoutLimit < QuitTimer.base)
+    }
+
+    @Test func aFlushThatTheLimitPassesBeforeItsWriteIsNotWrittenLater() async throws {
+        let world = await started()
+        await world.session.move(app: notes, to: .hidden)
+        // The flush is still working out what to write (it reads the table) when the limit passes.
+        let gate = Gate()
+        world.writer.holdReads(at: gate)
+        defer { gate.open() }
+
+        let session = world.session
+        let flushed = Mutex(false)
+        let flushing = Task {
+            await session.flushLayoutForQuit()
+            flushed.withLock { $0 = true }
+        }
+        #expect(await waitUntil { world.writer.readsHeld == 1 })
+        let limitPassed = await withinTimeLimit(.seconds(10)) {
+            while !flushed.withLock({ $0 }), !Task.isCancelled {
+                world.rig.clock.advance(by: MenuBarSession.quitLayoutLimit)
+                await Task.yield()
+            }
+            return true
+        }
+        #expect(limitPassed == true, "the quit goes on at the limit")
+        await flushing.value
+
+        // The flush goes on after the limit and finds it was abandoned: it never writes.
+        gate.open()
+        let ended = await withinTimeLimit(.seconds(5)) {
+            while await world.applier.abandonQuitFlush() != .finished, !Task.isCancelled { await Task.yield() }
+            return true
+        }
+        #expect(ended == true, "the flush ends")
+        #expect(world.writer.writeCount == 0, "a write that hadn't begun at the limit isn't begun after it")
     }
 
     // MARK: Restoring and resetting

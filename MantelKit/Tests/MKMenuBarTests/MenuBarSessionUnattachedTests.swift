@@ -115,6 +115,26 @@ struct MenuBarSessionUnattachedTests {
         #expect(await world.flagged == [notes])
     }
 
+    @Test func notFlaggedWhileAnOrderWriteIsPendingOrSettling() async throws {
+        var world = await started(switches: .broken("not set up"))
+        let rig = world.rig
+
+        // The order table is being written, then the bar is being re-sorted: what the reads show is the bar in motion, and is no evidence.
+        await rig.session.setLayoutPhase(pending: true, settling: false)
+        #expect(await poll(&world, 3))
+        #expect(await world.flagged.isEmpty)
+        await rig.session.setLayoutPhase(pending: true, settling: true)
+        #expect(await poll(&world, 3))
+        #expect(await world.flagged.isEmpty)
+
+        // Once it is over, the first read is the first of a run, and the second flags.
+        await rig.session.setLayoutPhase(pending: false, settling: false)
+        #expect(await poll(&world))
+        #expect(await world.flagged.isEmpty)
+        #expect(await poll(&world))
+        #expect(await world.flagged == [notes])
+    }
+
     // MARK: Switching
 
     /// Flags the notes app (two reads, 10 seconds apart, with the allowlist live through both).

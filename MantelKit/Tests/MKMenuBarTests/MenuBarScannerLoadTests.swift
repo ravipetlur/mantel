@@ -78,6 +78,26 @@ struct MenuBarScannerLoadTests {
 
     // MARK: MenuBarAgent that is late
 
+    @Test func theAgentsReadsTakeTheirTurnsAtTheGateLikeTheApps() async throws {
+        let rig = Rig(patient: true)
+        let agent = rig.pid(MenuBarReader.menuBarAgentBundleID)
+        let scanner = rig.scanner
+        rig.slow.hang(agent)
+        // No scan has run, so no app is read: what holds a turn at the gate while MenuBarAgent is asked is MenuBarAgent's read.
+        let held = Mutex<[Int]>([])
+        rig.slow.onTimeout { held.withLock { $0.append(scanner.readGateCounts.running) } }
+
+        _ = await scanner.lookAtBar()
+        let byTheLook = held.withLock { $0 }
+        held.withLock { $0 = [] }
+        _ = await scanner.slotSnapshot(on: nil)
+        let byTheSnapshot = held.withLock { $0 }
+
+        #expect(!byTheLook.isEmpty && byTheLook.allSatisfy { $0 == 1 }, "the look holds a turn while it waits: \(byTheLook)")
+        #expect(!byTheSnapshot.isEmpty && byTheSnapshot.allSatisfy { $0 == 1 }, "so does the bar's read for a click: \(byTheSnapshot)")
+        #expect(scanner.readGateCounts == (0, 0), "and the turn is given back")
+    }
+
     // MARK: One app that hangs, on a Mac that isn't busy
 
     @Test func oneAppThatHangsCostsAClickOnAnotherAppsIconAQuarterOfASecondAndNotItsLadder() async throws {

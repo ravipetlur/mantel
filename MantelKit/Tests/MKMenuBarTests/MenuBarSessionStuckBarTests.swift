@@ -278,6 +278,86 @@ struct MenuBarSessionStuckBarTests {
         #expect(await pollUntilRestarted(&world, 2, polls: 6))
     }
 
+    // MARK: The limits
+
+    enum Limit: String, CaseIterable, Sendable, CustomTestStringConvertible {
+        case appReset, sessionReset, pendingWrite, settlingWrite, locked, asleep
+
+        var testDescription: String { rawValue }
+    }
+
+    /// Puts the condition in place, and takes it away.
+    private func begin(_ limit: Limit, _ world: World) async {
+        let session = world.rig.session
+        switch limit {
+        case .appReset: #expect(world.activity.begin())
+        case .sessionReset: break
+        case .pendingWrite: await session.setLayoutPhase(pending: true, settling: false)
+        case .settlingWrite: await session.setLayoutPhase(pending: true, settling: true)
+        case .locked: await session.sessionChanged(.screenLocked(true))
+        case .asleep: await session.sessionChanged(.displaysAsleep(true))
+        }
+    }
+
+    private func end(_ limit: Limit, _ world: World) async {
+        let session = world.rig.session
+        switch limit {
+        case .appReset: world.activity.end()
+        case .sessionReset: break
+        case .pendingWrite, .settlingWrite: await session.setLayoutPhase(pending: false, settling: false)
+        case .locked: await session.sessionChanged(.screenLocked(false))
+        case .asleep: await session.sessionChanged(.displaysAsleep(false))
+        }
+    }
+
+    @Test(arguments: Limit.allCases) func noRecoveryWhile(_ limit: Limit) async throws {
+        var world = await started()
+        let rig = world.rig
+        #expect(await poll(&world, 2))
+        await changeDisplays(&world)
+        rig.world.setUnattached([vpn, sync])
+
+        // A session's own reset: held at its restart.
+        let gate = Gate()
+        let resetRestarter = FakeRestarter(log: world.log)
+        var reset: Task<ResetOutcome, Never>?
+        if limit == .sessionReset {
+            resetRestarter.whileRestarting { await gate.wait() }
+            reset = Task { await rig.session.resetIfIdle(restarter: resetRestarter, replayJournal: {}) }
+            #expect(await waitUntil { resetRestarter.restarts == 1 })
+        } else {
+            await begin(limit, world)
+        }
+        #expect(await poll(&world, 4))
+        // A recovery that was decided is on a task: it is over before it is said that nothing was restarted.
+        #expect(await finishRecovery(&world))
+        #expect(world.restarter.restarts == 0, "\(limit.rawValue)")
+        if limit == .appReset {
+            #expect(await rig.session.stuckRecoveriesDecided >= 1, "the recovery was decided and couldn't begin")
+        }
+
+        if let reset {
+            gate.open()
+            #expect(await reset.value == .done)
+        } else {
+            await end(limit, world)
+        }
+        // Once it is over, the pattern is found again and the bar restarted (a lock or a sleep that ends is a wake: the run starts again).
+        world.reads = await rig.session.scansIngested
+        if limit == .sessionReset {
+            #expect(await poll(&world, 4))
+            #expect(world.restarter.restarts == 0, "a reset is its own restart, and with no change after it there is nothing to judge")
+        } else if limit == .appReset {
+            // A recovery that couldn't begin ends the run of looks: the first look after it is the first of two, not a decision.
+            #expect(await poll(&world))
+            #expect(await finishRecovery(&world))
+            #expect(world.restarter.restarts == 0, "one look after a recovery that couldn't begin isn't two in a row")
+            #expect(await pollUntilRestarted(&world, polls: 3), "\(limit.rawValue)")
+        } else {
+            #expect(await pollUntilRestarted(&world, polls: 6), "\(limit.rawValue)")
+        }
+    }
+
     // MARK: Interruptions
 
     enum Interruption: String, CaseIterable, Sendable, CustomTestStringConvertible {
