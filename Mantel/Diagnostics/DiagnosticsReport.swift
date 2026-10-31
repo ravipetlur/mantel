@@ -53,7 +53,7 @@ enum DiagnosticsReport {
     /// under the checks. The copied report and `mantel diagnostics` have no button, and carry the message alone.
     /// `names` are what the pane calls the apps by; the report has none, and names them by their bundle ID.
     static func liveRows(state: MenuBarState?, forPane: Bool = false, names: [String: String] = [:]) -> [DiagnosticsRow] {
-        let method = DiagnosticsRow(kind: .hidingMethod, check: HidingDiagnostics.hidingMethodCheck(state?.engine))
+        let method = DiagnosticsRow(kind: .hidingMethod, check: HidingDiagnostics.hidingMethodCheck(state?.engine, mediaUse: state?.mediaUse))
         let menuBar = HidingDiagnostics.menuBarChecks(state?.inventory, suggestingRefresh: forPane).enumerated().map { index, check in
             DiagnosticsRow(kind: .menuBar, check: check, index: index)
         }

@@ -174,7 +174,8 @@ final class MenuBarController: MenuBarCommanding {
                 await store.save(document)
             },
             turnedOff: { await approvals.turnedOff() }, settings: hidingSettings, ownBundleID: ownBundleID, clock: SystemClock(),
-            windows: LiveWindowList(), sessionState: LiveSessionState(), recordsChecked: recordsChecked)
+            windows: LiveWindowList(), sessionState: LiveSessionState(),
+            mediaUse: MediaUseTracker(readers: LiveMediaReaders.all(), clock: SystemClock()), recordsChecked: recordsChecked)
         self.session = session
         sessionLink.session = session
 

@@ -5,9 +5,10 @@ import MKCore
 public struct EngineChoiceInputs: Sendable, Equatable {
     /// What the person chose in Settings › Advanced.
     public var method: HidingMethodChoice
-    /// A call is going on. (False until Mantel knows about calls.)
+    /// The mic or camera is in use (`MediaUse.isInUse`), by a call or by anything else. Named for calls, where it began.
     public var callActive: Bool
-    /// The person asked for the microphone indicator to stay visible during calls. (False until Mantel knows about calls.)
+    /// The person asked for macOS's mic and camera indicators to stay visible while the mic or camera is in use
+    /// (`HidingSettings.keepMicVisibleDuringCalls`).
     public var keepMicVisibleDuringCalls: Bool
     public var availability: [HidingEngineKind: EngineAvailability]
     /// The engines that threw three times in a row and are not tried again until Refresh or the next launch.
@@ -44,11 +45,15 @@ public struct EngineChoice: Sendable, Equatable {
 
     static let chosenInAdvanced = "Chosen in Settings › Advanced."
 
+    /// Why the switches are used while the mic or camera is in use: the allowlist would hide macOS's orange and green indicators, and the
+    /// switches leave them alone. It names no device: the reasons go into the copied report.
+    static let mediaReason = "The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible."
+
     /// The first row of this table that applies decides:
     ///
     /// | Situation | Engine |
     /// |---|---|
-    /// | a call is active, the mic indicator is to stay visible, and the switches can be used | System Settings switches |
+    /// | the mic or camera is in use, its indicator is to stay visible, and the switches can be used | System Settings switches |
     /// | automatic, an app in Shown has an icon macOS doesn't tie to it, and the switches can be used | System Settings switches |
     /// | the person chose System Settings switches | System Settings switches |
     /// | the wide spacer (no longer offered in Settings, and never read from a saved file) | Wide spacer |
@@ -65,7 +70,7 @@ public struct EngineChoice: Sendable, Equatable {
     /// If nothing in the chain can be used, the spacer stays in charge and Mantel keeps trying it.
     public static func decide(_ inputs: EngineChoiceInputs) -> EngineChoice {
         if inputs.callActive, inputs.keepMicVisibleDuringCalls, usable(.approvals, inputs) {
-            return EngineChoice(kind: .approvals, reason: "A call is active, so the mic indicator stays visible.")
+            return EngineChoice(kind: .approvals, reason: mediaReason)
         }
         if inputs.method == .automatic, !inputs.unattachedShownApps.isEmpty, usable(.approvals, inputs) {
             return EngineChoice(kind: .approvals, reason: unattachedReason(count: inputs.unattachedShownApps.count))
@@ -132,6 +137,12 @@ public struct EngineStatus: Sendable, Equatable, Codable {
     /// taken down. While a switch is under way it is still the method before, so Settings can say that one is under way. Nil before the
     /// first choice, and for a status written before this was kept.
     public let decidedFor: HidingMethodChoice?
+
+    /// Whether the engine can't be used because Mantel needs something the person has to give (the file the switches work on), which
+    /// the person can do something about; not for one that is broken or that nothing was said of.
+    public func needsPermission(_ kind: HidingEngineKind) -> Bool {
+        availability[kind]?.hasPrefix(EngineAvailability.needsPermissionPrefix) == true
+    }
 
     public init(kind: HidingEngineKind, reason: String, degraded: Bool, availability: [HidingEngineKind: String], lastError: String?,
                 unavailableReasons: [HidingEngineKind: String] = [:], decidedFor: HidingMethodChoice? = nil) {

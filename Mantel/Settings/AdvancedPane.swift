@@ -57,6 +57,7 @@ struct AdvancedPane: View {
             if let nowUsing = presentation.nowUsing {
                 nowUsingLine(nowUsing, switching: presentation.switching)
             }
+            micIndicatorRow(hiding: hiding, engine: engine)
             SettingsToggle("Allow hiding the clock and Control Center", isOn: Binding(
                 get: { hiding.allowHidingClockAndControlCenter },
                 set: { allowed in
@@ -71,6 +72,34 @@ struct AdvancedPane: View {
             Text("Hiding")
         } footer: {
             Text("Some system controls, like the volume pop-up, can stop working while these are hidden.")
+        }
+    }
+
+    /// "Keep the mic and camera indicator visible while they're in use", with the line under it. It needs the file the switches work on:
+    /// without it the switch is dimmed, the line says so, and the button has the person choose the file (the one Settings › Permissions
+    /// has, and what depends on it is asked again once it is kept).
+    private func micIndicatorRow(hiding: HidingSettings, engine: EngineStatus?) -> some View {
+        let row = AdvancedCopy.micIndicator(engine: engine)
+        return VStack(alignment: .leading, spacing: 4) {
+            SettingsToggle(AdvancedCopy.micIndicatorTitle, isOn: Binding(
+                get: { hiding.keepMicVisibleDuringCalls },
+                set: { value in coordinator.updateGeneralSettings { $0.hiding.keepMicVisibleDuringCalls = value } }))
+                .disabled(!row.isEnabled)
+            Text(row.caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if row.offersGrant {
+                Button(AdvancedCopy.grantButton, action: grantApprovalsFile)
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func grantApprovalsFile() {
+        let grants = coordinator.grants
+        Task {
+            if await FileGrantPanel.choose(.controlCenterApprovals, grants: grants) { coordinator.permissionsChanged() }
         }
     }
 

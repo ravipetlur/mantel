@@ -30,10 +30,13 @@ public struct MenuBarState: Sendable, Equatable {
     /// The icons each running app had in its last whole read in this run. The sections can hold more records of an app than it has icons
     /// (`SectionModel.staleRecords`): what lists icons shows these.
     public let currentIDs: [String: Set<ItemID>]
+    /// Whether the mic or camera is in use, as the session was last told (steadied: `MediaUseTracker`).
+    public let mediaUse: MediaUse
 
     public init(inventory: Inventory, sections: SectionModel, lists: ReadOnlyLists, plan: VisibilityPlan, engine: EngineStatus,
                 alwaysHiddenHasApps: Bool, widths: ItemWidthCache = ItemWidthCache(), unattachedApps: Set<String> = [],
-                layout: LayoutStatus? = nil, stuckBarNotRecovered: Bool = false, currentIDs: [String: Set<ItemID>] = [:]) {
+                layout: LayoutStatus? = nil, stuckBarNotRecovered: Bool = false, currentIDs: [String: Set<ItemID>] = [:],
+                mediaUse: MediaUse = .idle) {
         self.inventory = inventory
         self.sections = sections
         self.lists = lists
@@ -45,6 +48,7 @@ public struct MenuBarState: Sendable, Equatable {
         self.layout = layout
         self.stuckBarNotRecovered = stuckBarNotRecovered
         self.currentIDs = currentIDs
+        self.mediaUse = mediaUse
     }
 
     /// The records the places that list icons leave out.
@@ -372,6 +376,14 @@ public actor MenuBarSession {
     private(set) var sessionNow: SessionState = .awake
     /// What passes the changes of `sessionState` on to `sessionChanged`. Ended by quitting.
     private var sessionTask: Task<Void, Never>?
+
+    // Whether the mic or camera is in use: while it is, the system's indicators are kept visible by hiding with the switches.
+    /// Where the use of the mic and camera comes from.
+    private let media: any MediaUseSource
+    /// The use as the session was last told. (Readable by the tests of the session.)
+    private(set) var mediaUse: MediaUse = .idle
+    /// What passes the changes of `media` on to `mediaUseChanged`. Ended by quitting.
+    private var mediaTask: Task<Void, Never>?
     /// What the log has said about auto-refresh, the last hundred lines: each refresh, and the state of the session going from awake to
     /// held back and back. (Readable by the tests of the session.)
     private(set) var autoRefreshLogLines: [String] = []
@@ -445,6 +457,8 @@ public actor MenuBarSession {
     ///     happen, and never fails anything.
     ///   - sessionState: whether the displays are asleep, the screen is locked or another user's session is on screen, which hold
     ///     auto-refresh back. Steady (always awake) unless the app gives the system's.
+    ///   - mediaUse: whether the mic or camera is in use, which keeps the engine on the switches while it is (when the person asked for
+    ///     that). Never in use unless the app gives the system's.
     ///   - recordsChecked: what moves the settings (shortcuts, names) of the icons whose records the check of an app's saved icons took
     ///     out. It moves nothing unless the app gives it.
     public init(scanner: MenuBarScanner, hiding: HidingController, runningApps: @escaping @Sendable () -> [RunningApp],
@@ -453,6 +467,7 @@ public actor MenuBarSession {
                 turnedOff: @escaping @Sendable () async -> TurnedOffList,
                 settings: HidingSettings, ownBundleID: String, clock: any Clock, windows: any WindowListReading,
                 confirmationWait: Duration = .seconds(2), sessionState: any SessionStateSource = SteadySessionState(),
+                mediaUse: any MediaUseSource = IdleMediaUse(),
                 recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved = { _, _ in SettingsMoved() }) {
         self.scanner = scanner
         self.hiding = hiding
@@ -466,12 +481,14 @@ public actor MenuBarSession {
         self.windows = windows
         self.confirmationWait = confirmationWait
         self.sessionState = sessionState
+        media = mediaUse
         self.recordsChecked = recordsChecked
     }
 
     deinit {
         periodicTask?.cancel()
         sessionTask?.cancel()
+        mediaTask?.cancel()
         if let scheduler { Task { await scheduler.stop() } }
         for continuation in subscribers.values { continuation.finish() }
     }
@@ -491,6 +508,8 @@ public actor MenuBarSession {
         isReadingAtLaunch = true
         launchBeganAt = clock.now()
         startWatchingTheSession()
+        // Before the engine is chosen: a launch in the middle of a call starts on the switches, and doesn't switch to them a moment later.
+        await startWatchingMedia()
         knownLayout = await scanner.currentLayout()
         sections = await loadSections()
         revealState = .collapsed
@@ -646,6 +665,42 @@ public actor MenuBarSession {
         Log.info("session", line)
         autoRefreshLogLines.append(line)
         if autoRefreshLogLines.count > 100 { autoRefreshLogLines.removeFirst(autoRefreshLogLines.count - 100) }
+    }
+
+    // MARK: While the mic or camera is in use
+
+    /// Takes the use of the mic and camera as it is, and has the changes that come passed on to `mediaUseChanged`. The changes are asked for
+    /// before the use, so that none falls between the two.
+    private func startWatchingMedia() async {
+        guard !isQuitting else { return }
+        let changes = await media.changes()
+        let now = await media.current()
+        guard !isQuitting else { return }
+        mediaUse = now
+        mediaTask = Task { [weak self] in
+            for await use in changes {
+                await self?.mediaUseChanged(use)
+            }
+        }
+    }
+
+    /// The mic or camera started or stopped being in use (a use that has been steadied: a pause in a call isn't a change).
+    ///
+    /// The engine is chosen again when it is something the choice goes by: the person asked for the indicators to stay visible, and the
+    /// answer to "is either in use" is not what it was. A change among the devices that are in use, with one still in use, and a
+    /// change while the person's setting is off, choose nothing: they would come out as before. Not while a reset is under way (it
+    /// chooses when it is done, from the use as it is then) or once quitting has begun.
+    func mediaUseChanged(_ use: MediaUse) async {
+        guard !isQuitting else { return }
+        let before = mediaUse
+        mediaUse = use
+        guard before.isInUse != use.isInUse, settings.keepMicVisibleDuringCalls, mayChangeEngines(forReset: false) else {
+            if before != use { publish() }
+            return
+        }
+        await chooseEngine()
+        guard !isQuitting else { return }
+        publish()
     }
 
     // MARK: Revealing
@@ -916,8 +971,9 @@ public actor MenuBarSession {
     public func setSettings(_ new: HidingSettings) async {
         let old = settings
         settings = new
-        // A reset makes the choice again when it is done, from the settings as they are then.
-        if old.method != new.method, !resetting { await chooseEngine() }
+        // A reset makes the choice again when it is done, from the settings as they are then. The choice goes by the method and by whether the
+        // indicators are to be kept visible while the mic or camera is in use.
+        if old.method != new.method || old.keepMicVisibleDuringCalls != new.keepMicVisibleDuringCalls, !resetting { await chooseEngine() }
         await rebuildAndApply()
     }
 
@@ -1164,6 +1220,8 @@ public actor MenuBarSession {
         periodicTask = nil
         sessionTask?.cancel()
         sessionTask = nil
+        mediaTask?.cancel()
+        mediaTask = nil
         layoutStatusTask?.cancel()
         layoutStatusTask = nil
         layoutFollowWaits = false
@@ -1197,9 +1255,13 @@ public actor MenuBarSession {
         // The epoch is read now, with the guard just passed: a teardown (a reset's, or the quit's) that comes before the call gets to the
         // controller makes it a choice of the time before, and it is dropped there.
         let hiding = hiding, method = settings.method, epoch = hiding.epoch
+        let inUse = mediaUse.isInUse, keepVisible = settings.keepMicVisibleDuringCalls
         let unattachedShown = unattached.forAutomatic(sections: sections)
         toldAutomatic = unattachedShown
-        await Task { await hiding.choose(method: method, unattachedShownApps: unattachedShown, expectedEpoch: epoch) }.value
+        await Task {
+            await hiding.choose(method: method, callActive: inUse, keepMicVisibleDuringCalls: keepVisible,
+                                unattachedShownApps: unattachedShown, expectedEpoch: epoch)
+        }.value
         switchesUnderway -= 1
         noteBarChange("the way of hiding was chosen")
         // Before the first plan was applied a switch has changed nothing on the bar, and the first read stays the one that judges nothing.
@@ -1961,7 +2023,7 @@ public actor MenuBarSession {
                                       unresolved: layoutUnresolved),
             plan: currentPlan, engine: lastStatus, alwaysHiddenHasApps: alwaysHiddenHasApps(), widths: widths,
             unattachedApps: unattached.flagged.intersection(runningBundleIDs()), layout: layoutStatus,
-            stuckBarNotRecovered: stuckWatch.didntHelp, currentIDs: currentIDs)
+            stuckBarNotRecovered: stuckWatch.didntHelp, currentIDs: currentIDs, mediaUse: mediaUse)
         guard state != lastPublished else { return }
         lastPublished = state
         for continuation in subscribers.values { continuation.yield(state) }

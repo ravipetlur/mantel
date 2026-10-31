@@ -233,9 +233,9 @@ struct DotsCopyTests {
         #expect(DotsCopy.tooltip(for: status) == "Hiding with Allowlist. Chosen automatically: macOS's allowlist works.")
         let spacer = EngineStatus(kind: .spacer, reason: "Chosen in Settings › Advanced.", degraded: true, availability: [:], lastError: nil)
         #expect(DotsCopy.tooltip(for: spacer) == "Hiding with Wide spacer. Chosen in Settings › Advanced.")
-        let switches = EngineStatus(kind: .approvals, reason: "A call is active, so the mic indicator stays visible.", degraded: false,
+        let switches = EngineStatus(kind: .approvals, reason: "The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible.", degraded: false,
                                     availability: [:], lastError: nil)
-        #expect(DotsCopy.tooltip(for: switches) == "Hiding with System Settings switches. A call is active, so the mic indicator stays visible.")
+        #expect(DotsCopy.tooltip(for: switches) == "Hiding with System Settings switches. The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible.")
     }
 
     @Test func theMenuUsesTitleCase() {

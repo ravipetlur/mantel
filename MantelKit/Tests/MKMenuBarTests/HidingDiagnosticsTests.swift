@@ -30,6 +30,24 @@ struct HidingDiagnosticsTests {
         #expect(check.status == .problem)
     }
 
+    @Test func theHidingMethodRowEndsWithWhetherTheMicOrCameraIsInUseAndNamesNoDevice() {
+        let engine = status(kind: .approvals, reason: EngineChoice.mediaReason)
+        let mic = MediaUse([.mic: ["Sam's Headset"]])
+        let inUse = HidingDiagnostics.hidingMethodCheck(engine, mediaUse: mic)
+        #expect(inUse.status == .ok)
+        #expect(inUse.detail == "System Settings switches. \(EngineChoice.mediaReason) The mic is in use.", "the reason says why, and the line says what")
+        #expect(!inUse.detail.contains("Headset"), "the copied report is shared: no device is named")
+
+        let idle = HidingDiagnostics.hidingMethodCheck(status(), mediaUse: .idle)
+        #expect(idle.detail == "Allowlist. Chosen automatically: macOS's allowlist works. Neither the mic nor the camera is in use.")
+
+        // Without the use there is nothing more to say, as before; and the line is on a row that is a problem or a warning too.
+        #expect(HidingDiagnostics.hidingMethodCheck(status()).detail == "Allowlist. Chosen automatically: macOS's allowlist works.")
+        let failed = HidingDiagnostics.hidingMethodCheck(status(lastError: "The allowlist couldn't hide icons."), mediaUse: mic)
+        #expect(failed.status == .problem)
+        #expect(failed.detail == "The allowlist couldn't hide icons. Mantel is showing everything. The mic is in use.")
+    }
+
     // MARK: Menu bar
 
     @Test func noSuggestionForAProblemRefreshCannotFixOrAlreadyAdvises() {

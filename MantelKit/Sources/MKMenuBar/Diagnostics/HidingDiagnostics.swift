@@ -50,17 +50,21 @@ public enum HidingDiagnostics {
     /// - A plan that couldn't be applied is a problem, and the row says that everything is shown.
     /// - The wide spacer is a warning: it only hides what is left of its divider.
     /// - Anything else is fine.
-    public static func hidingMethodCheck(_ engine: EngineStatus?) -> DiagnosticsCheck {
+    ///
+    /// When `mediaUse` is given, the row ends with whether the mic or camera is in use (`MediaUse.diagnosticsLine`), after the reason: when the
+    /// switches are in use because of it, the reason says so (`EngineChoice.mediaReason`). No device is named.
+    public static func hidingMethodCheck(_ engine: EngineStatus?, mediaUse: MediaUse? = nil) -> DiagnosticsCheck {
         let title = "Hiding method"
         guard let engine else { return DiagnosticsCheck(title: title, status: .unknown, detail: notReadYet) }
+        let media = mediaUse.map { " \($0.diagnosticsLine)" } ?? ""
         if let error = engine.lastError {
-            return DiagnosticsCheck(title: title, status: .problem, detail: "\(sentenceEnd(error)) Mantel is showing everything.")
+            return DiagnosticsCheck(title: title, status: .problem, detail: "\(sentenceEnd(error)) Mantel is showing everything.\(media)")
         }
         if engine.degraded {
             return DiagnosticsCheck(title: title, status: .warning,
-                                    detail: "\(engine.kind.title) (degraded): only icons left of the divider are hidden. \(engine.reason)")
+                                    detail: "\(engine.kind.title) (degraded): only icons left of the divider are hidden. \(engine.reason)\(media)")
         }
-        return DiagnosticsCheck(title: title, status: .ok, detail: "\(engine.kind.title). \(engine.reason)")
+        return DiagnosticsCheck(title: title, status: .ok, detail: "\(engine.kind.title). \(engine.reason)\(media)")
     }
 
     /// What a problem with the read is followed by in the Diagnostics pane's row, where the Refresh menu bar button is under the checks.

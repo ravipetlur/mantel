@@ -51,6 +51,7 @@ struct MenuBarSettingsTests {
         #expect(hiding.automaticOverflow)
         #expect(!hiding.showEverythingOnWideScreens)
         #expect(hiding.wideScreenThreshold == 3000)
+        #expect(hiding.keepMicVisibleDuringCalls)
 
         let general = GeneralSettings()
         #expect(general.reveal == reveal)
@@ -127,12 +128,27 @@ struct MenuBarSettingsTests {
         #expect(try decode(HidingSettings.self, #"{"method":"systemSettingsSwitches"}"#).method == .systemSettingsSwitches)
     }
 
+    @Test func keepingTheMicIndicatorVisibleIsOnUnlessTheFileSaysOffAndIsReadLeniently() async throws {
+        #expect(try decode(HidingSettings.self, "{}").keepMicVisibleDuringCalls, "a file written before the key existed")
+        #expect(try decode(GeneralSettings.self, #"{"hiding":{"method":"systemSettingsSwitches"}}"#).hiding.keepMicVisibleDuringCalls)
+        #expect(try !decode(HidingSettings.self, #"{"keepMicVisibleDuringCalls":false}"#).keepMicVisibleDuringCalls)
+        #expect(try decode(HidingSettings.self, #"{"keepMicVisibleDuringCalls":true}"#).keepMicVisibleDuringCalls)
+
+        // Something that isn't a true or false is read as missing, and the rest of the file is read as it is.
+        let odd = try decode(HidingSettings.self, #"{"keepMicVisibleDuringCalls":"sometimes","noRoomPolicy":"swap","automaticOverflow":false}"#)
+        #expect(odd.keepMicVisibleDuringCalls)
+        #expect(odd.noRoomPolicy == .swap && !odd.automaticOverflow)
+        let whole = try decode(GeneralSettings.self, #"{"hiding":{"keepMicVisibleDuringCalls":7},"onboardingCompleted":true}"#)
+        #expect(whole.hiding.keepMicVisibleDuringCalls && whole.onboardingCompleted)
+    }
+
     @Test func generalSettingsRoundTripWithNestedValues() async throws {
         var settings = GeneralSettings(onboardingCompleted: true, settingsPage: "advanced")
         settings.reveal = RevealSettings(hoverReveals: true, clickReveals: true, scrollReveals: true, hoverDelayMilliseconds: 800,
                                          rehide: .seconds(60))
         settings.hiding = HidingSettings(method: .systemSettingsSwitches, allowHidingClockAndControlCenter: true, noRoomPolicy: .swap,
-                                         automaticOverflow: false, showEverythingOnWideScreens: true, wideScreenThreshold: 5600)
+                                         automaticOverflow: false, showEverythingOnWideScreens: true, wideScreenThreshold: 5600,
+                                         keepMicVisibleDuringCalls: false)
 
         let data = try JSONEncoder().encode(settings)
         #expect(try JSONDecoder().decode(GeneralSettings.self, from: data) == settings)

@@ -6,10 +6,10 @@ import Testing
 @Suite("No live system in tests", .timeLimit(.minutes(2)))
 struct NoLiveSystemInTestsTests {
     /// The calls that make a type that changes the person's real preferences, quits real apps or posts real clicks, and that reach the
-    /// system's preferences or notifications by themselves. Written in two parts, so that this file doesn't contain them.
+    /// system's preferences or notifications or devices by themselves. Written in two parts, so that this file doesn't contain them.
     private let forbidden = ["Live" + "Preferences(", "Live" + "AppRelauncher(", "Live" + "ClickPoster(",
                              "PreferredPositionKeys." + "count(inDomain:", "Distributed" + "NotificationCenter",
-                             "Live" + "SessionState("]
+                             "Live" + "SessionState(", "Live" + "MediaReaders", "CoreAudio" + "ProcessObjects(", "CoreMedia" + "Cameras("]
 
     @Test func noTestMakesATypeThatReachesTheRealSystem() throws {
         let tests = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

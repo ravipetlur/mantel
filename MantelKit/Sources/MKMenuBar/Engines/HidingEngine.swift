@@ -45,11 +45,14 @@ public enum EngineAvailability: Sendable, Equatable {
         }
     }
 
+    /// What `statusText` begins with for an engine that needs something given.
+    static let needsPermissionPrefix = "needs permission: "
+
     /// As Diagnostics says it: `available`, `needs permission: …` or `broken: …`.
     public var statusText: String {
         switch self {
         case .available: "available"
-        case .needsPermission(let reason): "needs permission: \(reason)"
+        case .needsPermission(let reason): "\(Self.needsPermissionPrefix)\(reason)"
         case .broken(let reason): "broken: \(reason)"
         }
     }

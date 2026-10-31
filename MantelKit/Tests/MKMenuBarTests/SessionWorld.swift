@@ -495,7 +495,7 @@ struct SessionRig {
                               sections initial: SectionModel = SectionModel(),
                               settings: HidingSettings = HidingSettings(), confirmationWait: Duration = .seconds(2),
                               trusted: Switch = Switch(true), sessionState: any SessionStateSource = SteadySessionState(),
-                              otherEngines: [HidingEngineKind: any HidingEngine] = [:],
+                              mediaUse: any MediaUseSource = IdleMediaUse(), otherEngines: [HidingEngineKind: any HidingEngine] = [:],
                               recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved = { _, _ in SettingsMoved() },
                               reading: ((SessionWorld, FakeClock) -> any AXReading)? = nil) -> SessionRig {
         let world = existing ?? SessionWorld(shape: shape, testItem: testItem, capacity: capacity, ownFirst: ownFirst, undrawn: undrawn,
@@ -513,25 +513,26 @@ struct SessionRig {
         let engines: [HidingEngineKind: any HidingEngine] = otherEngines.merging([.allowlist: engine]) { _, new in new }
         let hiding = HidingController(engines: engines, clock: clock, confirm: { _ in .seen })
         return make(world: world, clock: clock, events: events, allowlist: fake, hiding: hiding, sections: initial, settings: settings,
-                    confirmationWait: confirmationWait, trusted: trusted, sessionState: sessionState, recordsChecked: recordsChecked,
-                    reading: reading)
+                    confirmationWait: confirmationWait, trusted: trusted, sessionState: sessionState, mediaUse: mediaUse,
+                    recordsChecked: recordsChecked, reading: reading)
     }
 
     /// A session over engines that only note what they were asked, and the world in which nothing is ever concealed.
     static func withEngines(_ engines: [HidingEngineKind: any HidingEngine], shape: SessionWorld.Shape = .desk, testItem: Bool = false,
                             capacity: Int? = nil, ownFirst: Bool = false, sections initial: SectionModel = SectionModel(),
                             settings: HidingSettings = HidingSettings(), events: CallLog = CallLog(),
-                            sessionState: any SessionStateSource = SteadySessionState()) -> SessionRig {
+                            sessionState: any SessionStateSource = SteadySessionState(),
+                            mediaUse: any MediaUseSource = IdleMediaUse()) -> SessionRig {
         let world = SessionWorld(shape: shape, testItem: testItem, capacity: capacity, ownFirst: ownFirst)
         let clock = FakeClock()
         let hiding = HidingController(engines: engines, clock: clock, confirm: { _ in .seen })
         return make(world: world, clock: clock, events: events, allowlist: nil, hiding: hiding, sections: initial, settings: settings,
-                    confirmationWait: .seconds(2), trusted: Switch(true), sessionState: sessionState)
+                    confirmationWait: .seconds(2), trusted: Switch(true), sessionState: sessionState, mediaUse: mediaUse)
     }
 
     private static func make(world: SessionWorld, clock: FakeClock, events: CallLog, allowlist: FakeAllowlist?, hiding: HidingController,
                              sections initial: SectionModel, settings: HidingSettings, confirmationWait: Duration,
-                             trusted: Switch, sessionState: any SessionStateSource,
+                             trusted: Switch, sessionState: any SessionStateSource, mediaUse: any MediaUseSource,
                              recordsChecked: @escaping @Sendable (String, SectionModel.Reconciled) async -> SettingsMoved = { _, _ in SettingsMoved() },
                              reading: ((SessionWorld, FakeClock) -> any AXReading)? = nil) -> SessionRig {
         let extras = HoldableExtras(world: world)
@@ -546,7 +547,8 @@ struct SessionRig {
                                      loadSections: { initial }, saveSections: { saved.save($0) },
                                      turnedOff: { await turnedOff.answer() },
                                      settings: settings, ownBundleID: SessionWorld.own, clock: clock, windows: world.windowList,
-                                     confirmationWait: confirmationWait, sessionState: sessionState, recordsChecked: recordsChecked)
+                                     confirmationWait: confirmationWait, sessionState: sessionState, mediaUse: mediaUse,
+                                     recordsChecked: recordsChecked)
         return SessionRig(world: world, clock: clock, events: events, allowlist: allowlist, extras: extras, saved: saved,
                           turnedOff: turnedOff, hiding: hiding, session: session)
     }

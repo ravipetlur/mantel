@@ -135,6 +135,10 @@ public struct HidingSettings: Codable, Sendable, Equatable {
     public var showEverythingOnWideScreens = false
     /// Points, from 1000 to 10000 in steps of 100 (a file that says another number is read as the nearest of these).
     public var wideScreenThreshold = 3000
+    /// Whether, while the mic or camera is in use, Mantel hides icons with System Settings switches, which leave macOS's orange mic and
+    /// green camera indicators visible, and goes back to the allowlist (which hides them) once neither has been in use for a while. It
+    /// takes effect only while the switches can be used. (Named for calls, where it began; any use of the mic or camera counts.)
+    public var keepMicVisibleDuringCalls = true
 
     /// The thresholds Settings offers: 1000, 1100, … 10000.
     public static let wideScreenThresholdRange = 1000...10000
@@ -143,17 +147,20 @@ public struct HidingSettings: Codable, Sendable, Equatable {
     public init() {}
 
     public init(method: HidingMethodChoice, allowHidingClockAndControlCenter: Bool, noRoomPolicy: NoRoomPolicy,
-                automaticOverflow: Bool, showEverythingOnWideScreens: Bool, wideScreenThreshold: Int) {
+                automaticOverflow: Bool, showEverythingOnWideScreens: Bool, wideScreenThreshold: Int,
+                keepMicVisibleDuringCalls: Bool = true) {
         self.method = method
         self.allowHidingClockAndControlCenter = allowHidingClockAndControlCenter
         self.noRoomPolicy = noRoomPolicy
         self.automaticOverflow = automaticOverflow
         self.showEverythingOnWideScreens = showEverythingOnWideScreens
         self.wideScreenThreshold = wideScreenThreshold
+        self.keepMicVisibleDuringCalls = keepMicVisibleDuringCalls
     }
 
     private enum CodingKeys: String, CodingKey {
-        case method, allowHidingClockAndControlCenter, noRoomPolicy, automaticOverflow, showEverythingOnWideScreens, wideScreenThreshold
+        case method, allowHidingClockAndControlCenter, noRoomPolicy, automaticOverflow, showEverythingOnWideScreens, wideScreenThreshold,
+             keepMicVisibleDuringCalls
     }
 
     /// Said once for as long as Mantel runs, when a saved method that isn't offered any more is read as Automatic.
@@ -183,7 +190,10 @@ public struct HidingSettings: Codable, Sendable, Equatable {
                   showEverythingOnWideScreens: try container.decodeIfPresent(Bool.self, forKey: .showEverythingOnWideScreens)
                       ?? defaults.showEverythingOnWideScreens,
                   wideScreenThreshold: Self.snapped(
-                      try container.decodeIfPresent(Int.self, forKey: .wideScreenThreshold) ?? defaults.wideScreenThreshold))
+                      try container.decodeIfPresent(Int.self, forKey: .wideScreenThreshold) ?? defaults.wideScreenThreshold),
+                  // On when missing, and when it isn't a true or false.
+                  keepMicVisibleDuringCalls: container.decodeLeniently(Bool.self, forKey: .keepMicVisibleDuringCalls)
+                      ?? defaults.keepMicVisibleDuringCalls)
     }
 
     /// A threshold within the range and on a step: the nearest one, the higher of two that are equally near. A file says it this way,

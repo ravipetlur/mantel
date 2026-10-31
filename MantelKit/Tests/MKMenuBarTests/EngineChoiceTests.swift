@@ -35,9 +35,9 @@ struct EngineChoiceTests {
 
     static let rows: [Row] = [
         Row(name: "a call keeps the mic visible", inputs: inputs(call: true, keepMic: true), kind: .approvals,
-            reason: "A call is active, so the mic indicator stays visible."),
+            reason: "The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible."),
         Row(name: "the call row comes before the person's choice", inputs: inputs(.wideSpacer, call: true, keepMic: true), kind: .approvals,
-            reason: "A call is active, so the mic indicator stays visible."),
+            reason: "The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible."),
         Row(name: "the person chose the switches", inputs: inputs(.systemSettingsSwitches), kind: .approvals, reason: "Chosen in Settings › Advanced."),
         Row(name: "the person chose the spacer", inputs: inputs(.wideSpacer), kind: .spacer, reason: "Chosen in Settings › Advanced."),
         Row(name: "automatic", inputs: inputs(.automatic), kind: .allowlist, reason: "Chosen automatically: macOS's allowlist works."),
@@ -179,7 +179,7 @@ struct EngineChoiceTests {
             EngineChoice.decide(Self.inputs(failedOut: [.allowlist])).reason,
         ]
         #expect(reasons == [
-            "A call is active, so the mic indicator stays visible.",
+            "The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible.",
             "Chosen in Settings › Advanced.",
             "Chosen automatically: macOS's allowlist works.",
             "Allowlist can't be used (it failed 3 times in a row; Refresh Menu Bar tries it again), so Mantel uses System Settings switches.",
@@ -273,7 +273,7 @@ struct EngineChoiceTests {
     @Test func callRowWinsOverUnattached() {
         let choice = Self.unattached(["com.example.one"], call: true, keepMic: true)
         #expect(choice.kind == .approvals)
-        #expect(choice.reason == "A call is active, so the mic indicator stays visible.")
+        #expect(choice.reason == "The mic or camera is in use, so Mantel uses System Settings switches, which leave macOS's mic and camera indicators visible.")
     }
 
     @Test func reasonCountsAppsAndNamesNone() {
