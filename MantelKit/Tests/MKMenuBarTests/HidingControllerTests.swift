@@ -254,12 +254,8 @@ struct HidingControllerTests {
         let ending = Task { await rig.controller.tearDown() }
         // Once the tear-down has said so (it can't go on until the switch is through), one tick of the clock is all the wait needs to
         // see that it is let go of: it doesn't go on to 2 s.
-        var tries = 0
-        while !(await rig.controller.isAbandoningConfirmation), tries < 2000 {
-            try? await Task.sleep(for: .milliseconds(2))
-            tries += 1
-        }
-        #expect(await rig.controller.isAbandoningConfirmation)
+        let controller = rig.controller
+        #expect(await waitUntil { await controller.isAbandoningConfirmation }, "the tear-down has said so")
         rig.clock.advance(by: HidingController.confirmationInterval)
         await switching.value
         await ending.value
@@ -494,11 +490,8 @@ struct HidingControllerTests {
         try? await Task.sleep(for: .milliseconds(30))
 
         let ending = Task { await rig.controller.tearDown() }
-        var tries = 0
-        while !(await rig.controller.isAbandoningConfirmation), tries < 2000 {
-            try? await Task.sleep(for: .milliseconds(2))
-            tries += 1
-        }
+        let controller = rig.controller
+        #expect(await waitUntil { await controller.isAbandoningConfirmation }, "the tear-down has said so")
         rig.clock.advance(by: HidingController.confirmationInterval)
         // (Driven by the clock, so that a choice that is carried out and waits for a confirmation fails the test and doesn't hang it.)
         await rig.driven {

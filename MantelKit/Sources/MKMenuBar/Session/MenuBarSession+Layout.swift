@@ -382,9 +382,18 @@ extension MenuBarSession {
     public func restoreOriginalLayout() async -> Result<Int, LayoutWriteError> {
         // A change held for a read with bars is the arrangement from before the restore: it is dropped, or it would be written over it.
         layoutDeferredCause = nil
-        guard let applier = layoutApplier else { return .failure(.needsGrant) }
+        guard let applier = layoutApplier else {
+            Log.warning("layout", "the original layout wasn't restored: \(LayoutWriteError.needsGrant.localizedDescription)")
+            return .failure(.needsGrant)
+        }
         let result = await applier.restoreOriginal()
-        if case .success(let placed) = result { Log.info("layout", "the original layout was restored (places put back: \(placed))") }
+        switch result {
+        case .success(let placed):
+            Log.info("layout", placed == 0 ? "the original layout was restored (nothing to put back)"
+                                           : "the original layout was restored (places put back: \(placed))")
+        case .failure(let error):
+            Log.warning("layout", "the original layout wasn't restored: \(error.localizedDescription)")
+        }
         layoutMemory = [:]
         tableRead = nil
         dragBefore = nil

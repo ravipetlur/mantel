@@ -133,11 +133,14 @@ struct MenuBarSessionRecordsTests {
 
         let session = rig.session
         let done = Mutex(false)
+        // The session sleeps on this clock itself (its polling, the trial), so what is waited for is one more than there are now: the
+        // quit's own bound, and the clock moves only once it sleeps.
+        let sleepersBefore = rig.clock.sleeperCount
         _ = Task {
             await session.finishSettingsMovesForQuit { order.withLock { $0.append("saved") } }
             done.withLock { $0 = true }
         }
-        #expect(await rig.clock.waitForSleepers(1, within: .seconds(5)))
+        #expect(await rig.clock.waitForSleepers(sleepersBefore + 1, within: .seconds(5)))
         rig.clock.advance(by: MenuBarSession.quitSettingsMovesLimit - .milliseconds(1))
         for _ in 0..<20 { await Task.yield() }
         #expect(done.withLock { $0 } == false, "inside the limit, the moves are waited for")

@@ -330,7 +330,6 @@ public final class PatientAX: AXReading {
 
     public func application(pid: pid_t) -> AXElementRef { inner.application(pid: pid) }
     public func press(_ element: AXElementRef) throws(AXReadError) { try inner.press(element) }
-    public func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { try inner.attributeNames(of: element) }
     public func actionNames(of element: AXElementRef) throws(AXReadError) -> [String] { try inner.actionNames(of: element) }
     public func perform(_ action: String, on element: AXElementRef) throws(AXReadError) { try inner.perform(action, on: element) }
 

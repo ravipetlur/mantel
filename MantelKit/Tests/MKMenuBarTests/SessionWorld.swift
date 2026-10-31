@@ -81,6 +81,8 @@ final class SessionWorld: Sendable {
         var hungSlotFrame: (bundleID: String, title: String)?
         /// MenuBarAgent has been started again: it is another process.
         var agentRestarted = false
+        /// How many reads of MenuBarAgent's bar have begun (each begins by asking for its application).
+        var agentReadsBegun = 0
         /// How many times the readers were told the app is quitting.
         var stopWaitingCalls = 0
         /// How many times the window list has been read.
@@ -132,6 +134,8 @@ final class SessionWorld: Sendable {
     /// Whether MenuBarAgent doesn't answer the list of its windows, though it runs: a read finds no bar, as one that timed out does.
     func setWindowsHung(_ hung: Bool) { state.withLock { $0.windowsHung = hung } }
     var windowsHung: Bool { state.withLock { $0.windowsHung } }
+    var agentReadsBegun: Int { state.withLock { $0.agentReadsBegun } }
+    func noteAgentReadBegun() { state.withLock { $0.agentReadsBegun += 1 } }
     var slotsHung: Bool { state.withLock { $0.slotsHung } }
     var hungSlotFrame: (bundleID: String, title: String)? { state.withLock { $0.hungSlotFrame } }
     /// MenuBarAgent is started again (a reset, or the system doing it): the scanner sees another process by its name, and the windows it
@@ -313,9 +317,11 @@ struct WorldAX: AXReading {
         try current.children(of: element)
     }
 
-    func application(pid: pid_t) -> AXElementRef { world.treeApplication(pid: pid, in: current) }
+    func application(pid: pid_t) -> AXElementRef {
+        if pid == world.fixture().pid(of: SessionWorld.agent) { world.noteAgentReadBegun() }
+        return world.treeApplication(pid: pid, in: current)
+    }
     func press(_ element: AXElementRef) throws(AXReadError) { try current.press(element) }
-    func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { try current.attributeNames(of: element) }
     func stopWaiting() { world.noteStopWaiting() }
 }
 

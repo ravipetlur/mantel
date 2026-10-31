@@ -87,15 +87,4 @@ struct AXClientTests {
         AXUIElementGetPid(reference.element, &pid)
         #expect(pid == 912)
     }
-
-    @Test func aReaderThatCantListAttributeNamesGivesNone() throws {
-        struct MinimalReader: AXReading {
-            func attribute(_ name: String, of element: AXElementRef) throws(AXReadError) -> AXValueBox { .none }
-            func children(of element: AXElementRef) throws(AXReadError) -> [AXElementRef] { [] }
-            func application(pid: pid_t) -> AXElementRef { AXElementRef(AXUIElementCreateApplication(pid)) }
-            func press(_ element: AXElementRef) throws(AXReadError) {}
-        }
-        let reader = MinimalReader()
-        #expect(try reader.attributeNames(of: reader.application(pid: 913)) == [])
-    }
 }

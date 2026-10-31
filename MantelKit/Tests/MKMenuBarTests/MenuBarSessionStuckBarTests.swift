@@ -293,7 +293,7 @@ struct MenuBarSessionStuckBarTests {
         case .appReset: #expect(world.activity.begin())
         case .sessionReset: break
         case .pendingWrite: await session.setLayoutPhase(pending: true, settling: false)
-        case .settlingWrite: await session.setLayoutPhase(pending: true, settling: true)
+        case .settlingWrite: await session.setLayoutPhase(pending: false, settling: true)
         case .locked: await session.sessionChanged(.screenLocked(true))
         case .asleep: await session.sessionChanged(.displaysAsleep(true))
         }
@@ -356,6 +356,34 @@ struct MenuBarSessionStuckBarTests {
         } else {
             #expect(await pollUntilRestarted(&world, polls: 6), "\(limit.rawValue)")
         }
+    }
+
+    /// What stops a recovery that is decided is looked at again right before MenuBarAgent is asked: a condition that begins while the
+    /// recovery waits for the list of the apps that are off. (Before it is decided, the scan's own gates keep the looks from deciding.)
+    @Test(arguments: [Limit.sessionReset, .pendingWrite, .settlingWrite, .locked, .asleep]) func aConditionThatBeginsAfterTheDecisionStopsTheRestart(_ limit: Limit) async throws {
+        var world = await started()
+        let rig = world.rig
+        #expect(await lidCycle(&world, missing: [vpn, sync]))
+        #expect(await poll(&world))
+        // The decision is made by the second look; the recovery waits for the list of the apps that are off.
+        let gate = Gate()
+        rig.turnedOff.holdQuestions(at: gate)
+        #expect(await poll(&world))
+        let turnedOff = rig.turnedOff
+        #expect(await waitUntil { turnedOff.questionsHeld == 1 })
+
+        var reset: Task<ResetOutcome, Never>?
+        if limit == .sessionReset {
+            let resetRestarter = FakeRestarter(log: world.log)
+            reset = Task { await rig.session.resetIfIdle(restarter: resetRestarter, replayJournal: {}) }
+            #expect(await waitUntil { resetRestarter.restarts == 1 })
+        } else {
+            await begin(limit, world)
+        }
+        gate.open()
+        #expect(await finishRecovery(&world))
+        #expect(world.restarter.restarts == 0, "\(limit.rawValue)")
+        if let reset { #expect(await reset.value == .done) }
     }
 
     // MARK: Interruptions

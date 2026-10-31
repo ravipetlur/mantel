@@ -57,15 +57,6 @@ struct MenuBarSessionUnattachedTests {
         return true
     }
 
-    /// Waits for something the session says, up to five seconds.
-    private func settled(_ condition: @escaping @Sendable () async -> Bool) async -> Bool {
-        for _ in 0..<500 {
-            if await condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        return false
-    }
-
     // MARK: Flagging
 
     @Test func aShownAppWithNoSlotUnderTheAllowlistIsFlagged() async throws {
@@ -97,11 +88,11 @@ struct MenuBarSessionUnattachedTests {
 
         // The screen is locked: it draws its own bar, and the reads in the meantime say nothing.
         locked.send(.screenLocked(true))
-        #expect(await settled { await rig.session.sessionNow.isAwake == false })
+        #expect(await waitUntil { await rig.session.sessionNow.isAwake == false })
         #expect(await poll(&world, 3))
         #expect(await world.flagged.isEmpty)
         locked.send(.screenLocked(false))
-        #expect(await settled { await rig.session.sessionNow.isAwake })
+        #expect(await waitUntil { await rig.session.sessionNow.isAwake })
 
         // The first read now is the first of a run, and a change of displays between ends it: no flag at the second.
         #expect(await poll(&world))

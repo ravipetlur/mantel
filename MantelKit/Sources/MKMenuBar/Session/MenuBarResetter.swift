@@ -10,10 +10,6 @@ public final class ResetActivity: Sendable {
 
     public init() {}
 
-    public var isUnderWay: Bool {
-        flag.withLock { $0 }
-    }
-
     /// Sets it. False, and nothing set, when it already was.
     public func begin() -> Bool {
         flag.withLock { flag in

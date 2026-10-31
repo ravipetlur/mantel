@@ -246,7 +246,7 @@ public actor IconClickDriver {
         return outcome
     }
 
-    /// Shows the icon without clicking, for the rehide delay (or until `endShows`). A second `show` of the same item restarts its delay.
+    /// Shows the icon without clicking, for the rehide delay. A second `show` of the same item restarts its delay.
     public func show(_ item: ItemID) async {
         let ticket = await session.revealIcons([item])
         let earlier = shows[item]
@@ -258,16 +258,6 @@ public actor IconClickDriver {
         if let earlier {
             earlier.task.cancel()
             await session.endIconReveal(earlier.ticket)
-        }
-    }
-
-    /// Puts away every icon `show` showed.
-    public func endShows() async {
-        let all = shows
-        shows = [:]
-        for (_, show) in all {
-            show.task.cancel()
-            await session.endIconReveal(show.ticket)
         }
     }
 

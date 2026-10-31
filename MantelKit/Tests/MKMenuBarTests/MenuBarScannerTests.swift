@@ -42,7 +42,6 @@ private struct SwitchingAX: AXReading {
 
     func application(pid: pid_t) -> AXElementRef { current.application(pid: pid) }
     func press(_ element: AXElementRef) throws(AXReadError) { try current.press(element) }
-    func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { try current.attributeNames(of: element) }
 }
 
 /// An app's items are read when the test lets them be: every read waits at a gate, and is counted when it begins.

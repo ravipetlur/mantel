@@ -123,5 +123,4 @@ final class SlowAX: AXReading {
 
     func application(pid: pid_t) -> AXElementRef { applicationOf(pid) }
     func press(_ element: AXElementRef) throws(AXReadError) { try tree.press(element) }
-    func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { try tree.attributeNames(of: element) }
 }

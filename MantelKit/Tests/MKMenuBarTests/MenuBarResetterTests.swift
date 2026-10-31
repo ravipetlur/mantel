@@ -20,21 +20,29 @@ struct MenuBarResetterTests {
         MenuBarResetter(session: rig.session, restarter: restarter, replayJournal: { log.add("replay") }, activity: activity)
     }
 
+    /// Reads the flag the way the product does, through `begin()`: a begin that is refused means a reset is under way. One that isn't has
+    /// set the flag, and is undone.
+    private func isUnderWay(_ activity: ResetActivity) -> Bool {
+        guard activity.begin() else { return true }
+        activity.end()
+        return false
+    }
+
     @Test func theActivityIsSetWhileAResetRuns() async throws {
         let (rig, _, log) = await started()
         let activity = ResetActivity()
         let gate = Gate()
         let restarter = FakeRestarter(log: log)
         restarter.whileRestarting { await gate.wait() }
-        #expect(!activity.isUnderWay)
+        #expect(!isUnderWay(activity))
 
         let running = Task { await resetter(rig, restarter: restarter, log: log, activity: activity).reset() }
         #expect(await waitUntil { restarter.restarts == 1 })
-        #expect(activity.isUnderWay, "while the menu bar is being restarted")
+        #expect(isUnderWay(activity), "while the menu bar is being restarted")
 
         gate.open()
         #expect(await running.value == .done)
-        #expect(!activity.isUnderWay)
+        #expect(!isUnderWay(activity))
     }
 
     @Test func aSecondResetIsRefusedAtOnce() async throws {
@@ -50,10 +58,10 @@ struct MenuBarResetterTests {
 
         #expect(second == .alreadyUnderWay)
         #expect(restarter.restarts == 1, "and it restarted nothing")
-        #expect(activity.isUnderWay, "and the first one's flag stays up")
+        #expect(isUnderWay(activity), "and the first one's flag stays up")
         gate.open()
         #expect(await first.value == .done)
-        #expect(!activity.isUnderWay)
+        #expect(!isUnderWay(activity))
     }
 
     @Test func theFlagComesDownWhenAResetFails() async throws {
@@ -65,16 +73,14 @@ struct MenuBarResetterTests {
         let outcome = await resetter(rig, restarter: restarter, log: log, activity: activity).reset()
 
         #expect(outcome == .failed("macOS's menu bar isn't running. Log out and back in to start it."))
-        #expect(!activity.isUnderWay)
+        #expect(!isUnderWay(activity))
     }
 
     @Test func theActivityIsSetOnceAtATime() {
         let activity = ResetActivity()
         #expect(activity.begin())
         #expect(!activity.begin(), "a second begin is refused")
-        #expect(activity.isUnderWay)
         activity.end()
-        #expect(!activity.isUnderWay)
-        #expect(activity.begin())
+        #expect(activity.begin(), "and after end() it is set again")
     }
 }

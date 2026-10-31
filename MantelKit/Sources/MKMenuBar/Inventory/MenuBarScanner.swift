@@ -292,7 +292,8 @@ public actor MenuBarScanner {
 
         if bars.notTrusted { return problem(.accessibilityNotGranted, at: now) }
         if bars.bars.isEmpty {
-            failureStreak += 1
+            // A scan that was cancelled while it waited for its turns read nothing because it was stopped: that is no failure of MenuBarAgent.
+            if !Task.isCancelled { failureStreak += 1 }
             return problem(.agentHasNoWindows, at: now)
         }
         failureStreak = 0
@@ -361,7 +362,8 @@ public actor MenuBarScanner {
     /// has had its whole time.
     private func readAgent(_ agent: RunningApp, layout displays: DisplayLayout, plan: AgentReadPlan, scanBegan: Date) async -> AgentRead {
         let reader = agentReader, gate = readGate, clock = clock
-        // A read cancelled in the queue says what a cut one does: it saw nothing, and may be short of what is there.
+        // A read cancelled in the queue says what a cut one does: it saw nothing, and may be short of what is there. That is no word on
+        // MenuBarAgent: a scan that was cancelled doesn't count its empty read as a failure of it (`performScan`).
         let cancelled = AgentRead(cut: true)
         var read = await gate.run(ifCancelled: cancelled) { await reader.read(agent: agent, layout: displays, plan: plan) }
         var attempt = 0

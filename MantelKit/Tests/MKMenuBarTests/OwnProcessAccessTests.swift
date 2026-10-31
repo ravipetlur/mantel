@@ -62,10 +62,6 @@ private struct RoutedFakeAX: AXReading {
     func press(_ element: AXElementRef) throws(AXReadError) {
         try access.call(about: element) { () throws(AXReadError) in try base.press(element) }
     }
-
-    func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] {
-        try access.call(about: element) { () throws(AXReadError) -> [String] in try base.attributeNames(of: element) }
-    }
 }
 
 /// Everything about Mantel's own process is asked on the main thread, and nothing about any other. Nothing here asks the Accessibility
@@ -120,10 +116,8 @@ struct OwnProcessAccessTests {
         #expect(world.hops.count == 1)
         _ = try reader.children(of: world.ax.ref(world.ownRoot))
         #expect(world.hops.count == 2)
-        _ = try reader.attributeNames(of: item)
-        #expect(world.hops.count == 3)
         try reader.press(item)
-        #expect(world.hops.count == 4)
+        #expect(world.hops.count == 3)
         #expect(world.ax.pressed == [world.ownItem], "and the press did reach the element")
     }
 
@@ -147,7 +141,6 @@ struct OwnProcessAccessTests {
 
         #expect(try reader.attribute(AXName.title, of: item) == .string("other"))
         _ = try reader.children(of: world.ax.ref(world.otherRoot))
-        _ = try reader.attributeNames(of: item)
         try reader.press(item)
         #expect(world.hops.count == 0)
         #expect(world.ax.pressed == [world.otherItem])
@@ -202,12 +195,11 @@ struct OwnProcessAccessTests {
 
         #expect(throws: AXReadError.failure(AXError.cannotComplete.rawValue)) { try client.attribute(AXName.role, of: own) }
         #expect(throws: AXReadError.failure(AXError.cannotComplete.rawValue)) { try client.children(of: own) }
-        #expect(throws: AXReadError.failure(AXError.cannotComplete.rawValue)) { try client.attributeNames(of: own) }
         #expect(throws: AXReadError.failure(AXError.cannotComplete.rawValue)) { try client.press(own) }
-        #expect(hops.heldBack == 4, "each call about this process went to the runner, by the client's own default of what this process is")
+        #expect(hops.heldBack == 3, "each call about this process went to the runner, by the client's own default of what this process is")
         // Making an element is not a call.
         #expect(client.application(pid: getpid()) == own)
-        #expect(hops.heldBack == 4)
+        #expect(hops.heldBack == 3)
     }
 
     @Test func aClientBuiltWithTheDefaultProcessCheckMakesCallsAboutAnotherProcessWhereItIs() {
@@ -217,7 +209,6 @@ struct OwnProcessAccessTests {
         let client = AXClient(ownProcess: OwnProcessAccess(runOnMainThread: held))
         let nobody = AXElementRef(AXUIElementCreateApplication(2_000_000_000))
         _ = try? client.attribute(AXName.role, of: nobody)
-        _ = try? client.attributeNames(of: nobody)
         #expect(hops.heldBack == 0)
     }
 

@@ -72,8 +72,6 @@ public protocol AXReading: Sendable {
     /// The top-level element of the app with this process ID. It asks nothing of the app.
     func application(pid: pid_t) -> AXElementRef
     func press(_ element: AXElementRef) throws(AXReadError)
-    /// The names of the attributes the element has, for the raw dump of a tree. A reader that can't say gives none.
-    func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String]
     /// The names of the actions the element offers (`AXPress`, `AXShowMenu`). A reader that can't say gives none.
     func actionNames(of element: AXElementRef) throws(AXReadError) -> [String]
     /// Performs one of the element's actions, by name. A reader that can't throws `noValue`.
@@ -97,7 +95,6 @@ extension AXReading {
     public func stopWaiting() {}
     public func keep(onlyProcesses pids: Set<pid_t>) {}
     public func expectAnswers(fromProcess pid: pid_t) {}
-    public func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] { [] }
     public func actionNames(of element: AXElementRef) throws(AXReadError) -> [String] { [] }
     public func perform(_ action: String, on element: AXElementRef) throws(AXReadError) { throw .noValue }
 }
@@ -154,17 +151,6 @@ public struct AXClient: AXReading {
             AXUIElementSetMessagingTimeout(element.element, timeout)
             let result = AXUIElementPerformAction(element.element, kAXPressAction as CFString)
             guard result == .success else { throw Self.map(result) }
-        }
-    }
-
-    public func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] {
-        let timeout = timeout
-        return try ownProcess.call(about: element) { () throws(AXReadError) -> [String] in
-            AXUIElementSetMessagingTimeout(element.element, timeout)
-            var names: CFArray?
-            let result = AXUIElementCopyAttributeNames(element.element, &names)
-            guard result == .success else { throw Self.map(result) }
-            return (names as? [String]) ?? []
         }
     }
 

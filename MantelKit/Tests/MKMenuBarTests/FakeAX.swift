@@ -98,14 +98,6 @@ final class FakeAX: AXReading {
         if let error { throw error }
     }
 
-    func attributeNames(of element: AXElementRef) throws(AXReadError) -> [String] {
-        let id = id(of: element)
-        return state.withLock { state in
-            guard let node = state.nodes[id] else { return [] }
-            return (Array(node.attributes.keys) + [AXName.children]).sorted()
-        }
-    }
-
     func actionNames(of element: AXElementRef) throws(AXReadError) -> [String] {
         let id = id(of: element)
         let outcome = state.withLock { state -> (error: AXReadError?, actions: [String]) in (state.nodes[id]?.actionsError, state.nodes[id]?.actions ?? []) }

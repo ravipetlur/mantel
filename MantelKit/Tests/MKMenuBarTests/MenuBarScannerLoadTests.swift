@@ -19,7 +19,8 @@ struct MenuBarScannerLoadTests {
         let slow: SlowAX
         let scanner: MenuBarScanner
 
-        init(patient: Bool, patience: AXPatience = .standard) {
+        /// `agentOnly`: no app but MenuBarAgent is running, so that what a scan reads is its bar alone.
+        init(patient: Bool, patience: AXPatience = .standard, agentOnly: Bool = false) {
             let fixture = fixture
             let clock = clock
             slow = SlowAX(fixture.ax, clock: clock)
@@ -27,7 +28,8 @@ struct MenuBarScannerLoadTests {
                 ? PatientAX(inner: slow, patience: patience, clock: clock, pidOf: { [tree = fixture.ax] in tree.ownerPID(of: $0) ?? 0 })
                 : slow
             let layout = fixture.layout
-            scanner = MenuBarScanner(ax: ax, extrasReader: AXAppExtrasReader(reader: AppExtrasReader(ax: ax)), runningApps: { fixture.running },
+            let running = fixture.running.filter { !agentOnly || $0.bundleID == MenuBarReader.menuBarAgentBundleID }
+            scanner = MenuBarScanner(ax: ax, extrasReader: AXAppExtrasReader(reader: AppExtrasReader(ax: ax)), runningApps: { running },
                                      layout: { layout }, ownBundleID: InventoryFixtures.ownBundleID, isTrusted: { true }, clock: clock,
                                      patience: patience, readLimit: 8)
         }
@@ -96,6 +98,23 @@ struct MenuBarScannerLoadTests {
         #expect(!byTheLook.isEmpty && byTheLook.allSatisfy { $0 == 1 }, "the look holds a turn while it waits: \(byTheLook)")
         #expect(!byTheSnapshot.isEmpty && byTheSnapshot.allSatisfy { $0 == 1 }, "so does the bar's read for a click: \(byTheSnapshot)")
         #expect(scanner.readGateCounts == (0, 0), "and the turn is given back")
+
+        // A scan's read of MenuBarAgent takes its turn too: with no other app running it is the only read, and it is the one that holds it.
+        let alone = Rig(patient: true, agentOnly: true)
+        let aloneAgent = alone.pid(MenuBarReader.menuBarAgentBundleID)
+        alone.slow.hang(aloneAgent)
+        let heldByTheScan = Mutex<[Int]>([])
+        let aloneScanner = alone.scanner
+        alone.slow.onTimeout { heldByTheScan.withLock { $0.append(aloneScanner.readGateCounts.running) } }
+        let scanning = Task { await aloneScanner.scan() }
+        // The first read found no window, and MenuBarAgent is asked again after a short wait.
+        #expect(await alone.clock.waitForSleepers(1, within: .seconds(5)))
+        let byTheScan = heldByTheScan.withLock { $0 }
+        alone.slow.release(aloneAgent)
+        alone.clock.advance(by: .milliseconds(250))
+        _ = await scanning.value
+        #expect(!byTheScan.isEmpty && byTheScan.allSatisfy { $0 == 1 }, "the scan's read of the bar holds a turn while it waits: \(byTheScan)")
+        #expect(aloneScanner.readGateCounts == (0, 0), "and gives it back")
     }
 
     // MARK: One app that hangs, on a Mac that isn't busy

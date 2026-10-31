@@ -36,6 +36,16 @@ public func waitUntil(_ limit: Duration = hungTestLimit, _ condition: @escaping 
     } ?? false
 }
 
+/// `waitUntil` for a condition that asks an actor.
+public func waitUntil(_ limit: Duration = hungTestLimit, _ condition: @escaping @Sendable () async -> Bool) async -> Bool {
+    await withinTimeLimit(limit) {
+        while !(await condition()) {
+            guard (try? await Task.sleep(for: .milliseconds(1))) != nil else { return false }
+        }
+        return true
+    } ?? false
+}
+
 extension FakeClock {
     /// `waitForSleepers`, but false, and not for ever, when that many don't come within `limit` of real time. A limit of a second or more
     /// is a bound on a wait that hangs, not on how long the sleepers take (see `withinTimeLimit`); a shorter one is a poll, which comes

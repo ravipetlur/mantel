@@ -84,9 +84,15 @@ struct MenuBarSessionDotsTests {
         rig.world.setCapacity(4)
         rig.extras.holdReads(at: gate)
         defer { gate.open() }
+        let readsOfTheAgentBefore = rig.world.agentReadsBegun
         let refreshing = Task { await rig.session.refresh() }
-        let extras = rig.extras
+        let (extras, world) = (rig.extras, rig.world)
+        let scanner = await rig.session.scanner
         #expect(await waitUntil { extras.readsHeld > 0 }, "the read of the narrow bar is under way")
+        // MenuBarAgent's bar is read beside the apps' items, and by the time the room is back it has been read as well: it has begun,
+        // and has given back its turn at the gate, so that the only turns that are held are the apps' reads that wait.
+        #expect(await waitUntil { world.agentReadsBegun > readsOfTheAgentBefore && scanner.readGateCounts.running == extras.readsHeld },
+                "MenuBarAgent's read of the narrow bar has been taken")
         rig.world.setCapacity(nil)
         rig.extras.holdReads(at: nil)
         gate.open()

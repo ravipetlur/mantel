@@ -102,7 +102,7 @@ jobs:
             swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-
 
       # make build runs xcodebuild -quiet, which prints only problems: any warning: or error: line fails the job. It
-      # builds the app and the test item, Debug, signed ad hoc with the placeholder bundle identifier of
+      # builds the app, Debug, signed ad hoc with the placeholder bundle identifier of
       # Config/Defaults.xcconfig (there is no Config/Local.xcconfig here).
       - name: Build the app (warning-free)
         run: |
