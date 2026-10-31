@@ -52,7 +52,10 @@ final class AppCoordinator {
                                                                    defaults: DefaultsJournalRestorer(access: defaultsAccess))
     /// The way of hiding icons that works through the "Allow in the Menu Bar" switches. Made when first used, for the same reason as the
     /// journal it keeps its changes in.
-    private(set) lazy var approvalsEngine = ApprovalsEngine(access: plist, grants: grants, journal: journal)
+    ///
+    /// It doesn't hide icons on macOS 27: macOS notices a change to the list, but doesn't hide the icons. System Settings' own flip does
+    /// something more, and apps that are off in the list still have their icons drawn. So it is never used until that is understood.
+    private(set) lazy var approvalsEngine = ApprovalsEngine(access: plist, grants: grants, journal: journal, hidesIcons: false)
     /// The Accessibility the scanner reads with, patient with a busy Mac (`PatientAX`). Held here so that quitting can tell it to stop waiting
     /// at the very start, from the quit itself and before anything that needs a thread of the pool (`beginQuit`).
     private let patientAX = PatientAX(inner: AXClient())

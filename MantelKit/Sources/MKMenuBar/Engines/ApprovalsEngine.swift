@@ -39,24 +39,31 @@ public actor ApprovalsEngine: HidingEngine {
     /// stop of its own, for the same reason.)
     static let noValueText = "macOS reported nothing for its “Allow in the Menu Bar” list. Mantel tries again with the next change"
 
+    /// What the person is told when the switches don't hide icons on this macOS (`hidesIcons` false).
+    static let doesntHideText = "On this version of macOS, changing the “Allow in the Menu Bar” switches from Mantel doesn't hide icons"
+
     private let access: PlistFileAccess
     private let grants: FileGrantStore
     private let journal: Journal
     private let clock: any Clock
+    /// Whether a change to the list hides icons on this macOS. When it doesn't, the engine is never available, so it is never chosen,
+    /// by the person or by Mantel, and the rows that depend on it say why.
+    private let hidesIcons: Bool
     private let turnstile = Turnstile()
     /// How many of the apps the last plan concealed this engine couldn't hide.
     private var unlisted = 0
 
-    public init(access: PlistFileAccess, grants: FileGrantStore, journal: Journal) {
-        self.init(access: access, grants: grants, journal: journal, clock: SystemClock())
+    public init(access: PlistFileAccess, grants: FileGrantStore, journal: Journal, hidesIcons: Bool) {
+        self.init(access: access, grants: grants, journal: journal, clock: SystemClock(), hidesIcons: hidesIcons)
     }
 
     /// With the clock the retry after a disagreement of the preferences service sleeps on.
-    init(access: PlistFileAccess, grants: FileGrantStore, journal: Journal, clock: any Clock) {
+    init(access: PlistFileAccess, grants: FileGrantStore, journal: Journal, clock: any Clock, hidesIcons: Bool = true) {
         self.access = access
         self.grants = grants
         self.journal = journal
         self.clock = clock
+        self.hidesIcons = hidesIcons
     }
 
     public nonisolated var kind: HidingEngineKind {
@@ -91,6 +98,7 @@ public actor ApprovalsEngine: HidingEngine {
     }
 
     public func availability() async -> EngineAvailability {
+        guard hidesIcons else { return .broken(Self.doesntHideText) }
         guard let url = await fileURL() else { return .needsPermission(Self.permissionText) }
         guard await foreignRecords().isEmpty else { return .broken(Self.leftoverText) }
         do throws(ListProblem) {

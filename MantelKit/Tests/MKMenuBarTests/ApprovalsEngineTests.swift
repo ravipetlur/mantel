@@ -37,7 +37,8 @@ private struct ApprovalsDesk: Sendable {
     ]
 
     static func make(entries: [BlobFixtures.Approval] = ApprovalsDesk.entries, service: ScriptedService = ScriptedService(.followsTheFile),
-                     grantTheFile: Bool = true, content: Data? = nil, engineClock: (any Clock)? = nil) async throws -> ApprovalsDesk {
+                     grantTheFile: Bool = true, content: Data? = nil, engineClock: (any Clock)? = nil,
+                     hidesIcons: Bool = true) async throws -> ApprovalsDesk {
         let folder = TemporaryFolder(prefix: "mantel-approvals")
         let clock = SteppingClock()
         let paths = MantelPaths(root: folder.url.appending(path: "Mantel", directoryHint: .isDirectory),
@@ -57,7 +58,7 @@ private struct ApprovalsDesk: Sendable {
         }
         let journal = Journal(file: paths.journalFile, clock: clock)
         let access = PlistFileAccess(journal: journal, paths: paths, grants: grants, codecs: PlistBlobCodecs.standard, io: service.io, clock: clock)
-        let engine = ApprovalsEngine(access: access, grants: grants, journal: journal, clock: engineClock ?? clock)
+        let engine = ApprovalsEngine(access: access, grants: grants, journal: journal, clock: engineClock ?? clock, hidesIcons: hidesIcons)
         return ApprovalsDesk(folder: folder, home: home, file: file, journal: journal, grants: grants, settings: settings, access: access,
                              service: service, engine: engine, clock: clock)
     }
@@ -152,6 +153,12 @@ struct ApprovalsEngineTests {
         // A list with nothing in it says nothing against its shape.
         let empty = try await ApprovalsDesk.make(entries: [])
         #expect(await empty.engine.availability() == .available)
+    }
+
+    @Test func switchesThatDontHideIconsAreNeverAvailable() async throws {
+        // On a macOS where changing the list hides nothing, the engine can't be used even with the file given and the list as expected.
+        let desk = try await ApprovalsDesk.make(hidesIcons: false)
+        #expect(await desk.engine.availability() == .broken(ApprovalsEngine.doesntHideText))
     }
 
     @Test func aKeyThatIsNotThereIsAChangedList() async throws {
